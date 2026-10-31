@@ -79,6 +79,30 @@ final class ClusterModel {
         }
     }
 
+    func searchLogs(_ query: LogQuery) async throws -> LogSearchResult? {
+        try await client?.searchLogs(query)
+    }
+
+    func followLogs(_ query: LogQuery) -> AsyncThrowingStream<LogEntry, Error>? {
+        client?.followClusterLogs(query)
+    }
+
+    func releases(service: String) async throws -> ClusterReleases? {
+        try await client?.clusterReleases(service: service)
+    }
+
+    func deploy(service: String, version: String) async throws -> String {
+        guard let client else { return "Not connected." }
+        let response = try await client.deploy(service: service, version: version)
+        return response.outcomes.map { "\($0.node): \($0.sha12 ?? $0.error ?? "?")" }.joined(separator: "\n")
+    }
+
+    func rollback(service: String, to sha12: String, node: String) async throws -> String {
+        guard let client else { return "Not connected." }
+        _ = try await client.rollback(service: service, to: sha12, node: node)
+        return "\(node): rolled back to \(sha12)"
+    }
+
     enum Action { case start, stop, restart }
 
     func perform(_ action: Action, on process: InstanceStatus) async {

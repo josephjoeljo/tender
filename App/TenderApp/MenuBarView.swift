@@ -47,7 +47,6 @@ struct MenuBarView: View {
                     openWindow(id: "dashboard")
                     NSApp.activate()
                 }
-                .disabled(true)
                 Button("Settings…") {
                     openSettings()
                     NSApp.activate()
