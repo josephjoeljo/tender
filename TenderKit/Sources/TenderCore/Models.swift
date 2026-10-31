@@ -130,3 +130,15 @@ public struct Release: Codable, Sendable, Equatable {
         self.createdAt = createdAt
     }
 }
+
+/// Response of the process endpoints.
+public struct ProcessList: Codable, Sendable, Equatable {
+    public var processes: [InstanceStatus]
+    /// Labels with Tender's prefix that aren't in the desired state.
+    public var orphans: [String]
+
+    public init(processes: [InstanceStatus], orphans: [String] = []) {
+        self.processes = processes
+        self.orphans = orphans
+    }
+}
