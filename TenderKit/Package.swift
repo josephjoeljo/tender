@@ -15,7 +15,7 @@ import PackageDescription
 
 let package = Package(
     name: "TenderKit",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     products: [
         .executable(name: "tenderd", targets: ["tenderd"]),
         .executable(name: "tender", targets: ["tender"]),
@@ -31,6 +31,9 @@ let package = Package(
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.21.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.60.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
+        .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
+        .package(url: "https://github.com/apple/swift-certificates.git", from: "1.5.0"),
     ],
     targets: [
         // MARK: 0 — Foundation
@@ -56,6 +59,12 @@ let package = Package(
         .target(name: "TenderActorSystem", dependencies: [
             "TenderCore",
             .product(name: "Logging", package: "swift-log"),
+            .product(name: "NIOCore", package: "swift-nio"),
+            .product(name: "NIOPosix", package: "swift-nio"),
+            .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+            .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            .product(name: "NIOTLS", package: "swift-nio"),
+            .product(name: "X509", package: "swift-certificates"),
         ]),
         .target(name: "TenderAgent", dependencies: [
             "TenderCore", "TenderProtocol", "TenderActorSystem", "LaunchdKit", "ProcessMetrics", "FileWatch", "LogTail",
@@ -69,7 +78,11 @@ let package = Package(
             "TenderCore",
             .product(name: "GRDB", package: "GRDB.swift"),
         ]),
-        .target(name: "TenderPKI", dependencies: ["TenderCore"]),
+        .target(name: "TenderPKI", dependencies: [
+            "TenderCore",
+            .product(name: "Crypto", package: "swift-crypto"),
+            .product(name: "X509", package: "swift-certificates"),
+        ]),
         .target(name: "TenderScheduler", dependencies: ["TenderCore"]),
         .target(name: "TenderMetrics", dependencies: ["TenderCore"]),
         .target(name: "TenderClient", dependencies: [
@@ -98,6 +111,14 @@ let package = Package(
         ]),
 
         // MARK: Tests
+        .testTarget(name: "TenderTransportTests", dependencies: [
+            "TenderActorSystem", "TenderProtocol", "TenderPKI", "TenderCore",
+        ]),
+        .testTarget(name: "TenderPKITests", dependencies: [
+            "TenderPKI", "TenderCore",
+            .product(name: "Crypto", package: "swift-crypto"),
+            .product(name: "X509", package: "swift-certificates"),
+        ]),
         .testTarget(name: "ProcessMetricsTests", dependencies: ["ProcessMetrics"]),
         .testTarget(name: "LogTailTests", dependencies: ["LogTail", "LaunchdKit"]),
         .testTarget(name: "TenderCoreTests", dependencies: ["TenderCore"]),
