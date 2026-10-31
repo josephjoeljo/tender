@@ -8,7 +8,7 @@ struct Tender: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
-        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self]
+        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Daemon.self]
     )
 }
 
