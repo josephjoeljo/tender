@@ -2,11 +2,27 @@ import SwiftUI
 
 @main
 struct TenderApp: App {
-    @State private var model = ClusterModel()
+    @State private var model: ClusterModel
+
+    init() {
+        #if DEBUG
+        // Shows sample data, with no head: TENDER_APP_PREVIEW=healthy|degraded|many
+        switch ProcessInfo.processInfo.environment["TENDER_APP_PREVIEW"] {
+        case "healthy": _model = State(initialValue: .previewHealthy)
+        case "degraded": _model = State(initialValue: .previewDegraded)
+        case "many": _model = State(initialValue: .previewMany)
+        default: _model = State(initialValue: ClusterModel())
+        }
+        #else
+        _model = State(initialValue: ClusterModel())
+        #endif
+    }
 
     var body: some Scene {
-        MenuBarExtra("Tender", systemImage: model.health.symbol) {
+        MenuBarExtra {
             MenuBarView(model: model)
+        } label: {
+            MenuBarLabel(model: model)
         }
         .menuBarExtraStyle(.window)
 

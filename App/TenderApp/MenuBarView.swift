@@ -119,6 +119,12 @@ extension ClusterModel {
                                  process("mongod", 0, "mac-1", .running), process("worker", 0, "mac-2", .running)])
     }
 
+    static var previewMany: ClusterModel {
+        ClusterModel(previewHealth: .degraded(downNodes: 1, crashed: 0),
+                     nodes: (1...6).map { node("mac-\($0)", up: $0 != 4, processes: 1) },
+                     processes: (1...6).filter { $0 != 4 }.map { process("api", 0, "mac-\($0)", .running) })
+    }
+
     static var previewNotConfigured: ClusterModel {
         ClusterModel(previewHealth: .notConfigured, nodes: [], processes: [])
     }

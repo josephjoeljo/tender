@@ -802,6 +802,28 @@ private struct FakeSource: ReleaseSource {
     #expect(ClusterHealth.notConfigured.symbol == "leaf")
 }
 
+@Test func metersReflectEachNode() {
+    func node(_ name: String, up: Bool = true) -> NodeSummary {
+        NodeSummary(info: NodeInfo(id: NodeID(name), version: "1", macOS: "x", hardware: "y"), up: up,
+                    lastHeartbeatAge: nil, instanceCount: 0, crashedCount: 0)
+    }
+    func process(_ name: String, _ state: InstanceState) -> InstanceStatus {
+        InstanceStatus(service: "a", instance: 0, node: NodeID(name), state: state)
+    }
+    let meters = NodeMeter.meters(
+        nodes: [node("ok"), node("hurt"), node("gone", up: false), node("idle"), node("off"), node("joels-macbook-pro")],
+        processes: [process("ok", .running), process("ok", .starting),
+                    process("hurt", .running), process("hurt", .crashed), process("hurt", .stopped),
+                    process("gone", .running), process("off", .stopped)])
+    #expect(meters[0] == NodeMeter(label: "ok", fraction: 1, level: .healthy))
+    #expect(meters[1] == NodeMeter(label: "hurt", fraction: 0.5, level: .degraded), "stopped isn't a failure")
+    #expect(meters[2] == NodeMeter(label: "gone", fraction: 1, level: .down), "a stale report doesn't matter once it's down")
+    #expect(meters[3].level == .healthy)
+    #expect(meters[4].level == .healthy, "stopping everything on purpose is healthy")
+    #expect(meters[5].label == "joels-m…")
+    #expect(NodeMeter.shortLabel("exactly8") == "exactly8")
+}
+
 @Test func contextStorePersistsAndClears() throws {
     let env = try makeEnvironment()
     defer { try? FileManager.default.removeItem(at: env.root) }
