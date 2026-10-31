@@ -186,8 +186,18 @@ public final class HeadServices: Sendable {
         guard CertificateAuthority.isValidNodeID(request.nodeID.rawValue) else {
             throw NodeCallError(code: "invalid_node", message: "'\(request.nodeID)' isn't a valid node ID.", httpStatus: 400)
         }
-        guard request.nodeID != options.nodeID else {
-            throw NodeCallError(code: "invalid_node", message: "'\(request.nodeID)' is the head's own name.", httpStatus: 409)
+        // A certificate's SAN is its node ID, so a joiner must not be able to pick a name
+        // the head answers to, or take over a node that already exists.
+        guard request.nodeID != options.nodeID,
+              !options.advertisedNames.contains(request.nodeID.rawValue),
+              options.apiHost != request.nodeID.rawValue,
+              request.nodeID.rawValue != "127.0.0.1", request.nodeID.rawValue.lowercased() != "localhost" else {
+            throw NodeCallError(code: "invalid_node", message: "'\(request.nodeID)' is a name of the head.", httpStatus: 409)
+        }
+        guard await state.address(of: request.nodeID) == nil else {
+            throw NodeCallError(code: "node_exists",
+                                message: "Node '\(request.nodeID)' already exists. Run `tender node revoke \(request.nodeID)` first if it's being replaced.",
+                                httpStatus: 409)
         }
         // Validate the CSR before spending the token, so that a typo doesn't burn it.
         let certificate: String

@@ -280,6 +280,29 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     await head.stop()
 }
 
+@Test func joinCantTakeAnExistingNameOrAHeadName() async throws {
+    try await withCluster { head, _ async throws in
+        let second = try Daemon(node: "other", head: false)
+        try await second.start()
+        defer { second.cleanup() }
+        let address = "127.0.0.1:\(head.apiPort)"
+        for (name, code) in [("worker", "node_exists"), ("head", "invalid_node"), ("127.0.0.1", "invalid_node"), ("localhost", "invalid_node")] {
+            let token = try await head.client.createJoinToken()
+            do {
+                _ = try await second.client.join(head: address, token: token.token, nodeID: name)
+                Issue.record("\(name) must be refused")
+            } catch let error as TenderClientError {
+                #expect(error.description.contains(code == "node_exists" ? "already exists" : "name of the head"))
+            }
+        }
+        // A revoked name is free again.
+        _ = try await head.client.revokeNode("worker")
+        let token = try await head.client.createJoinToken()
+        #expect(try await second.client.join(head: address, token: token.token, nodeID: "worker").nodeID == NodeID("worker"))
+        await second.stop()
+    }
+}
+
 @Test func joinTwiceIsRefused() async throws {
     try await withCluster { head, worker async throws in
         let token = try await head.client.createJoinToken()
@@ -444,4 +467,34 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     let summaries = await state.summaries()
     #expect(summaries.map(\.info.id) == [NodeID("old")])
     #expect(summaries.first?.up == false)
+}
+
+// MARK: Health
+
+@Test func healthSummarizesTheCluster() {
+    func node(_ up: Bool) -> NodeSummary {
+        NodeSummary(info: NodeInfo(id: NodeID("n"), version: "1", macOS: "x", hardware: "y"), up: up,
+                    lastHeartbeatAge: nil, instanceCount: 0, crashedCount: 0)
+    }
+    let crashed = InstanceStatus(service: "a", instance: 0, node: NodeID("n"), state: .crashed)
+    let running = InstanceStatus(service: "a", instance: 0, node: NodeID("n"), state: .running)
+    #expect(ClusterHealth(nodes: NodeList(nodes: [node(true)]), processes: ProcessList(processes: [running])) == .healthy)
+    let downAndCrashed = ClusterHealth(nodes: NodeList(nodes: [node(false), node(true)]), processes: ProcessList(processes: [crashed]))
+    #expect(downAndCrashed == .degraded(downNodes: 1, crashed: 1))
+    #expect(downAndCrashed.summary == "1 node down, 1 crashed")
+    #expect(ClusterHealth.notConfigured.symbol == "leaf")
+}
+
+@Test func contextStorePersistsAndClears() throws {
+    let env = try makeEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let store = ClientContextStore.standard(environment: ["TENDER_CONFIG_DIR": env.root.path(percentEncoded: false)])
+    #expect(try store.load() == nil)
+    try store.save(ClientContext(head: "h:1", caPEM: "pem"), token: "t")
+    #expect(try store.load()?.token == "t")
+    #expect(try store.load()?.context.head == "h:1")
+    let onDisk = try String(contentsOf: env.root.appending(path: "context.json"), encoding: .utf8)
+    #expect(!onDisk.contains("\"t\""), "the token belongs in the secret store")
+    try store.clear()
+    #expect(try store.load() == nil)
 }
