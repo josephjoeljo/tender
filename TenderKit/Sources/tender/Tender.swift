@@ -242,7 +242,8 @@ extension Tender {
         }
 
         private func runCluster(client: TenderClient, query: LogQuery) async throws {
-            let result = try await client.searchLogs(query)
+            // `-n 0` means no history: only new lines when following.
+            let result = lines == 0 ? LogSearchResult(entries: []) : try await client.searchLogs(query)
             if options.json, !follow {
                 print(try options.encode(result))
                 return
