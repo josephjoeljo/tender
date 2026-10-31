@@ -88,6 +88,10 @@ let package = Package(
 
         // MARK: Tests
         .testTarget(name: "TenderCoreTests", dependencies: ["TenderCore"]),
+        .testTarget(name: "TenderAgentTests", dependencies: [
+            "TenderAgent", "TenderCore", "LaunchdKit",
+            .product(name: "GRDB", package: "GRDB.swift"),
+        ]),
         .testTarget(name: "LaunchdKitTests", dependencies: ["LaunchdKit"], resources: [.copy("Fixtures")]),
     ]
 )
