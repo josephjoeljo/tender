@@ -8,6 +8,8 @@ import PackageDescription
 //                   TenderMetrics, TenderMCP, TenderClient, TenderHead
 //   3 Executables → tenderd, tender
 //
+// TenderApp is a separate Xcode project (App/) on top of this package. It imports only TenderClient and TenderCore.
+//
 // Hummingbird and AsyncHTTPClient carry the local HTTP/JSON API (Unix socket).
 // Other networking deps (swift-nio-ssl, MCP swift-sdk, swift-prometheus) are
 // added in milestone 2. Head<->worker traffic uses Swift
