@@ -105,6 +105,9 @@ private func apiErrorCode(_ call: () async throws -> ProcessList) async -> Strin
         bad.program = .executable("relative/path")
         #expect(await apiErrorCode { try await client.start(bad) } == "invalid_executable")
         bad = sleeper
+        bad.user = "root"
+        #expect(await apiErrorCode { try await client.start(bad) } == "invalid_user")
+        bad = sleeper
         bad.instances = 0
         #expect(await apiErrorCode { try await client.start(bad) } == "invalid_instances")
 

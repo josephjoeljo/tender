@@ -9,6 +9,7 @@ import Testing
 
 @Test func environmentPaths() {
     let env = TenderEnvironment.production
+    #expect(env.configDirectory.path() == "/etc/tender")
     #expect(env.stateDB.path() == "/opt/tender/state.db")
     #expect(env.socketPath.path() == "/opt/tender/run/tender.sock")
     #expect(env.stdoutLog(service: "api", instance: 2).path() == "/var/log/tender/api/2.out.log")

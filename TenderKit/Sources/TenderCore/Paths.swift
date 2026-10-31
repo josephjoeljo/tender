@@ -10,6 +10,7 @@ public struct TenderEnvironment: Sendable {
     public let root: URL
     public let logsDirectory: URL
     public let plistDirectory: URL
+    public let configDirectory: URL
     public let labelPrefix = "com.olympsis.tender"
     /// Every label below `<serviceLabelPrefix>.` belongs to a managed process.
     public let serviceLabelPrefix: String
@@ -19,12 +20,14 @@ public struct TenderEnvironment: Sendable {
         root: URL,
         logsDirectory: URL,
         plistDirectory: URL,
+        configDirectory: URL? = nil,
         serviceLabelPrefix: String = "com.olympsis.tender.svc"
     ) {
         self.mode = mode
         self.root = root
         self.logsDirectory = logsDirectory
         self.plistDirectory = plistDirectory
+        self.configDirectory = configDirectory ?? root.appending(path: "config")
         self.serviceLabelPrefix = serviceLabelPrefix
     }
 
@@ -43,7 +46,8 @@ public struct TenderEnvironment: Sendable {
         mode: .production,
         root: URL(filePath: "/opt/tender"),
         logsDirectory: URL(filePath: "/var/log/tender"),
-        plistDirectory: URL(filePath: "/Library/LaunchDaemons")
+        plistDirectory: URL(filePath: "/Library/LaunchDaemons"),
+        configDirectory: URL(filePath: "/etc/tender")
     )
 
     public static var development: TenderEnvironment {

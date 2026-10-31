@@ -10,9 +10,22 @@ extension Tender {
             subcommands: [Install.self, Uninstall.self]
         )
 
-        /// Production install (`--system`) arrives with milestone 1 step G.
-        static func requireDev(_ dev: Bool) throws {
-            guard dev else { throw ValidationError("Only --dev is supported for now.") }
+        struct Mode: ParsableArguments {
+            @Flag(help: "Per-user install: ~/Library/LaunchAgents and the gui/<uid> domain.")
+            var dev = false
+
+            @Flag(help: "Production install: /opt/tender, /Library/LaunchDaemons and the system domain. Needs root.")
+            var system = false
+
+            func validate() throws {
+                guard dev != system else { throw ValidationError("Pass exactly one of --dev or --system.") }
+            }
+
+            var environment: TenderEnvironment { system ? .production : .development }
+        }
+
+        static func requireRoot(_ command: String) throws {
+            guard getuid() == 0 else { throw ValidationError("--system needs root. Run: sudo tender daemon \(command) --system") }
         }
 
         static func bootoutAndWait(_ launchctl: Launchctl, label: String) async throws {
@@ -27,50 +40,110 @@ extension Tender {
             }
         }
 
+        /// Replaces the daemon's job with the plist and waits for its socket.
+        static func load(plist: URL, environment: TenderEnvironment) async throws {
+            let label = environment.agentLabel
+            let launchctl = Launchctl(domain: .forEnvironment(environment))
+            try await bootoutAndWait(launchctl, label: label)
+            try await launchctl.enable(label: label)
+            try await launchctl.bootstrap(plistURL: plist)
+
+            let socket = environment.socketPath.path(percentEncoded: false)
+            for _ in 0..<100 where !FileManager.default.fileExists(atPath: socket) {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            guard FileManager.default.fileExists(atPath: socket) else {
+                let log = environment.logsDirectory.appending(path: "tenderd.err.log").path(percentEncoded: false)
+                throw ValidationError("tenderd did not open \(socket). See \(log)")
+            }
+        }
+
         struct Install: AsyncParsableCommand {
             static let configuration = CommandConfiguration(
                 abstract: "Run tenderd under launchd so it survives logout and reboot. Re-running upgrades it."
             )
 
-            @Flag(help: "Per-user install: ~/Library/LaunchAgents and the gui/<uid> domain.")
-            var dev = false
+            @OptionGroup var mode: Mode
 
             @Option(help: "Path to the tenderd binary. Defaults to the one next to this `tender`.")
             var tenderdPath: String?
 
+            @Flag(help: "With --system: print what would be done and change nothing. Doesn't need root.")
+            var dryRun = false
+
+            func validate() throws {
+                if dryRun, !mode.system { throw ValidationError("--dry-run only applies to --system.") }
+            }
+
             func run() async throws {
-                try Daemon.requireDev(dev)
-                let environment = TenderEnvironment.development
                 let tenderd = try tenderdPath ?? Self.siblingTenderd()
                 guard FileManager.default.isExecutableFile(atPath: tenderd) else {
                     throw ValidationError("'\(tenderd)' is not executable. Pass --tenderd-path.")
                 }
+                if mode.system {
+                    try await installSystem(tenderd: tenderd)
+                } else {
+                    try await installDev(tenderd: tenderd)
+                }
+            }
 
-                let label = environment.agentLabel
+            private func installDev(tenderd: String) async throws {
+                let environment = TenderEnvironment.development
                 let files = FileManager.default
                 try files.createDirectory(at: environment.logsDirectory, withIntermediateDirectories: true)
                 try files.createDirectory(at: environment.plistDirectory, withIntermediateDirectories: true)
-                let plist = environment.plistPath(label: label)
+                let plist = environment.plistPath(label: environment.agentLabel)
                 try PlistRenderer().render(
-                    label: label,
+                    label: environment.agentLabel,
                     programArguments: [tenderd, "--role", "worker", "--dev"],
                     stdoutPath: environment.logsDirectory.appending(path: "tenderd.out.log").path(percentEncoded: false),
                     stderrPath: environment.logsDirectory.appending(path: "tenderd.err.log").path(percentEncoded: false)
                 ).write(to: plist, options: .atomic)
+                try await Daemon.load(plist: plist, environment: environment)
+                print("Installed \(environment.agentLabel) running \(tenderd)")
+            }
 
-                let launchctl = Launchctl(domain: .forEnvironment(environment))
-                try await Daemon.bootoutAndWait(launchctl, label: label)
-                try await launchctl.enable(label: label)
-                try await launchctl.bootstrap(plistURL: plist)
+            private func installSystem(tenderd: String) async throws {
+                if !dryRun { try Daemon.requireRoot("install") }
+                let plan = SystemInstallPlan()
+                let environment = plan.environment
+                let commands = try plan.commands(
+                    users: SystemInstallPlan.parseIDs(try await Self.output("/usr/bin/dscl", [".", "-list", "/Users", "UniqueID"])),
+                    groups: SystemInstallPlan.parseIDs(try await Self.output("/usr/bin/dscl", [".", "-list", "/Groups", "PrimaryGroupID"])),
+                    tenderdSource: tenderd
+                )
+                let plist = environment.plistPath(label: environment.agentLabel)
 
-                let socket = environment.socketPath.path(percentEncoded: false)
-                for _ in 0..<100 where !files.fileExists(atPath: socket) {
-                    try await Task.sleep(for: .milliseconds(100))
+                if dryRun {
+                    commands.forEach { print($0) }
+                    print("write \(plist.path(percentEncoded: false)) (root:wheel 644):")
+                    print(String(decoding: try plan.renderDaemonPlist(), as: UTF8.self))
+                    print("launchctl bootout system/\(environment.agentLabel)")
+                    print("launchctl enable system/\(environment.agentLabel)")
+                    print("launchctl bootstrap system \(plist.path(percentEncoded: false))")
+                    return
                 }
-                guard files.fileExists(atPath: socket) else {
-                    throw ValidationError("tenderd did not open \(socket). See \(environment.logsDirectory.path(percentEncoded: false))tenderd.err.log")
+
+                for command in commands {
+                    let result = try await ProcessLaunchctlRunner.runTool(executable: command.executable, arguments: command.arguments)
+                    guard result.exitCode == 0 else {
+                        throw SystemInstallError.commandFailed(command.description, result.stderr)
+                    }
                 }
-                print("Installed \(label) running \(tenderd)")
+                try plan.renderDaemonPlist().write(to: plist, options: .atomic)
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o644, .ownerAccountID: 0, .groupOwnerAccountID: 0],
+                    ofItemAtPath: plist.path(percentEncoded: false))
+                try await Daemon.load(plist: plist, environment: environment)
+                print("Installed \(environment.agentLabel) running \(plan.installedDaemon.path(percentEncoded: false))")
+            }
+
+            private static func output(_ executable: String, _ arguments: [String]) async throws -> String {
+                let result = try await ProcessLaunchctlRunner.runTool(executable: executable, arguments: arguments)
+                guard result.exitCode == 0 else {
+                    throw SystemInstallError.commandFailed(([executable] + arguments).joined(separator: " "), result.stderr)
+                }
+                return result.stdout
             }
 
             private static func siblingTenderd() throws -> String {
@@ -83,15 +156,14 @@ extension Tender {
 
         struct Uninstall: AsyncParsableCommand {
             static let configuration = CommandConfiguration(
-                abstract: "Remove tenderd's launchd job. Managed services keep running."
+                abstract: "Remove tenderd's launchd job. Managed services keep running, and data and the service account stay."
             )
 
-            @Flag(help: "Per-user install.")
-            var dev = false
+            @OptionGroup var mode: Mode
 
             func run() async throws {
-                try Daemon.requireDev(dev)
-                let environment = TenderEnvironment.development
+                if mode.system { try Daemon.requireRoot("uninstall") }
+                let environment = mode.environment
                 let label = environment.agentLabel
                 try await Daemon.bootoutAndWait(Launchctl(domain: .forEnvironment(environment)), label: label)
                 try? FileManager.default.removeItem(at: environment.plistPath(label: label))

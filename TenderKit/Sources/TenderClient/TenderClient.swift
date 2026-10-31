@@ -19,8 +19,8 @@ public enum TenderClientError: Error, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .daemonUnreachable(let path, _):
-            "Can't reach tenderd at \(path). Is it running? Try `tender daemon install --dev`."
+        case .daemonUnreachable(let path, let underlying):
+            "Can't reach tenderd at \(path) (\(underlying)). Is it running? Try `tender daemon install --dev`, or sudo for a production daemon."
         case .api(_, _, let message): message
         case .invalidResponse(let detail): "Unexpected response from tenderd: \(detail)"
         }

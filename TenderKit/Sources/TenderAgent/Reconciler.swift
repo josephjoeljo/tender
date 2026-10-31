@@ -25,6 +25,16 @@ public enum ReconcileAction: Sendable, Equatable {
     }
 }
 
+enum ReconcileApplyError: Error, CustomStringConvertible {
+    case unknownUser(String)
+
+    var description: String {
+        switch self {
+        case .unknownUser(let user): "The account '\(user)' doesn't exist. Did `tender daemon install --system` run?"
+        }
+    }
+}
+
 public struct ReconcileFailure: Sendable, Equatable {
     public var label: String
     public var message: String
@@ -318,16 +328,27 @@ public actor Reconciler {
         try files.createDirectory(at: environment.plistDirectory, withIntermediateDirectories: true)
         if let parsed = try PropertyListSerialization.propertyList(from: plist, format: nil) as? [String: Any],
            let stdout = parsed["StandardOutPath"] as? String {
-            try files.createDirectory(at: URL(filePath: stdout).deletingLastPathComponent(),
-                                      withIntermediateDirectories: true)
+            let logs = URL(filePath: stdout).deletingLastPathComponent()
+            try files.createDirectory(at: logs, withIntermediateDirectories: true)
+            if let user = parsed["UserName"] as? String { try giveOwnership(of: logs, to: user) }
         }
         try plist.write(to: plistURL, options: .atomic)
+        // The plist holds the service's environment, which can include secrets.
+        try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plistURL.path(percentEncoded: false))
         // bootstrap refuses a label left disabled, for example by a manual `launchctl disable`.
         try await launchd.enable(label: label)
         do {
             try await launchd.bootstrap(plistURL: plistURL)
         } catch LaunchctlError.alreadyLoaded {
             // Someone else loaded it first. That is the state we wanted.
+        }
+    }
+
+    /// launchd opens the log files as the job's user, who must be able to write there.
+    private func giveOwnership(of url: URL, to user: String) throws {
+        guard let account = getpwnam(user) else { throw ReconcileApplyError.unknownUser(user) }
+        guard chown(url.path(percentEncoded: false), account.pointee.pw_uid, account.pointee.pw_gid) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
 

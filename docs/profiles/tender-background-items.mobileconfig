@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>PayloadDisplayName</key>
+            <string>Tender Background Items</string>
+            <key>PayloadIdentifier</key>
+            <string>com.olympsis.tender.profile.background-items.rules</string>
+            <key>PayloadType</key>
+            <string>com.apple.servicemanagement</string>
+            <key>PayloadUUID</key>
+            <string>6F1C3A52-8E0B-4D37-9A61-2B7E4C90D115</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>Rules</key>
+            <array>
+                <dict>
+                    <key>Comment</key>
+                    <string>Tender's daemon and the processes it manages</string>
+                    <key>RuleType</key>
+                    <string>LabelPrefix</string>
+                    <key>RuleValue</key>
+                    <string>com.olympsis.tender.</string>
+                </dict>
+            </array>
+        </dict>
+    </array>
+    <key>PayloadDescription</key>
+    <string>Allows launchd jobs labelled com.olympsis.tender.* without Background Items notifications.</string>
+    <key>PayloadDisplayName</key>
+    <string>Tender Background Items</string>
+    <key>PayloadIdentifier</key>
+    <string>com.olympsis.tender.profile.background-items</string>
+    <key>PayloadScope</key>
+    <string>System</string>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadUUID</key>
+    <string>A2D84E17-3B5C-4F09-8C72-91E6B03F7A44</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+</dict>
+</plist>

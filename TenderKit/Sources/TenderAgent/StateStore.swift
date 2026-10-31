@@ -28,7 +28,12 @@ public struct StateStore: Sendable {
 
     public init(environment: TenderEnvironment) throws {
         try FileManager.default.createDirectory(at: environment.root, withIntermediateDirectories: true)
-        pool = try DatabasePool(path: environment.stateDB.path(percentEncoded: false))
+        // Specs can hold secrets in their environment. SQLite gives the -wal and
+        // -shm files the mode of the database, so it has to be private from the start.
+        let path = environment.stateDB.path(percentEncoded: false)
+        close(open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600))
+        chmod(path, 0o600)
+        pool = try DatabasePool(path: path)
         labelFor = { environment.serviceLabel(service: $0, instance: $1) }
         try Self.migrator.migrate(pool)
     }

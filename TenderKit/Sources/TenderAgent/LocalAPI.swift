@@ -190,6 +190,9 @@ struct ProcessController: Sendable {
             throw APIFailure(status: .badRequest, code: "invalid_instances",
                              message: "instances must be between 1 and 64.")
         }
+        guard spec.user != "root" else {
+            throw APIFailure(status: .badRequest, code: "invalid_user", message: "Managed processes never run as root.")
+        }
         let path: String
         switch spec.program {
         case .executable(let executable):

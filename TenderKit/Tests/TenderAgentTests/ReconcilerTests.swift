@@ -104,6 +104,11 @@ private let plistB = Data("b".utf8)
     #expect(first.failures.isEmpty)
     #expect(FileManager.default.fileExists(atPath: h.env.plistPath(label: h.label()).path(percentEncoded: false)))
     #expect(FileManager.default.fileExists(atPath: h.env.logDirectory(service: "api").path(percentEncoded: false)))
+    let privatePaths = [h.env.plistPath(label: h.label()), h.env.stateDB]
+    for url in privatePaths {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path(percentEncoded: false))
+        #expect(attributes[.posixPermissions] as? Int == 0o600)
+    }
 
     await h.launchd.resetCalls()
     let second = try await h.reconciler.reconcile()

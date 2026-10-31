@@ -62,8 +62,11 @@ extension Tender {
         @Option(name: .customLong("env"), help: "Environment variable as KEY=VALUE. Repeatable.")
         var environment: [String] = []
 
-        @Option(help: "Working directory. Defaults to the current directory.")
+        @Option(help: "Working directory. Defaults to /.")
         var cwd: String?
+
+        @Option(help: "Account to run as in production. Ignored in dev mode.")
+        var user = ServiceSpec.defaultUser
 
         @OptionGroup var options: CommonOptions
 
@@ -80,8 +83,9 @@ extension Tender {
                 program: .executable(try Self.resolve(executable)),
                 arguments: Array(command.dropFirst()),
                 environment: try Self.parse(environment),
-                workingDirectory: cwd ?? FileManager.default.currentDirectoryPath,
-                instances: instances
+                workingDirectory: cwd,
+                instances: instances,
+                user: user
             )
             try await options.execute { try await $0.start(spec) }
         }

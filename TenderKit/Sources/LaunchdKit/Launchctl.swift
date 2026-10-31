@@ -58,11 +58,16 @@ public struct ProcessLaunchctlRunner: LaunchctlRunning {
     public init() {}
 
     public func run(_ arguments: [String]) async throws -> CommandResult {
+        try await Self.runTool(executable: "/bin/launchctl", arguments: arguments)
+    }
+
+    /// Runs any executable and captures its output.
+    public static func runTool(executable: String, arguments: [String]) async throws -> CommandResult {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             let stdout = Pipe()
             let stderr = Pipe()
-            process.executableURL = URL(filePath: "/bin/launchctl")
+            process.executableURL = URL(filePath: executable)
             process.arguments = arguments
             process.standardOutput = stdout
             process.standardError = stderr
