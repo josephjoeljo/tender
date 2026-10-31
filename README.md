@@ -88,7 +88,9 @@ To debug the daemon instead of installing it, add these launch arguments to the 
 | Command | What it does |
 |---|---|
 | `tender start <name> -- <command>` | Create or update a service and start it |
-| `tender start\|stop\|restart <name>` | Control an existing service |
+| `tender start <name>` | Start an existing service |
+| `tender stop <name>` | Stop a service and keep its definition |
+| `tender restart <name>` | Restart a service, starting it if it's stopped |
 | `tender delete <name>` | Stop a service and remove its definition |
 | `tender list` | List managed processes |
 | `tender logs <name> -f` | Follow a service's logs |
