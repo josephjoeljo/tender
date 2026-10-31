@@ -1,0 +1,31 @@
+# Generate the Xcode project with:  cd App && xcodegen
+# (brew install xcodegen). The generated .xcodeproj is gitignored;
+# this file is the source of truth.
+name: TenderApp
+options:
+  bundleIdPrefix: com.olympsis.tender
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  TenderKit:
+    path: ../TenderKit
+targets:
+  TenderApp:
+    type: application
+    platform: macOS
+    sources: [TenderApp]
+    dependencies:
+      - package: TenderKit
+        product: TenderClient
+      - package: TenderKit
+        product: TenderCore
+    info:
+      path: TenderApp/Info.plist
+      properties:
+        LSUIElement: true          # menu bar app: no Dock icon
+        CFBundleDisplayName: Tender
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.olympsis.tender.app
+        SWIFT_VERSION: "6.0"
+        ENABLE_HARDENED_RUNTIME: YES
