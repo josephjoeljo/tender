@@ -31,6 +31,18 @@ final class ClusterModel {
         startPolling()
     }
 
+    #if DEBUG
+    /// Fixed data for Xcode previews: no polling, no Keychain, no network.
+    init(previewHealth: ClusterHealth, nodes: [NodeSummary], processes: [InstanceStatus]) {
+        store = ClientContextStore(directory: URL(filePath: "/dev/null"),
+                                   secrets: FileSecretStore(directory: URL(filePath: "/dev/null")))
+        health = previewHealth
+        self.nodes = nodes
+        self.processes = processes
+        head = nodes.isEmpty ? nil : "mac-1:7071"
+    }
+    #endif
+
     var problems: [InstanceStatus] { processes.filter { $0.state == .crashed || $0.state == .unknown } }
 
     /// Fetches the CA and pins it, using the fingerprint in the token.

@@ -93,3 +93,38 @@ struct ProcessRow: View {
         .help(help)
     }
 }
+
+#if DEBUG
+extension ClusterModel {
+    private static func node(_ name: String, up: Bool, processes: Int, crashed: Int = 0) -> NodeSummary {
+        NodeSummary(info: NodeInfo(id: NodeID(name), version: "0.1.0", macOS: "macOS", hardware: "Mac", address: "\(name):7070"),
+                    up: up, lastHeartbeatAge: up ? 2 : 90, instanceCount: processes, crashedCount: crashed)
+    }
+
+    private static func process(_ service: String, _ instance: Int, _ node: String, _ state: InstanceState) -> InstanceStatus {
+        InstanceStatus(service: service, instance: instance, node: NodeID(node), state: state)
+    }
+
+    static var previewHealthy: ClusterModel {
+        ClusterModel(previewHealth: .healthy,
+                     nodes: [node("mac-1", up: true, processes: 2), node("mac-2", up: true, processes: 2)],
+                     processes: [process("api", 0, "mac-1", .running), process("api", 1, "mac-2", .running),
+                                 process("mongod", 0, "mac-1", .running), process("worker", 0, "mac-2", .stopped)])
+    }
+
+    static var previewDegraded: ClusterModel {
+        ClusterModel(previewHealth: .degraded(downNodes: 1, crashed: 1),
+                     nodes: [node("mac-1", up: true, processes: 2, crashed: 1), node("mac-2", up: true, processes: 2), node("mac-3", up: false, processes: 0)],
+                     processes: [process("api", 0, "mac-1", .crashed), process("api", 1, "mac-2", .running),
+                                 process("mongod", 0, "mac-1", .running), process("worker", 0, "mac-2", .running)])
+    }
+
+    static var previewNotConfigured: ClusterModel {
+        ClusterModel(previewHealth: .notConfigured, nodes: [], processes: [])
+    }
+}
+
+#Preview("Healthy") { MenuBarView(model: .previewHealthy) }
+#Preview("Degraded") { MenuBarView(model: .previewDegraded) }
+#Preview("Not configured") { MenuBarView(model: .previewNotConfigured) }
+#endif
