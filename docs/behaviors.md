@@ -71,6 +71,14 @@ Things about how Tender works that may not be what you'd assume.
 - **Order:** within a node, lines are in order. Across nodes it's approximate, because clocks differ.
 - **Long lines:** cut at 64 KB before shipping.
 
+## Shortcuts and Siri
+
+- **Access:** the actions use the head and token the app is connected to, so a `read` token can
+  get status and search logs, but starting, stopping or restarting needs `write`.
+- **Confirmation:** stop and restart ask first, because they interrupt a running service. Start
+  doesn't.
+- **Log search:** returns 50 lines at most, from up to the past 7 days.
+
 ## Menu bar
 
 - **Font:** the node meters use Berkeley Mono if it's installed on that Mac, and SF Mono if not.

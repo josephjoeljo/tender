@@ -17,13 +17,18 @@ final class ClusterModel {
     private let store: ClientContextStore
     private var polling: Task<Void, Never>?
 
-    init() {
+    /// Where the app keeps its head and token. The intents read the same place.
+    nonisolated static func makeStore() -> ClientContextStore {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        store = ClientContextStore(
+        return ClientContextStore(
             directory: home.appending(path: "Library/Application Support/TenderApp"),
             secrets: KeychainSecretStore(
                 keychainPath: home.appending(path: "Library/Keychains/login.keychain-db").path(percentEncoded: false),
                 service: "com.olympsis.tender.app"))
+    }
+
+    init() {
+        store = Self.makeStore()
         if let saved = try? store.load() {
             head = saved.context.head
             client = TenderClient(head: saved.context.head, caPEM: saved.context.caPEM, token: saved.token)
