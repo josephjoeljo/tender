@@ -1,0 +1,24 @@
+gui/501 = {
+	type = login
+	handle = 100015
+	active count = 484
+	service count = 483
+	active service count = 294
+	creator = loginwindow[634]
+	creator euid = 0
+	session = Aqua
+	endpoint destination = com.apple.xpc.launchd.domain.user.501
+	auxiliary bootstrapper = com.apple.xpc.otherbsd (complete)
+	bringup time = 124 ms
+	death port = 0x15803
+	services = {
+		    1062      - 	com.apple.syncdefaultsd
+		    1150      - 	com.apple.assistantd
+		    5180      - 	com.apple.mlhostd
+		   22584      - 	com.olympsis.tender.test.fixture
+	}
+	disabled services = {
+		"com.apple.ManagedClientAgent.enrollagent" => disabled
+	}
+	properties = gui | gui login
+}

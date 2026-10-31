@@ -1,0 +1,79 @@
+system/com.apple.syslogd = {
+	active count = 2
+	path = /System/Library/LaunchDaemons/com.apple.syslogd.plist
+	type = LaunchDaemon
+	state = running
+
+	program = /usr/sbin/syslogd
+	arguments = {
+		/usr/sbin/syslogd
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		MallocSpaceEfficient => 1
+		ASL_DISABLE => 1
+		XPC_SERVICE_NAME => com.apple.syslogd
+	}
+
+	domain = system
+	minimum runtime = 10
+	base minimum runtime = 10
+	exit timeout = 5
+	runs = 1
+	pid = 593
+	immediate reason = speculative
+	forks = 0
+	execs = 1
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last exit code = (never exited)
+
+	endpoints = {
+		"com.apple.system.logger" = {
+			port = 0x9e03
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	resource coalition = {
+		ID = 319
+		type = resource
+		state = active
+		active count = 1
+		name = com.apple.syslogd
+	}
+
+	jetsam coalition = {
+		ID = 320
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.apple.syslogd
+	}
+
+	spawn type = adaptive (6)
+	jetsam priority = 140
+	jetsam memory limit (active, soft) = 30 MB
+	jetsam memory limit (inactive, soft) = 30 MB
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+	exponential throttling grace limit = 10
+	sanitizer flags = 0x0
+
+	properties = keepalive | supports transactions | inferred program | system service | exponential throttling | tle system
+}

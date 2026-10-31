@@ -88,6 +88,6 @@ let package = Package(
 
         // MARK: Tests
         .testTarget(name: "TenderCoreTests", dependencies: ["TenderCore"]),
-        .testTarget(name: "LaunchdKitTests", dependencies: ["LaunchdKit"]),
+        .testTarget(name: "LaunchdKitTests", dependencies: ["LaunchdKit"], resources: [.copy("Fixtures")]),
     ]
 )

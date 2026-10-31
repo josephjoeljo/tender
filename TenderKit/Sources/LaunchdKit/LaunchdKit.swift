@@ -3,7 +3,7 @@ import Logging
 import TenderCore
 
 /// launchd domain to operate in.
-public enum LaunchdDomain: Sendable {
+public enum LaunchdDomain: Sendable, Equatable {
     /// System-wide LaunchDaemons. Requires root.
     case system
     /// Per-user LaunchAgents (`gui/<uid>`). Used for development.
@@ -17,6 +17,10 @@ public enum LaunchdDomain: Sendable {
     }
 
     public static var currentUser: LaunchdDomain { .user(uid: getuid()) }
+
+    public static func forEnvironment(_ environment: TenderEnvironment) -> LaunchdDomain {
+        environment.mode == .production ? .system : .currentUser
+    }
 }
 
 /// Renders launchd property lists. Pure — no side effects, easy to unit test.
@@ -31,7 +35,9 @@ public struct PlistRenderer: Sendable {
         stdoutPath: String,
         stderrPath: String,
         keepAlive: Bool = true,
-        runAtLoad: Bool = true
+        runAtLoad: Bool = true,
+        userName: String? = nil,
+        throttleInterval: Int? = nil
     ) throws -> Data {
         var dict: [String: Any] = [
             "Label": label,
@@ -43,13 +49,8 @@ public struct PlistRenderer: Sendable {
         ]
         if !environment.isEmpty { dict["EnvironmentVariables"] = environment }
         if let workingDirectory { dict["WorkingDirectory"] = workingDirectory }
+        if let userName { dict["UserName"] = userName }
+        if let throttleInterval { dict["ThrottleInterval"] = throttleInterval }
         return try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
     }
-}
-
-/// Thin wrapper over `/bin/launchctl`. TODO(milestone 1): bootstrap, bootout,
-/// kickstart, and parsing `launchctl print` into `InstanceStatus`.
-public struct Launchctl: Sendable {
-    public let domain: LaunchdDomain
-    public init(domain: LaunchdDomain) { self.domain = domain }
 }
