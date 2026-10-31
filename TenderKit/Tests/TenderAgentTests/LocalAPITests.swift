@@ -202,8 +202,8 @@ private func apiErrorCode(_ call: () async throws -> ProcessList) async -> Strin
     let lines = table.split(separator: "\n").map(String.init)
     #expect(lines[0].hasPrefix("SERVICE"))
     #expect(lines[1].split(separator: " ").map(String.init)
-        == ["api", "0", "running", "7", "1h1m", "1.2%", "5.0M", "2", "abc"])
-    #expect(lines[2].split(separator: " ").map(String.init) == ["web", "1", "stopped", "-", "-", "-", "-", "0", "-"])
+        == ["api", "n", "0", "running", "7", "1h1m", "1.2%", "5.0M", "2", "abc"])
+    #expect(lines[2].split(separator: " ").map(String.init) == ["web", "n", "1", "stopped", "-", "-", "-", "-", "0", "-"])
     #expect(table.contains("com.olympsis.tender.svc.ghost.0"))
     #expect(ProcessTable.render(ProcessList(processes: [])) == "No processes.")
 }

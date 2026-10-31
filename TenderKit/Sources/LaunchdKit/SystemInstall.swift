@@ -102,10 +102,10 @@ public struct SystemInstallPlan: Sendable {
         return commands
     }
 
-    public func renderDaemonPlist() throws -> Data {
+    public func renderDaemonPlist(role: String = "worker") throws -> Data {
         try PlistRenderer().render(
             label: environment.agentLabel,
-            programArguments: [installedDaemon.path(percentEncoded: false), "--role", "worker"],
+            programArguments: [installedDaemon.path(percentEncoded: false), "run", "--role", role],
             stdoutPath: environment.logsDirectory.appending(path: "tenderd.out.log").path(percentEncoded: false),
             stderrPath: environment.logsDirectory.appending(path: "tenderd.err.log").path(percentEncoded: false)
         )

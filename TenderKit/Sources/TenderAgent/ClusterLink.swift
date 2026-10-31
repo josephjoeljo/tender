@@ -1,0 +1,211 @@
+import Distributed
+import Foundation
+import Logging
+import ServiceLifecycle
+import TenderActorSystem
+import TenderCore
+import TenderPKI
+import TenderProtocol
+
+/// What a node needs to take part in the cluster. Key material is in the secret store.
+public struct ClusterConfig: Codable, Sendable, Equatable {
+    public var nodeID: NodeID
+    public var headNode: NodeID
+    /// `host:port` of the head's agent listener.
+    public var headAgentAddress: String
+
+    public init(nodeID: NodeID, headNode: NodeID, headAgentAddress: String) {
+        self.nodeID = nodeID
+        self.headNode = headNode
+        self.headAgentAddress = headAgentAddress
+    }
+}
+
+public enum ClusterSecrets {
+    public static let nodeKey = "node.key"
+    public static let nodeCertificate = "node.crt"
+    public static let caCertificate = "ca.crt"
+    public static let caKey = "ca.key"
+    public static let all = [nodeKey, nodeCertificate, caCertificate, caKey]
+}
+
+public struct ClusterOptions: Sendable {
+    public var listenHost: String?
+    public var advertiseHost: String?
+    public var agentPort: Int
+    public var identityMode: IdentityMode
+    public var requiredTags: [String]
+    public var heartbeatInterval: Duration
+
+    public init(listenHost: String? = nil, advertiseHost: String? = nil, agentPort: Int = 7070,
+                identityMode: IdentityMode = .enforce, requiredTags: [String] = [],
+                heartbeatInterval: Duration = .seconds(5)) {
+        self.listenHost = listenHost
+        self.advertiseHost = advertiseHost
+        self.agentPort = agentPort
+        self.identityMode = identityMode
+        self.requiredTags = requiredTags
+        self.heartbeatInterval = heartbeatInterval
+    }
+}
+
+/// Reads and writes a node's cluster identity.
+public struct ClusterIdentityStore: Sendable {
+    public let environment: TenderEnvironment
+    public let secrets: any SecretStore
+
+    public init(environment: TenderEnvironment, secrets: any SecretStore) {
+        self.environment = environment
+        self.secrets = secrets
+    }
+
+    private var configURL: URL { environment.configDirectory.appending(path: "node.json") }
+
+    public func config() throws -> ClusterConfig? {
+        guard let data = try? Data(contentsOf: configURL) else { return nil }
+        return try JSONDecoder().decode(ClusterConfig.self, from: data)
+    }
+
+    public func save(_ config: ClusterConfig) throws {
+        try FileManager.default.createDirectory(at: environment.configDirectory, withIntermediateDirectories: true)
+        try JSONEncoder().encode(config).write(to: configURL, options: .atomic)
+    }
+
+    /// The node's mTLS material, once it has joined.
+    public func tls() throws -> TransportTLS? {
+        guard let certificate = try secrets.read(ClusterSecrets.nodeCertificate),
+              let key = try secrets.read(ClusterSecrets.nodeKey),
+              let authority = try secrets.read(ClusterSecrets.caCertificate) else { return nil }
+        return TransportTLS(certificatePEM: String(decoding: certificate, as: UTF8.self),
+                            privateKeyPEM: String(decoding: key, as: UTF8.self),
+                            trustRootPEM: String(decoding: authority, as: UTF8.self))
+    }
+}
+
+/// Combines the Tailscale check with anything else the node wants to refuse.
+public struct NodePeerVerifier: PeerVerifier {
+    private let identity: TailscaleIdentityCheck
+    private let additional: (any PeerVerifier)?
+
+    public init(identity: TailscaleIdentityCheck, additional: (any PeerVerifier)? = nil) {
+        self.identity = identity
+        self.additional = additional
+    }
+
+    public func verify(certificateNode: NodeID, remoteIP: String?) async throws {
+        try await additional?.verify(certificateNode: certificateNode, remoteIP: remoteIP)
+        try await identity.verify(certificateNode: certificateNode, remoteIP: remoteIP ?? "")
+    }
+}
+
+public func splitHostPort(_ address: String, defaultPort: Int) -> (host: String, port: Int) {
+    if let colon = address.lastIndex(of: ":"), let port = Int(address[address.index(after: colon)...]) {
+        return (String(address[..<colon]), port)
+    }
+    return (address, defaultPort)
+}
+
+/// Once the node has an identity: listens for peers, serves `NodeAgent`, and sends the
+/// head a heartbeat. Everything keeps running if the head is away; this just retries.
+struct ClusterLink: Service {
+    let identities: ClusterIdentityStore
+    let options: ClusterOptions
+    let controller: ProcessController
+    let hooks: ClusterHooks?
+    let logger: Logger
+
+    func run() async throws {
+        await cancelWhenGracefulShutdown {
+            var system: TenderActorSystem?
+            var agent: NodeAgent?
+            while !Task.isCancelled, system == nil {
+                do {
+                    if let tls = try identities.tls(), let config = try identities.config() {
+                        (system, agent) = try await start(config: config, tls: tls)
+                        guard let system, agent != nil else { continue }
+                        await heartbeats(config: config, system: system)
+                        await system.shutdown()
+                        return
+                    }
+                } catch {
+                    logger.error("cluster link failed to start", metadata: ["error": "\(error)"])
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func listenHost() async -> String? {
+        if let host = options.listenHost { return host }
+        return await TailscaleCLI.localIPv4()
+    }
+
+    private func start(config: ClusterConfig, tls: TransportTLS) async throws -> (TenderActorSystem, NodeAgent) {
+        let (host, port) = splitHostPort(config.headAgentAddress, defaultPort: options.agentPort)
+        let logger = self.logger
+        let check = TailscaleIdentityCheck(mode: options.identityMode, requiredTags: options.requiredTags) { message in
+            logger.warning("\(message)")
+        }
+        let system = TenderActorSystem(
+            localNode: config.nodeID,
+            tls: tls,
+            resolver: hooks?.resolver ?? StaticNodeResolver([config.headNode: NodeAddress(host: host, port: port)]),
+            verifier: NodePeerVerifier(identity: check, additional: hooks?.verifier)
+        )
+        let agent = TenderActorSystem.$wellKnownName.withValue(ActorNames.agent) {
+            NodeAgent(controller: controller, actorSystem: system)
+        }
+        hooks?.systemReady(system)
+        guard let listen = await listenHost() else {
+            logger.error("no address to listen on: Tailscale isn't up and --listen wasn't given")
+            return (system, agent)
+        }
+        let bound = try await system.listen(host: listen, port: options.agentPort)
+        logger.info("cluster transport listening", metadata: ["node": "\(config.nodeID)", "address": "\(listen):\(bound)"])
+        return (system, agent)
+    }
+
+    private func nodeInfo(config: ClusterConfig) async -> NodeInfo {
+        let process = ProcessInfo.processInfo
+        var hardware = [CChar](repeating: 0, count: 64)
+        var size = hardware.count
+        sysctlbyname("hw.model", &hardware, &size, nil, 0)
+        let advertised = await advertisedHost()
+        return NodeInfo(
+            id: config.nodeID,
+            version: TenderVersion.current,
+            macOS: process.operatingSystemVersionString,
+            hardware: String(cString: hardware),
+            address: advertised.map { "\($0):\(options.agentPort)" }
+        )
+    }
+
+    private func advertisedHost() async -> String? {
+        if let host = options.advertiseHost { return host }
+        return await listenHost()
+    }
+
+    private func heartbeats(config: ClusterConfig, system: TenderActorSystem) async {
+        var registered = false
+        let info = await nodeInfo(config: config)
+        while !Task.isCancelled {
+            do {
+                let registry = try $HeadRegistryProtocol.resolve(
+                    id: ActorIdentity(node: config.headNode, name: ActorNames.registry), using: system)
+                if !registered {
+                    try await registry.register(info)
+                    registered = true
+                    logger.info("registered with head", metadata: ["head": "\(config.headNode)"])
+                }
+                let list = try await controller.list()
+                try await registry.heartbeat(Heartbeat(node: config.nodeID, nodeClock: Date(),
+                                                       processes: list.processes, orphans: list.orphans))
+            } catch {
+                // The head restarted, or is away. Re-registering on reconnect rebuilds its registry.
+                registered = false
+                logger.debug("heartbeat failed", metadata: ["error": "\(error)"])
+            }
+            try? await Task.sleep(for: options.heartbeatInterval)
+        }
+    }
+}

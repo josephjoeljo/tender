@@ -29,12 +29,46 @@ public enum TenderClientError: Error, CustomStringConvertible {
 
 /// Typed client for the Tender HTTP/JSON API, here over the local Unix socket.
 public struct TenderClient: Sendable {
-    public let socketPath: String
+    public enum Transport: Sendable {
+        case unixSocket(String)
+        /// A head over TLS, pinned to the cluster's CA.
+        case https(head: String, caPEM: String, token: String)
+    }
+
+    public let transport: Transport
     private let timeout: TimeAmount
 
     public init(socketPath: String, timeout: Duration = .seconds(120)) {
-        self.socketPath = socketPath
+        transport = .unixSocket(socketPath)
         self.timeout = .seconds(timeout.components.seconds)
+    }
+
+    public init(head: String, caPEM: String, token: String, defaultPort: Int = 7071, timeout: Duration = .seconds(120)) {
+        transport = .https(head: head.contains(":") ? head : "\(head):\(defaultPort)", caPEM: caPEM, token: token)
+        self.timeout = .seconds(timeout.components.seconds)
+    }
+
+    /// What this client talks to, for error messages.
+    public var endpoint: String {
+        switch transport {
+        case .unixSocket(let path): path
+        case .https(let head, _, _): head
+        }
+    }
+
+    private func request(_ path: String) throws -> (HTTPClient, HTTPClientRequest) {
+        switch transport {
+        case .unixSocket(let socket):
+            try probeSocket(socket)
+            guard let url = URL(httpURLWithSocketPath: socket, uri: path) else {
+                throw TenderClientError.invalidResponse("bad socket path \(socket)")
+            }
+            return (HTTPClient.shared, HTTPClientRequest(url: url.absoluteString))
+        case .https(let head, let caPEM, let token):
+            var request = HTTPClientRequest(url: "https://\(head)\(path)")
+            request.headers.add(name: "Authorization", value: "Bearer \(token)")
+            return (try PinnedClients.client(caPEM: caPEM), request)
+        }
     }
 
     /// `TENDER_SOCKET` if set, else the dev daemon's socket if there is one,
@@ -52,26 +86,66 @@ public struct TenderClient: Sendable {
         try await send(.GET, "/v1/processes")
     }
 
+    private func nodeQuery(_ node: String?) throws -> String {
+        guard let node else { return "" }
+        return "?node=\(try escaped(node))"
+    }
+
+    // MARK: Cluster
+
+    public func nodes() async throws -> NodeList {
+        try await send(.GET, "/v1/nodes")
+    }
+
+    public func createJoinToken(ttlSeconds: Int? = nil) async throws -> JoinTokenResponse {
+        try await send(.POST, "/v1/tokens", body: try JSONEncoder().encode(JoinTokenRequest(ttlSeconds: ttlSeconds)))
+    }
+
+    /// Asks the local daemon to join a head. Only meaningful over the socket.
+    public func join(head: String, token: String, nodeID: String? = nil) async throws -> JoinStatus {
+        try await send(.POST, "/v1/join", body: try JSONEncoder().encode(LocalJoinRequest(head: head, token: token, nodeID: nodeID)))
+    }
+
+    public func revokeNode(_ id: String) async throws -> NodeList {
+        try await send(.POST, "/v1/nodes/\(try escaped(id))/revoke")
+    }
+
+    public func exportCA() async throws -> CertificateExport {
+        try await send(.GET, "/v1/ca/export")
+    }
+
+    public func createAPIToken(name: String, scope: APIScope) async throws -> APITokenCreated {
+        try await send(.POST, "/v1/api-tokens", body: try JSONEncoder().encode(APITokenCreateRequest(name: name, scope: scope)))
+    }
+
+    public func apiTokens() async throws -> APITokenList {
+        try await send(.GET, "/v1/api-tokens")
+    }
+
+    public func revokeAPIToken(name: String) async throws -> APITokenList {
+        try await send(.DELETE, "/v1/api-tokens/\(try escaped(name))")
+    }
+
     /// Creates or updates a service and starts it.
     public func start(_ spec: ServiceSpec) async throws -> ProcessList {
         try await send(.POST, "/v1/processes", body: try JSONEncoder().encode(spec))
     }
 
     /// Starts a service that already exists.
-    public func start(service: String) async throws -> ProcessList {
-        try await send(.POST, "/v1/processes/\(try escaped(service))/start")
+    public func start(service: String, node: String? = nil) async throws -> ProcessList {
+        try await send(.POST, "/v1/processes/\(try escaped(service))/start\(try nodeQuery(node))")
     }
 
-    public func stop(service: String) async throws -> ProcessList {
-        try await send(.POST, "/v1/processes/\(try escaped(service))/stop")
+    public func stop(service: String, node: String? = nil) async throws -> ProcessList {
+        try await send(.POST, "/v1/processes/\(try escaped(service))/stop\(try nodeQuery(node))")
     }
 
-    public func restart(service: String) async throws -> ProcessList {
-        try await send(.POST, "/v1/processes/\(try escaped(service))/restart")
+    public func restart(service: String, node: String? = nil) async throws -> ProcessList {
+        try await send(.POST, "/v1/processes/\(try escaped(service))/restart\(try nodeQuery(node))")
     }
 
-    public func delete(service: String) async throws -> ProcessList {
-        try await send(.DELETE, "/v1/processes/\(try escaped(service))")
+    public func delete(service: String, node: String? = nil) async throws -> ProcessList {
+        try await send(.DELETE, "/v1/processes/\(try escaped(service))\(try nodeQuery(node))")
     }
 
     public func logs(service: String, lines: Int = 200, instance: Int? = nil,
@@ -85,13 +159,9 @@ public struct TenderClient: Sendable {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    try self.probeSocket()
                     let path = try self.logsPath(service, lines, instance, stream, follow: true)
-                    guard let url = URL(httpURLWithSocketPath: self.socketPath, uri: path) else {
-                        throw TenderClientError.invalidResponse("bad socket path \(self.socketPath)")
-                    }
-                    let response = try await HTTPClient.shared.execute(
-                        HTTPClientRequest(url: url.absoluteString), deadline: .distantFuture)
+                    let (client, request) = try self.request(path)
+                    let response = try await client.execute(request, deadline: .distantFuture)
                     guard response.status == .ok else {
                         let body = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
                         throw Self.apiError(status: Int(response.status.code), data: body)
@@ -125,29 +195,29 @@ public struct TenderClient: Sendable {
         return path
     }
 
-    public func releases(service: String) async throws -> ReleaseList {
-        try await send(.GET, "/v1/releases/\(try escaped(service))")
+    public func releases(service: String, node: String? = nil) async throws -> ReleaseList {
+        try await send(.GET, "/v1/releases/\(try escaped(service))\(try nodeQuery(node))")
     }
 
     /// Goes back to `sha12`, or by default to the release before the current one.
-    public func rollback(service: String, to sha12: String? = nil) async throws -> ProcessList {
-        try await send(.POST, "/v1/releases/\(try escaped(service))/rollback",
+    public func rollback(service: String, to sha12: String? = nil, node: String? = nil) async throws -> ProcessList {
+        try await send(.POST, "/v1/releases/\(try escaped(service))/rollback\(try nodeQuery(node))",
                        body: try JSONEncoder().encode(RollbackRequest(to: sha12)))
     }
 
     /// Brings an existing launchd job under management.
-    public func adopt(label: String, logPath: String? = nil) async throws -> ProcessList {
-        try await send(.POST, "/v1/adopt", body: try JSONEncoder().encode(AdoptRequest(label: label, logPath: logPath)))
+    public func adopt(label: String, logPath: String? = nil, node: String? = nil) async throws -> ProcessList {
+        try await send(.POST, "/v1/adopt\(try nodeQuery(node))", body: try JSONEncoder().encode(AdoptRequest(label: label, logPath: logPath)))
     }
 
     /// Stops managing an adopted job, leaving the job itself untouched.
-    public func forget(label: String) async throws -> ProcessList {
-        try await send(.DELETE, "/v1/adopt/\(try escaped(label))")
+    public func forget(label: String, node: String? = nil) async throws -> ProcessList {
+        try await send(.DELETE, "/v1/adopt/\(try escaped(label))\(try nodeQuery(node))")
     }
 
     /// Boots out orphaned launchd jobs.
-    public func collectGarbage() async throws -> ProcessList {
-        try await send(.POST, "/v1/gc")
+    public func collectGarbage(node: String? = nil) async throws -> ProcessList {
+        try await send(.POST, "/v1/gc\(try nodeQuery(node))")
     }
 
     /// RFC 3986 unreserved characters. The server matches path segments literally,
@@ -180,7 +250,7 @@ public struct TenderClient: Sendable {
         return .api(status: status, code: "http_\(status)", message: "tenderd returned HTTP \(status).")
     }
 
-    private func probeSocket() throws {
+    private func probeSocket(_ socketPath: String) throws {
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else {
             throw TenderClientError.daemonUnreachable(socketPath: socketPath, underlying: String(cString: strerror(errno)))
@@ -208,23 +278,18 @@ public struct TenderClient: Sendable {
     }
 
     func perform(_ method: HTTPMethod, _ path: String, body: Data? = nil) async throws -> (status: Int, data: Data) {
-        guard let url = URL(httpURLWithSocketPath: socketPath, uri: path) else {
-            throw TenderClientError.invalidResponse("bad socket path \(socketPath)")
-        }
-        // HTTPClient retries a dead socket until its deadline. Fail fast instead.
-        try probeSocket()
-        var request = HTTPClientRequest(url: url.absoluteString)
+        var (client, request) = try self.request(path)
         request.method = method
         if let body {
             request.headers.add(name: "Content-Type", value: "application/json")
             request.body = .bytes(ByteBuffer(bytes: body))
         }
         do {
-            let response = try await HTTPClient.shared.execute(request, timeout: timeout)
+            let response = try await client.execute(request, timeout: timeout)
             let buffer = try await response.body.collect(upTo: 16 << 20)
             return (Int(response.status.code), Data(buffer.readableBytesView))
         } catch {
-            throw TenderClientError.daemonUnreachable(socketPath: socketPath, underlying: "\(error)")
+            throw TenderClientError.daemonUnreachable(socketPath: endpoint, underlying: "\(error)")
         }
     }
 }

@@ -144,10 +144,13 @@ public struct ProcessList: Codable, Sendable, Equatable {
     public var processes: [InstanceStatus]
     /// Labels with Tender's prefix that aren't in the desired state.
     public var orphans: [String]
+    /// Nodes whose processes couldn't be read, so the list may be incomplete.
+    public var unreachableNodes: [String]
 
-    public init(processes: [InstanceStatus], orphans: [String] = []) {
+    public init(processes: [InstanceStatus], orphans: [String] = [], unreachableNodes: [String] = []) {
         self.processes = processes
         self.orphans = orphans
+        self.unreachableNodes = unreachableNodes
     }
 }
 

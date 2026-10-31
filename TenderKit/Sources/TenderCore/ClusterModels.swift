@@ -168,3 +168,12 @@ public struct APITokenList: Codable, Sendable, Equatable {
     public var tokens: [APITokenInfo]
     public init(tokens: [APITokenInfo]) { self.tokens = tokens }
 }
+
+public struct JoinStatus: Codable, Sendable, Equatable {
+    public var nodeID: NodeID
+    public var headNode: NodeID
+    public init(nodeID: NodeID, headNode: NodeID) {
+        self.nodeID = nodeID
+        self.headNode = headNode
+    }
+}

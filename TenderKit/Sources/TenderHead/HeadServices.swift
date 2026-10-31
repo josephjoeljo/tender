@@ -1,0 +1,445 @@
+import Crypto
+import Distributed
+import Foundation
+import Hummingbird
+import HummingbirdTLS
+import Logging
+import NIOConcurrencyHelpers
+import NIOSSL
+import ServiceLifecycle
+import TenderActorSystem
+import TenderAgent
+import TenderCore
+import TenderPKI
+import TenderProtocol
+
+public struct HeadOptions: Sendable {
+    public var nodeID: NodeID
+    public var apiHost: String?
+    public var apiPort: Int
+    public var agentPort: Int
+    /// Hostnames and IPs the head is reached by, for its certificate.
+    public var advertisedNames: [String]
+
+    public init(nodeID: NodeID, apiHost: String? = nil, apiPort: Int = 7071, agentPort: Int = 7070,
+                advertisedNames: [String] = []) {
+        self.nodeID = nodeID
+        self.apiHost = apiHost
+        self.apiPort = apiPort
+        self.agentPort = agentPort
+        self.advertisedNames = advertisedNames
+    }
+}
+
+/// Everything only the head does: CA, registry, command routing, public API.
+public final class HeadServices: Sendable {
+    public let options: HeadOptions
+    public let store: HeadStore
+    public let state: RegistryState
+    private let environment: TenderEnvironment
+    private let secrets: any SecretStore
+    private let authority: CertificateAuthority
+    private let holder = NIOLockedValueBox<(system: TenderActorSystem?, registry: HeadRegistry?)>((nil, nil))
+    private let logger: Logger
+
+    public init(environment: TenderEnvironment, secrets: any SecretStore, options: HeadOptions,
+                logger: Logger = Logger(label: "tender.head")) throws {
+        self.environment = environment
+        self.secrets = secrets
+        self.options = options
+        self.logger = logger
+        store = try HeadStore(environment: environment)
+        state = RegistryState(store: store)
+        authority = try Self.loadOrCreateAuthority(secrets: secrets)
+        try Self.issueOwnIdentity(environment: environment, secrets: secrets, authority: authority, options: options)
+    }
+
+    /// Creates the CA on first start. Losing it means every node has to re-join, so
+    /// it's printed nowhere and leaves only through `tender ca export`.
+    private static func loadOrCreateAuthority(secrets: any SecretStore) throws -> CertificateAuthority {
+        if let certificate = try secrets.read(ClusterSecrets.caCertificate),
+           let key = try secrets.read(ClusterSecrets.caKey) {
+            return try CertificateAuthority(certificatePEM: String(decoding: certificate, as: UTF8.self),
+                                            privateKeyPEM: String(decoding: key, as: UTF8.self))
+        }
+        let created = try CertificateAuthority.create()
+        try secrets.write(ClusterSecrets.caKey, Data(created.privateKeyPEM.utf8))
+        try secrets.write(ClusterSecrets.caCertificate, Data(created.certificatePEM.utf8))
+        return created
+    }
+
+    /// The head is a node too. Its certificate is reissued at each start so that it
+    /// always names the current addresses, while its key stays the same.
+    private static func issueOwnIdentity(environment: TenderEnvironment, secrets: any SecretStore,
+                                         authority: CertificateAuthority, options: HeadOptions) throws {
+        let key: NodeKey
+        if let existing = try secrets.read(ClusterSecrets.nodeKey) {
+            key = NodeKey(privateKeyPEM: String(decoding: existing, as: UTF8.self))
+        } else {
+            key = .generate()
+            try secrets.write(ClusterSecrets.nodeKey, Data(key.privateKeyPEM.utf8))
+        }
+        var names = options.advertisedNames
+        if let host = options.apiHost { names.append(host) }
+        names.append("127.0.0.1")
+        let ips = names.filter { $0.first?.isNumber == true || $0.contains(":") }
+        let dns = names.filter { !ips.contains($0) }
+        let certificate = try authority.sign(csrPEM: try key.makeCSR(nodeID: options.nodeID), nodeID: options.nodeID,
+                                             dnsNames: dns, ipAddresses: ips)
+        try secrets.write(ClusterSecrets.nodeCertificate, Data(certificate.utf8))
+        let host = options.advertisedNames.first ?? options.apiHost ?? "127.0.0.1"
+        try ClusterIdentityStore(environment: environment, secrets: secrets).save(
+            ClusterConfig(nodeID: options.nodeID, headNode: options.nodeID, headAgentAddress: "\(host):\(options.agentPort)"))
+    }
+
+    public var caFingerprint: String { authority.fingerprint }
+
+    // MARK: Wiring into the agent
+
+    public func hooks() -> ClusterHooks {
+        ClusterHooks(
+            resolver: RegistryResolver(state: state, defaultPort: options.agentPort),
+            verifier: RevocationVerifier(store: store),
+            systemReady: { [self] system in
+                let registry = TenderActorSystem.$wellKnownName.withValue(ActorNames.registry) {
+                    HeadRegistry(state: state, actorSystem: system)
+                }
+                holder.withLockedValue { $0 = (system, registry) }
+            },
+            installRoutes: { [self] router in installSocketRoutes(on: router) },
+            services: { [self] in [try makePublicAPI()] }
+        )
+    }
+
+    var system: TenderActorSystem? { holder.withLockedValue { $0.system } }
+
+    private func agent(on node: NodeID) throws -> $NodeAgentProtocol<TenderActorSystem> {
+        guard let system else {
+            throw NodeCallError(code: "not_ready", message: "The cluster transport isn't up yet.", httpStatus: 503)
+        }
+        return try $NodeAgentProtocol.resolve(id: ActorIdentity(node: node, name: ActorNames.agent), using: system)
+    }
+
+    // MARK: Command routing
+
+    /// Asks every node that's up, in parallel. A node that doesn't answer is listed,
+    /// rather than failing the whole request.
+    func clusterStatus() async -> ProcessList {
+        let up = await state.upNodes()
+        var combined = ProcessList(processes: [])
+        combined.unreachableNodes = await state.downNodes().map(\.rawValue)
+        await withTaskGroup(of: (NodeID, ProcessList?).self) { group in
+            for node in Set(up + [options.nodeID]) {
+                group.addTask { [self] in
+                    (node, try? await agent(on: node).status())
+                }
+            }
+            for await (node, list) in group {
+                if let list {
+                    combined.processes += list.processes
+                    combined.orphans += list.orphans
+                } else if !combined.unreachableNodes.contains(node.rawValue) {
+                    combined.unreachableNodes.append(node.rawValue)
+                }
+            }
+        }
+        combined.processes.sort { ($0.service, $0.node.rawValue, $0.instance) < ($1.service, $1.node.rawValue, $1.instance) }
+        combined.unreachableNodes.sort()
+        return combined
+    }
+
+    /// Which nodes a by-name command means: the one asked for, or everywhere the service runs.
+    private func targets(service: String, node: String?) async -> [NodeID] {
+        if let node { return [NodeID(node)] }
+        let running = await state.nodes(running: service)
+        return running.isEmpty ? [options.nodeID] : running
+    }
+
+    private func command(_ build: (String) -> AgentCommand, service: String, node: String?) async throws -> ProcessList {
+        for target in await targets(service: service, node: node) {
+            _ = try await translatingTransport(target) { try await agent(on: target).apply(build(service)) }
+        }
+        return await clusterStatus()
+    }
+
+    private func translatingTransport<T: Sendable>(_ node: NodeID, _ call: () async throws -> T) async throws -> T {
+        do {
+            return try await call()
+        } catch let error as TransportError {
+            throw NodeCallError(code: "node_unreachable", message: error.description, httpStatus: 503)
+        }
+    }
+
+    // MARK: Tokens
+
+    func createJoinToken(ttl: TimeInterval) throws -> JoinTokenResponse {
+        let secret = JoinToken.randomSecret()
+        let expiry = Date().addingTimeInterval(ttl)
+        try store.addJoinToken(secret: secret, expiresAt: expiry)
+        return JoinTokenResponse(token: JoinToken(secret: secret, caFingerprint: authority.fingerprint).text, expiresAt: expiry)
+    }
+
+    func handleJoin(_ request: JoinRequest) async throws -> JoinResponse {
+        guard let token = JoinToken(parsing: request.token), token.caFingerprint == authority.fingerprint else {
+            throw NodeCallError(code: "invalid_token", message: "Invalid join token.", httpStatus: 401)
+        }
+        guard CertificateAuthority.isValidNodeID(request.nodeID.rawValue) else {
+            throw NodeCallError(code: "invalid_node", message: "'\(request.nodeID)' isn't a valid node ID.", httpStatus: 400)
+        }
+        guard request.nodeID != options.nodeID else {
+            throw NodeCallError(code: "invalid_node", message: "'\(request.nodeID)' is the head's own name.", httpStatus: 409)
+        }
+        // Validate the CSR before spending the token, so that a typo doesn't burn it.
+        let certificate: String
+        do {
+            certificate = try authority.sign(csrPEM: request.csrPEM, nodeID: request.nodeID)
+        } catch {
+            throw NodeCallError(code: "invalid_csr", message: "\(error)", httpStatus: 400)
+        }
+        guard try store.consumeJoinToken(secret: token.secret) else {
+            throw NodeCallError(code: "invalid_token", message: "That join token is expired or already used.", httpStatus: 401)
+        }
+        try store.clearRevocation(node: request.nodeID)
+        let host = options.advertisedNames.first ?? options.apiHost ?? "127.0.0.1"
+        logger.info("node joined", metadata: ["node": "\(request.nodeID)"])
+        return JoinResponse(certificatePEM: certificate, caPEM: authority.certificatePEM, headNode: options.nodeID,
+                            headAgentAddress: "\(host):\(options.agentPort)")
+    }
+
+    func revoke(node: NodeID) async throws {
+        guard node != options.nodeID else {
+            throw NodeCallError(code: "invalid_node", message: "The head can't revoke itself.", httpStatus: 409)
+        }
+        try store.revoke(node: node)
+        await state.remove(node)
+        system?.disconnect(node)
+    }
+
+    func createAPIToken(_ request: APITokenCreateRequest) throws -> APITokenCreated {
+        guard !request.name.isEmpty else {
+            throw NodeCallError(code: "invalid_name", message: "A token needs a name.", httpStatus: 400)
+        }
+        let secret = JoinToken.randomSecret()
+        guard let info = try store.addAPIToken(secret: secret, name: request.name, scope: request.scope) else {
+            throw NodeCallError(code: "name_taken", message: "A token named '\(request.name)' exists.", httpStatus: 409)
+        }
+        // The fingerprint travels with the token so that a client can pin the CA from it.
+        return APITokenCreated(info: info, token: JoinToken(secret: secret, caFingerprint: authority.fingerprint).text)
+    }
+
+    // MARK: Routes
+
+    /// Shared by the Unix socket and the public listener.
+    private func installClusterRoutes(on router: Router<BasicRequestContext>) {
+        router.get("/v1/nodes") { [self] _, _ in
+            await respond { NodeList(nodes: await state.summaries()) }
+        }
+        router.get("/v1/processes") { [self] _, _ in
+            await respond { await clusterStatus() }
+        }
+        router.post("/v1/processes") { [self] request, _ in
+            await respond {
+                let spec = try await decode(ServiceSpec.self, from: request)
+                let target = spec.node ?? options.nodeID
+                _ = try await translatingTransport(target) { try await agent(on: target).apply(.start(spec)) }
+                return await clusterStatus()
+            }
+        }
+        router.post("/v1/processes/:name/:action") { [self] request, context in
+            await respond {
+                let name = try context.parameters.require("name")
+                let node = request.uri.queryParameters.get("node")
+                switch try context.parameters.require("action") {
+                case "start": return try await command({ .startExisting(service: $0) }, service: name, node: node)
+                case "stop": return try await command({ .stop(service: $0) }, service: name, node: node)
+                case "restart": return try await command({ .restart(service: $0) }, service: name, node: node)
+                case let action:
+                    throw NodeCallError(code: "unknown_action", message: "Unknown action '\(action)'.", httpStatus: 404)
+                }
+            }
+        }
+        router.delete("/v1/processes/:name") { [self] request, context in
+            await respond {
+                try await command({ .delete(service: $0) }, service: try context.parameters.require("name"),
+                                  node: request.uri.queryParameters.get("node"))
+            }
+        }
+        router.get("/v1/releases/:service") { [self] request, context in
+            await respond {
+                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                let service = try context.parameters.require("service")
+                return try await translatingTransport(target) { try await agent(on: target).releases(service: service) }
+            }
+        }
+        router.post("/v1/releases/:service/rollback") { [self] request, context in
+            await respond {
+                let service = try context.parameters.require("service")
+                let rollback = try await decodeOptional(RollbackRequest.self, from: request) ?? RollbackRequest()
+                for target in await targets(service: service, node: request.uri.queryParameters.get("node")) {
+                    _ = try await translatingTransport(target) { try await agent(on: target).rollback(service: service, to: rollback.to) }
+                }
+                return await clusterStatus()
+            }
+        }
+        router.post("/v1/adopt") { [self] request, _ in
+            await respond {
+                let adopt = try await decode(AdoptRequest.self, from: request)
+                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                _ = try await translatingTransport(target) { try await agent(on: target).adopt(adopt) }
+                return await clusterStatus()
+            }
+        }
+        router.delete("/v1/adopt/:label") { [self] request, context in
+            await respond {
+                let label = try context.parameters.require("label")
+                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                _ = try await translatingTransport(target) { try await agent(on: target).forgetAdopted(label: label) }
+                return await clusterStatus()
+            }
+        }
+        router.post("/v1/gc") { [self] request, _ in
+            await respond {
+                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                _ = try await translatingTransport(target) { try await agent(on: target).apply(.collectGarbage) }
+                return await clusterStatus()
+            }
+        }
+    }
+
+    /// Administration stays on the socket: file permissions are its authentication.
+    func installSocketRoutes(on router: Router<BasicRequestContext>) {
+        installClusterRoutes(on: router)
+        router.post("/v1/tokens") { [self] request, _ in
+            await respond {
+                let body = try await decodeOptional(JoinTokenRequest.self, from: request)
+                let ttl = TimeInterval(body?.ttlSeconds ?? 15 * 60)
+                guard ttl > 0, ttl <= 86400 else {
+                    throw NodeCallError(code: "invalid_ttl", message: "ttl must be between 1 second and 1 day.", httpStatus: 400)
+                }
+                return try createJoinToken(ttl: ttl)
+            }
+        }
+        router.post("/v1/nodes/:id/revoke") { [self] _, context in
+            await respond {
+                try await revoke(node: NodeID(try context.parameters.require("id")))
+                return NodeList(nodes: await state.summaries())
+            }
+        }
+        router.get("/v1/ca/export") { [self] _, _ in
+            await respond {
+                CertificateExport(certificatePEM: authority.certificatePEM, privateKeyPEM: authority.privateKeyPEM)
+            }
+        }
+        router.post("/v1/api-tokens") { [self] request, _ in
+            await respond { try createAPIToken(try await decode(APITokenCreateRequest.self, from: request)) }
+        }
+        router.get("/v1/api-tokens") { [self] _, _ in
+            await respond { APITokenList(tokens: try store.apiTokens()) }
+        }
+        router.delete("/v1/api-tokens/:name") { [self] _, context in
+            await respond {
+                try store.removeAPIToken(name: try context.parameters.require("name"))
+                return APITokenList(tokens: try store.apiTokens())
+            }
+        }
+    }
+
+    /// The router for the public listener. `/v1/ca` and `/v1/join` need no token: a
+    /// joining node has none, and its join token is checked in the handler.
+    func makePublicRouter() -> Router<BasicRequestContext> {
+        let router = Router()
+        router.add(middleware: BearerAuthMiddleware(store: store))
+        let authority = self.authority
+        router.get("/v1/ca") { _, _ in
+            Response(status: .ok, headers: [.contentType: "application/x-pem-file"],
+                     body: ResponseBody(byteBuffer: ByteBuffer(string: authority.certificatePEM)))
+        }
+        router.post("/v1/join") { [self] request, _ in
+            await respond { try await handleJoin(try await decode(JoinRequest.self, from: request)) }
+        }
+        installClusterRoutes(on: router)
+        return router
+    }
+
+    func makePublicAPI() throws -> any Service {
+        guard let certificate = try secrets.read(ClusterSecrets.nodeCertificate),
+              let key = try secrets.read(ClusterSecrets.nodeKey) else {
+            throw NodeCallError(code: "not_ready", message: "The head has no certificate.")
+        }
+        let host = options.apiHost ?? "127.0.0.1"
+        let tls = TLSConfiguration.makeServerConfiguration(
+            certificateChain: try NIOSSLCertificate.fromPEMBytes(Array(certificate)).map { .certificate($0) },
+            privateKey: .privateKey(try NIOSSLPrivateKey(bytes: Array(key), format: .pem))
+        )
+        return Application(
+            router: makePublicRouter(),
+            server: try .tls(.http1(), tlsConfiguration: tls),
+            configuration: .init(address: .hostname(host, port: options.apiPort), serverName: nil),
+            logger: logger
+        )
+    }
+}
+
+/// `Authorization: Bearer <token>`. `GET` needs read scope, everything else write.
+struct BearerAuthMiddleware: RouterMiddleware {
+    typealias Context = BasicRequestContext
+    static let publicPaths: Set<String> = ["/v1/ca", "/v1/join"]
+    let store: HeadStore
+
+    func handle(_ request: Request, context: Context,
+                next: (Request, Context) async throws -> Response) async throws -> Response {
+        if Self.publicPaths.contains(request.uri.path) { return try await next(request, context) }
+        guard let header = request.headers[.authorization], header.hasPrefix("Bearer ") else {
+            return errorResponse(NodeCallError(code: "unauthorized", message: "A bearer token is required.", httpStatus: 401))
+        }
+        // Clients may present the full `<secret>.<fingerprint>`; only the secret is stored.
+        let presented = header.dropFirst("Bearer ".count).split(separator: ".").first.map(String.init) ?? ""
+        guard let token = try? store.apiToken(secret: presented) else {
+            return errorResponse(NodeCallError(code: "unauthorized", message: "Unknown token.", httpStatus: 401))
+        }
+        if request.method != .get, token.scope != .write {
+            return errorResponse(NodeCallError(code: "forbidden", message: "This token is read-only.", httpStatus: 403))
+        }
+        return try await next(request, context)
+    }
+}
+
+func decode<T: Decodable>(_ type: T.Type, from request: Request) async throws -> T {
+    var request = request
+    let body = try await request.collectBody(upTo: 1 << 20)
+    do {
+        return try JSONDecoder().decode(type, from: Data(body.readableBytesView))
+    } catch {
+        throw NodeCallError(code: "invalid_body", message: "Expected a \(type): \(error)", httpStatus: 400)
+    }
+}
+
+func decodeOptional<T: Decodable>(_ type: T.Type, from request: Request) async throws -> T? {
+    var request = request
+    let body = try await request.collectBody(upTo: 1 << 20)
+    guard body.readableBytes > 0 else { return nil }
+    do {
+        return try JSONDecoder().decode(type, from: Data(body.readableBytesView))
+    } catch {
+        throw NodeCallError(code: "invalid_body", message: "Expected a \(type): \(error)", httpStatus: 400)
+    }
+}
+
+func errorResponse(_ error: NodeCallError) -> Response {
+    let data = (try? JSONEncoder().encode(APIErrorBody(code: error.code, message: error.message))) ?? Data()
+    return Response(status: HTTPResponse.Status(code: error.httpStatus),
+                    headers: [.contentType: "application/json"],
+                    body: ResponseBody(byteBuffer: ByteBuffer(bytes: data)))
+}
+
+func respond(_ operation: () async throws -> some Encodable) async -> Response {
+    do {
+        let data = try JSONEncoder().encode(try await operation())
+        return Response(status: .ok, headers: [.contentType: "application/json"],
+                        body: ResponseBody(byteBuffer: ByteBuffer(bytes: data)))
+    } catch let error as NodeCallError {
+        return errorResponse(error)
+    } catch {
+        return errorResponse(NodeCallError(code: "internal", message: "\(error)"))
+    }
+}

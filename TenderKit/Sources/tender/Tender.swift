@@ -8,7 +8,8 @@ struct Tender: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
-        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Gc.self, Version.self, Daemon.self]
+        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Gc.self, Version.self, Daemon.self,
+                      Token.self, Join.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
     )
 }
 
@@ -18,6 +19,34 @@ struct CommonOptions: ParsableArguments {
 
     @Option(help: "tenderd's Unix socket. Defaults to $TENDER_SOCKET, then the dev socket, then production.")
     var socket: String?
+
+    @Flag(help: "Talk to the head set with `tender context set`, even if a local daemon is running.")
+    var remote = false
+
+    /// An explicit socket, else `--remote`, else a local daemon, else the saved context.
+    func makeClient() throws -> TenderClient {
+        let environment = ProcessInfo.processInfo.environment
+        if let socket { return TenderClient(socketPath: socket) }
+        let path = TenderClient.defaultSocketPath(environment: environment)
+        let hasLocalSocket = FileManager.default.fileExists(atPath: path)
+        if remote || (!hasLocalSocket && environment["TENDER_SOCKET"] == nil) {
+            if let saved = try ClientContextStore.standard().load() {
+                return TenderClient(head: saved.context.head, caPEM: saved.context.caPEM, token: saved.token)
+            }
+            if remote { throw ValidationError("No head configured. Run `tender context set --head <address> --token <token>`.") }
+        }
+        return TenderClient(socketPath: path)
+    }
+
+    /// Runs a call and prints its JSON, or a line of text, or the error on failure.
+    func run<T: Encodable>(_ call: (TenderClient) async throws -> T, text: (T) -> String) async throws {
+        do {
+            let value = try await call(try makeClient())
+            print(json ? try encode(value) : text(value))
+        } catch let error as TenderClientError {
+            try fail(error)
+        }
+    }
 
     /// Runs one API call and prints its result, or the error on failure.
     func fail(_ error: TenderClientError) throws -> Never {
@@ -30,9 +59,8 @@ struct CommonOptions: ParsableArguments {
     }
 
     func execute(_ call: (TenderClient) async throws -> ProcessList) async throws {
-        let client = TenderClient(socketPath: socket ?? TenderClient.defaultSocketPath())
         do {
-            let list = try await call(client)
+            let list = try await call(try makeClient())
             print(json ? try encode(list) : ProcessTable.render(list))
         } catch let error as TenderClientError {
             try fail(error)
@@ -68,6 +96,9 @@ extension Tender {
         @Option(help: "Account to run as in production. Ignored in dev mode.")
         var user = ServiceSpec.defaultUser
 
+        @Option(help: "Node to run on. Defaults to the node you're talking to.")
+        var node: String?
+
         @OptionGroup var options: CommonOptions
 
         @Argument(parsing: .postTerminator, help: "Command to run, after `--`.")
@@ -75,7 +106,7 @@ extension Tender {
 
         func run() async throws {
             guard let executable = command.first else {
-                try await options.execute { try await $0.start(service: name) }
+                try await options.execute { try await $0.start(service: name, node: node) }
                 return
             }
             let spec = ServiceSpec(
@@ -85,6 +116,7 @@ extension Tender {
                 environment: try Self.parse(environment),
                 workingDirectory: cwd,
                 instances: instances,
+                node: node.map { NodeID($0) },
                 user: user
             )
             try await options.execute { try await $0.start(spec) }
@@ -122,30 +154,33 @@ extension Tender {
     struct Stop: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Stop a service and keep its definition.")
         @Argument(help: "Service name.") var name: String
+        @Option(help: "Only on this node. Defaults to every node running it.") var node: String?
         @OptionGroup var options: CommonOptions
 
         func run() async throws {
-            try await options.execute { try await $0.stop(service: name) }
+            try await options.execute { try await $0.stop(service: name, node: node) }
         }
     }
 
     struct Restart: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Restart a service, starting it if stopped.")
         @Argument(help: "Service name.") var name: String
+        @Option(help: "Only on this node. Defaults to every node running it.") var node: String?
         @OptionGroup var options: CommonOptions
 
         func run() async throws {
-            try await options.execute { try await $0.restart(service: name) }
+            try await options.execute { try await $0.restart(service: name, node: node) }
         }
     }
 
     struct Delete: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Stop a service and remove its definition.")
         @Argument(help: "Service name.") var name: String
+        @Option(help: "Only on this node. Defaults to every node running it.") var node: String?
         @OptionGroup var options: CommonOptions
 
         func run() async throws {
-            try await options.execute { try await $0.delete(service: name) }
+            try await options.execute { try await $0.delete(service: name, node: node) }
         }
     }
 
@@ -176,7 +211,7 @@ extension Tender {
                 }
                 selected = parsed
             }
-            let client = TenderClient(socketPath: options.socket ?? TenderClient.defaultSocketPath())
+            let client = try options.makeClient()
             do {
                 if follow {
                     for try await line in client.followLogs(service: name, lines: lines, instance: instance, stream: selected) {
@@ -208,12 +243,13 @@ extension Tender {
     struct Releases: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "List a service's releases, newest first.")
         @Argument(help: "Service name.") var name: String
+        @Option(help: "Node to ask. Defaults to the node you're talking to.") var node: String?
         @OptionGroup var options: CommonOptions
 
         func run() async throws {
-            let client = TenderClient(socketPath: options.socket ?? TenderClient.defaultSocketPath())
             do {
-                let list = try await client.releases(service: name)
+                let client = try options.makeClient()
+                let list = try await client.releases(service: name, node: node)
                 print(options.json ? try options.encode(list) : ProcessTable.render(list))
             } catch let error as TenderClientError {
                 try options.fail(error)
@@ -225,10 +261,11 @@ extension Tender {
         static let configuration = CommandConfiguration(abstract: "Go back to an earlier release.")
         @Argument(help: "Service name.") var name: String
         @Option(help: "Release to go back to. Defaults to the one before the current release.") var to: String?
+        @Option(help: "Only on this node. Defaults to every node running it.") var node: String?
         @OptionGroup var options: CommonOptions
 
         func run() async throws {
-            try await options.execute { try await $0.rollback(service: name, to: to) }
+            try await options.execute { try await $0.rollback(service: name, to: to, node: node) }
         }
     }
 
@@ -240,6 +277,7 @@ extension Tender {
         @Argument(help: "launchd label, for example homebrew.mxcl.mongodb-community.") var label: String
         @Option(help: "Log file to use instead of the job's StandardOutPath and StandardErrorPath.") var logPath: String?
         @Flag(help: "Stop managing the job. The job itself isn't touched.") var forget = false
+        @Option(help: "Node the job runs on. Defaults to the node you're talking to.") var node: String?
         @OptionGroup var options: CommonOptions
 
         func validate() throws {
@@ -248,19 +286,20 @@ extension Tender {
 
         func run() async throws {
             if forget {
-                try await options.execute { try await $0.forget(label: label) }
+                try await options.execute { try await $0.forget(label: label, node: node) }
             } else {
-                try await options.execute { try await $0.adopt(label: label, logPath: logPath) }
+                try await options.execute { try await $0.adopt(label: label, logPath: logPath, node: node) }
             }
         }
     }
 
     struct Gc: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Boot out orphaned launchd jobs with Tender's prefix.")
+        @Option(help: "Node to clean. Defaults to the node you're talking to.") var node: String?
         @OptionGroup var options: CommonOptions
 
         func run() async throws {
-            try await options.execute { try await $0.collectGarbage() }
+            try await options.execute { try await $0.collectGarbage(node: node) }
         }
     }
 

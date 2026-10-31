@@ -67,7 +67,7 @@ let package = Package(
             .product(name: "X509", package: "swift-certificates"),
         ]),
         .target(name: "TenderAgent", dependencies: [
-            "TenderCore", "TenderProtocol", "TenderActorSystem", "LaunchdKit", "ProcessMetrics", "FileWatch", "LogTail",
+            "TenderCore", "TenderProtocol", "TenderActorSystem", "TenderPKI", "LaunchdKit", "ProcessMetrics", "FileWatch", "LogTail",
             .product(name: "GRDB", package: "GRDB.swift"),
             .product(name: "Logging", package: "swift-log"),
             .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
@@ -93,15 +93,21 @@ let package = Package(
         ]),
         .target(name: "TenderMCP", dependencies: ["TenderCore", "TenderClient"]),
         .target(name: "TenderHead", dependencies: [
-            "TenderCore", "TenderProtocol", "TenderActorSystem", "TenderLogStore", "TenderPKI",
+            "TenderCore", "TenderProtocol", "TenderActorSystem", "TenderAgent", "TenderLogStore", "TenderPKI",
             "TenderScheduler", "TenderMetrics", "TenderMCP",
+            .product(name: "GRDB", package: "GRDB.swift"),
+            .product(name: "Hummingbird", package: "hummingbird"),
+            .product(name: "HummingbirdTLS", package: "hummingbird"),
+            .product(name: "Crypto", package: "swift-crypto"),
+            .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+            .product(name: "NIOSSL", package: "swift-nio-ssl"),
             .product(name: "Logging", package: "swift-log"),
             .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
         ]),
 
         // MARK: 3 — Executables (thin: parse args, wire, run)
         .executableTarget(name: "tenderd", dependencies: [
-            "TenderCore", "TenderAgent", "TenderHead",
+            "TenderCore", "TenderAgent", "TenderHead", "TenderPKI",
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
             .product(name: "Logging", package: "swift-log"),
         ]),
@@ -113,6 +119,9 @@ let package = Package(
         // MARK: Tests
         .testTarget(name: "TenderTransportTests", dependencies: [
             "TenderActorSystem", "TenderProtocol", "TenderPKI", "TenderCore",
+        ]),
+        .testTarget(name: "TenderHeadTests", dependencies: [
+            "TenderHead", "TenderAgent", "TenderClient", "TenderCore", "TenderPKI", "TenderActorSystem", "TenderProtocol", "LaunchdKit",
         ]),
         .testTarget(name: "TenderPKITests", dependencies: [
             "TenderPKI", "TenderCore",

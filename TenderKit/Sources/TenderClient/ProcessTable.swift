@@ -8,21 +8,44 @@ public enum ProcessTable {
         if list.processes.isEmpty {
             output = "No processes."
         } else {
-            let rows = [["SERVICE", "INST", "STATE", "PID", "UPTIME", "CPU", "RSS", "RESTARTS", "RELEASE"]]
+            let rows = [["SERVICE", "NODE", "INST", "STATE", "PID", "UPTIME", "CPU", "RSS", "RESTARTS", "RELEASE"]]
                 + list.processes.map(row)
-            let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
-            output = rows.map { row in
-                zip(row, widths)
-                    .map { $0.padding(toLength: $1, withPad: " ", startingAt: 0) }
-                    .joined(separator: "  ")
-                    .trimmingCharacters(in: .whitespaces)
-            }.joined(separator: "\n")
+            output = aligned(rows)
+        }
+        if !list.unreachableNodes.isEmpty {
+            output += "\n\nNot reachable, so their processes aren't listed: " + list.unreachableNodes.joined(separator: ", ")
         }
         if !list.orphans.isEmpty {
             output += "\n\nOrphaned launchd jobs (not in desired state):\n"
             output += list.orphans.map { "  \($0)" }.joined(separator: "\n")
         }
         return output
+    }
+
+    public static func render(_ list: NodeList) -> String {
+        guard !list.nodes.isEmpty else { return "No nodes." }
+        let rows = [["NODE", "STATE", "ADDRESS", "PROCESSES", "CRASHED", "LAST SEEN", "VERSION"]] + list.nodes.map { node in
+            [
+                node.info.id.rawValue,
+                node.up ? "up" : "down",
+                node.info.address ?? "-",
+                String(node.instanceCount),
+                String(node.crashedCount),
+                node.lastHeartbeatAge.map { duration($0) + " ago" } ?? "-",
+                node.info.version,
+            ]
+        }
+        return aligned(rows)
+    }
+
+    private static func aligned(_ rows: [[String]]) -> String {
+        let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
+        return rows.map { row in
+            zip(row, widths)
+                .map { $0.padding(toLength: $1, withPad: " ", startingAt: 0) }
+                .joined(separator: "  ")
+                .trimmingCharacters(in: .whitespaces)
+        }.joined(separator: "\n")
     }
 
     public static func render(_ list: ReleaseList) -> String {
@@ -37,6 +60,7 @@ public enum ProcessTable {
     private static func row(_ status: InstanceStatus) -> [String] {
         [
             status.service,
+            status.node.rawValue,
             String(status.instance),
             status.state.rawValue,
             status.pid.map(String.init) ?? "-",

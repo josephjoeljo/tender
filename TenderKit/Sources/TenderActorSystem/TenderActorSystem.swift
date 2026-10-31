@@ -130,6 +130,9 @@ public final class TenderActorSystem: DistributedActorSystem, @unchecked Sendabl
     /// Gives the next actor initialized in this task a well-known name, such as `agent`.
     @TaskLocal public static var wellKnownName: String?
 
+    /// The authenticated node making the current inbound call.
+    @TaskLocal public static var currentCaller: NodeID?
+
     public let localNode: NodeID
     public let protocolVersion: Int
     public let callTimeout: Duration
@@ -380,7 +383,7 @@ public final class TenderActorSystem: DistributedActorSystem, @unchecked Sendabl
                                 arguments: invocation.arguments)
         let reply: ReplyEnvelope
         if recipient.node == localNode {
-            reply = await handle(call)
+            reply = await Self.$currentCaller.withValue(localNode) { await handle(call) }
         } else {
             let connection = try await connection(to: recipient.node)
             reply = try await connection.call(call, timeout: callTimeout)
@@ -626,7 +629,8 @@ final class Connection: @unchecked Sendable {
             // Nothing runs before the peer has been authenticated.
             guard isActive else { return protocolViolation() }
             Task {
-                let reply = await system.handle(call)
+                let caller = state.withLockedValue { $0.peer }
+                let reply = await TenderActorSystem.$currentCaller.withValue(caller) { await system.handle(call) }
                 write(.reply(reply))
             }
         case .reply(let reply):

@@ -62,7 +62,7 @@ private let plan = SystemInstallPlan()
     let plist = try #require(
         try PropertyListSerialization.propertyList(from: try plan.renderDaemonPlist(), format: nil) as? [String: Any])
     #expect(plist["Label"] as? String == "com.olympsis.tender.agent")
-    #expect(plist["ProgramArguments"] as? [String] == ["/opt/tender/libexec/tenderd", "--role", "worker"])
+    #expect(plist["ProgramArguments"] as? [String] == ["/opt/tender/libexec/tenderd", "run", "--role", "worker"])
     #expect(plist["UserName"] == nil, "tenderd itself runs as root; only managed processes are _tender")
 }
 
