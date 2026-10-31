@@ -8,7 +8,7 @@ struct Tender: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
-        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Daemon.self]
+        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Gc.self, Version.self, Daemon.self]
     )
 }
 
@@ -147,6 +147,24 @@ extension Tender {
 
         func run() async throws {
             try await options.execute { try await $0.list() }
+        }
+    }
+
+    struct Gc: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Boot out orphaned launchd jobs with Tender's prefix.")
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            try await options.execute { try await $0.collectGarbage() }
+        }
+    }
+
+    struct Version: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Print the CLI version.")
+        @Flag(help: "Print JSON.") var json = false
+
+        func run() async throws {
+            print(json ? #"{"version":"\#(TenderVersion.current)"}"# : TenderVersion.current)
         }
     }
 }

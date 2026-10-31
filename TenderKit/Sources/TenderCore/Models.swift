@@ -1,5 +1,9 @@
 import Foundation
 
+public enum TenderVersion {
+    public static let current = "0.1.0"
+}
+
 /// Stable identifier for a machine in the cluster (e.g. "mac-2").
 public struct NodeID: Hashable, Codable, Sendable, CustomStringConvertible {
     public let rawValue: String

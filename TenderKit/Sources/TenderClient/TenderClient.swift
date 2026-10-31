@@ -74,6 +74,11 @@ public struct TenderClient: Sendable {
         try await send(.DELETE, "/v1/processes/\(try escaped(service))")
     }
 
+    /// Boots out orphaned launchd jobs.
+    public func collectGarbage() async throws -> ProcessList {
+        try await send(.POST, "/v1/gc")
+    }
+
     private func escaped(_ component: String) throws -> String {
         guard let value = component.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else {
             throw TenderClientError.invalidResponse("can't encode '\(component)'")

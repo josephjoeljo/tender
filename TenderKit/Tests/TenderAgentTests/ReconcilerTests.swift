@@ -174,6 +174,21 @@ private let plistB = Data("b".utf8)
     #expect(try await h.reconciler.status().orphans == [orphan])
 }
 
+@Test func gcBootsOutOrphansOnly() async throws {
+    let h = try Harness()
+    defer { h.cleanup() }
+    try h.store.upsert(spec)
+    try await h.reconciler.reconcile()
+    let orphan = h.label("ghost")
+    await h.launchd.setLoaded([orphan, h.label(), "com.apple.other"])
+
+    let report = try await h.reconciler.collectGarbage()
+    #expect(report.failures.isEmpty)
+    #expect(await h.launchd.loaded == [h.label(), "com.apple.other"])
+    #expect(try await h.reconciler.status().orphans.isEmpty)
+    #expect(try await h.reconciler.collectGarbage().applied.isEmpty)
+}
+
 @Test func restartKickstartsOnlyAlreadyLoadedInstances() async throws {
     let h = try Harness()
     defer { h.cleanup() }

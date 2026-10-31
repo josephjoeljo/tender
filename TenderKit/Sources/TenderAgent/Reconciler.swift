@@ -181,6 +181,28 @@ public actor Reconciler {
         }
     }
 
+    /// Boots out orphans: labels with our prefix that aren't in the desired state.
+    /// The one operation that removes jobs Tender has no record of, so it only
+    /// runs when asked for (`tender gc`), never from a sweep.
+    @discardableResult
+    public func collectGarbage() async throws -> ReconcileReport {
+        try await exclusive {
+            var report = ReconcileReport()
+            let known = Set(try self.store.instances().map(\.label))
+            let loaded = try await self.launchd.listLabels(prefix: "\(self.environment.serviceLabelPrefix).")
+            for label in loaded where !known.contains(label) {
+                do {
+                    try await self.apply(.bootout(label: label))
+                    try await self.apply(.removePlist(label: label))
+                    report.applied.append(.bootout(label: label))
+                } catch {
+                    report.failures.append(ReconcileFailure(label: label, message: "\(error)"))
+                }
+            }
+            return report
+        }
+    }
+
     /// Current status of all instances, plus orphaned labels.
     public func status() async throws -> ProcessList {
         let node = NodeID(ProcessInfo.processInfo.hostName)

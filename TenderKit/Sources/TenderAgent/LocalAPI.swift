@@ -49,6 +49,15 @@ struct ProcessController: Sendable {
         return try await finish(try await reconciler.reconcile(), service: service)
     }
 
+    func collectGarbage() async throws -> ProcessList {
+        let report = try await reconciler.collectGarbage()
+        if let failure = report.failures.first {
+            throw APIFailure(status: .internalServerError, code: "launchd_failed",
+                             message: "\(failure.label): \(failure.message)")
+        }
+        return try await reconciler.status()
+    }
+
     private func requireExisting(_ service: String, _ exists: Bool) throws {
         guard exists else {
             throw APIFailure(status: .notFound, code: "service_not_found", message: "No service named '\(service)'.")
@@ -125,6 +134,10 @@ func makeRouter(controller: ProcessController) -> Router<BasicRequestContext> {
     }
     router.delete("/v1/processes/:name") { _, context in
         await respond { try await controller.delete(service: try context.parameters.require("name")) }
+    }
+
+    router.post("/v1/gc") { _, _ in
+        await respond { try await controller.collectGarbage() }
     }
 
     // Part of the API surface, delivered by later milestone 1 steps (D, E, F).
