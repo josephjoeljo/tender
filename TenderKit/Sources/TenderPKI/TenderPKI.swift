@@ -8,12 +8,14 @@ public enum PKIError: Error, Equatable, CustomStringConvertible {
     case invalidCSR(String)
     case nodeMismatch(expected: String, found: String)
     case invalidNodeID(String)
+    case invalidAuthority(String)
 
     public var description: String {
         switch self {
         case .invalidCSR(let detail): "Invalid certificate request: \(detail)"
         case .nodeMismatch(let expected, let found): "Certificate request is for '\(found)', not '\(expected)'."
         case .invalidNodeID(let id): "'\(id)' isn't a valid node ID."
+        case .invalidAuthority(let detail): "Invalid CA: \(detail)"
         }
     }
 }
@@ -34,6 +36,31 @@ public struct CertificateAuthority: Sendable {
         self.privateKeyPEM = privateKeyPEM
         certificate = try Certificate(pemEncoded: certificatePEM)
         key = Certificate.PrivateKey(try P256.Signing.PrivateKey(pemRepresentation: privateKeyPEM))
+        guard certificate.publicKey == key.publicKey else {
+            throw PKIError.invalidAuthority("the private key doesn't match the certificate")
+        }
+        guard case .isCertificateAuthority = try certificate.extensions.basicConstraints else {
+            throw PKIError.invalidAuthority("the certificate isn't a CA certificate")
+        }
+    }
+
+    /// Reads `tender ca export` output. Older exports have no newline between the two
+    /// PEM blocks, so this looks for the markers instead of parsing line by line.
+    public init(backupPEM: String) throws {
+        guard let certificate = Self.pemBlock("CERTIFICATE", in: backupPEM) else {
+            throw PKIError.invalidAuthority("the backup has no certificate")
+        }
+        guard let key = Self.pemBlock("PRIVATE KEY", in: backupPEM) ?? Self.pemBlock("EC PRIVATE KEY", in: backupPEM) else {
+            throw PKIError.invalidAuthority("the backup has no private key")
+        }
+        try self.init(certificatePEM: certificate, privateKeyPEM: key)
+    }
+
+    private static func pemBlock(_ label: String, in text: String) -> String? {
+        guard let start = text.range(of: "-----BEGIN \(label)-----"),
+              let end = text.range(of: "-----END \(label)-----", range: start.upperBound..<text.endIndex)
+        else { return nil }
+        return String(text[start.lowerBound..<end.upperBound])
     }
 
     public static func create(name: String = "Tender Internal CA", now: Date = Date()) throws -> CertificateAuthority {

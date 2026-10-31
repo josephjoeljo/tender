@@ -36,6 +36,33 @@ output offline: anyone holding it can issue certificates for your cluster.
 sudo tender ca export > tender-ca-backup.pem
 ```
 
+## Restore the CA
+
+To move the head to a new Mac, install it as above, which creates a new CA, then replace that
+CA with your backup and restart. `--replace` makes any node that joined the new CA join again.
+
+```bash
+sudo /opt/tender/libexec/tenderd ca-import --from tender-ca-backup.pem --replace
+```
+
+```bash
+sudo launchctl kickstart -k system/com.olympsis.tender.agent
+```
+
+The head won't start with only part of a CA, because creating a new one would overwrite what's
+left. Run the same command to fix that.
+
+Only delete what's left if there's no CA to save. A worker turned into a head holds only the old
+cluster's `ca.crt`. If first start was interrupted on a head no node has joined, it holds only `ca.key`.
+
+```bash
+sudo security delete-generic-password -s com.olympsis.tender -a ca.crt /Library/Keychains/System.keychain
+```
+
+```bash
+sudo security delete-generic-password -s com.olympsis.tender -a ca.key /Library/Keychains/System.keychain
+```
+
 ## Join a worker
 
 On the head:

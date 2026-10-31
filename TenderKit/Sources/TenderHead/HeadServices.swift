@@ -36,6 +36,22 @@ public struct HeadOptions: Sendable {
     }
 }
 
+public enum AuthorityStoreError: Error, Equatable, CustomStringConvertible {
+    case incomplete(missing: String)
+    case differentAuthority(backup: String)
+
+    public var description: String {
+        switch self {
+        case .incomplete(let missing):
+            "This node has part of a CA, but \(missing) is missing. Restore a backup with `tenderd ca-import`, "
+                + "or see docs/ops/cluster.md if there's no backup or this node used to be a worker."
+        case .differentAuthority(let backup):
+            "This node holds a different CA from the backup (\(backup)). "
+                + "Pass --replace to overwrite it. Nodes that joined the current CA will have to join again."
+        }
+    }
+}
+
 /// Everything only the head does: CA, registry, command routing, public API.
 public final class HeadServices: Sendable {
     public let options: HeadOptions
@@ -65,17 +81,46 @@ public final class HeadServices: Sendable {
     }
 
     /// Creates the CA on first start. Losing it means every node has to re-join, so
-    /// it's printed nowhere and leaves only through `tender ca export`.
-    private static func loadOrCreateAuthority(secrets: any SecretStore) throws -> CertificateAuthority {
-        if let certificate = try secrets.read(ClusterSecrets.caCertificate),
-           let key = try secrets.read(ClusterSecrets.caKey) {
+    /// it's printed nowhere and leaves only through `tender ca export`. Half a CA is
+    /// refused: creating a new one would overwrite the half that's left.
+    static func loadOrCreateAuthority(secrets: any SecretStore) throws -> CertificateAuthority {
+        let certificate = try secrets.read(ClusterSecrets.caCertificate)
+        let key = try secrets.read(ClusterSecrets.caKey)
+        switch (certificate, key) {
+        case (let certificate?, let key?):
             return try CertificateAuthority(certificatePEM: String(decoding: certificate, as: UTF8.self),
                                             privateKeyPEM: String(decoding: key, as: UTF8.self))
+        case (nil, nil):
+            let created = try CertificateAuthority.create()
+            try secrets.write(ClusterSecrets.caKey, Data(created.privateKeyPEM.utf8))
+            try secrets.write(ClusterSecrets.caCertificate, Data(created.certificatePEM.utf8))
+            return created
+        case (_?, nil):
+            throw AuthorityStoreError.incomplete(missing: ClusterSecrets.caKey)
+        case (nil, _?):
+            throw AuthorityStoreError.incomplete(missing: ClusterSecrets.caCertificate)
         }
-        let created = try CertificateAuthority.create()
-        try secrets.write(ClusterSecrets.caKey, Data(created.privateKeyPEM.utf8))
-        try secrets.write(ClusterSecrets.caCertificate, Data(created.certificatePEM.utf8))
-        return created
+    }
+
+    /// Puts a `tender ca export` backup back. The caller restarts the daemon, which
+    /// reads the CA once at start. Without `replace`, a different CA is left alone.
+    @discardableResult
+    public static func restoreAuthority(backupPEM: String, secrets: any SecretStore, replace: Bool) throws -> CertificateAuthority {
+        let backup = try CertificateAuthority(backupPEM: backupPEM)
+        if !replace {
+            let certificate = try secrets.read(ClusterSecrets.caCertificate)
+            let key = try secrets.read(ClusterSecrets.caKey)
+            let sameCertificate = certificate.map {
+                CertificateAuthority.fingerprint(ofPEM: String(decoding: $0, as: UTF8.self)) == backup.fingerprint
+            }
+            let sameKey = key.map { String(decoding: $0, as: UTF8.self) == backup.privateKeyPEM }
+            guard sameCertificate != false, sameKey != false else {
+                throw AuthorityStoreError.differentAuthority(backup: backup.fingerprint)
+            }
+        }
+        try secrets.write(ClusterSecrets.caKey, Data(backup.privateKeyPEM.utf8))
+        try secrets.write(ClusterSecrets.caCertificate, Data(backup.certificatePEM.utf8))
+        return backup
     }
 
     /// The head is a node too. Its certificate is reissued at each start so that it

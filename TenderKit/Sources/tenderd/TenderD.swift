@@ -10,7 +10,7 @@ struct TenderD: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tenderd",
         abstract: "Tender daemon: runs as the head node or a worker.",
-        subcommands: [Run.self, SecretsExport.self, SecretsImport.self],
+        subcommands: [Run.self, SecretsExport.self, SecretsImport.self, CAImport.self],
         defaultSubcommand: Run.self
     )
 }
@@ -124,5 +124,21 @@ struct SecretsImport: AsyncParsableCommand {
         let values = try JSONDecoder().decode([String: Data].self, from: Data(contentsOf: URL(filePath: from)))
         for (name, value) in values { try store.write(name, value) }
         try FileManager.default.removeItem(atPath: from)
+    }
+}
+
+/// A subcommand of `tenderd`, not `tender`, so that the Keychain items belong to
+/// `tenderd`, and so that it works on a head that refuses to start with half a CA.
+struct CAImport: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "ca-import", abstract: "Restore the CA from a `tender ca export` backup.")
+    @Option(help: "Backup file to read.") var from: String
+    @Flag(help: "Overwrite a different CA. Nodes that joined it will have to join again.") var replace = false
+    @OptionGroup var environmentOptions: EnvironmentOptions
+
+    func run() async throws {
+        let backup = try String(contentsOf: URL(filePath: from), encoding: .utf8)
+        let store = environmentOptions.environment.makeSecretStore()
+        let restored = try HeadServices.restoreAuthority(backupPEM: backup, secrets: store, replace: replace)
+        print("Restored CA \(restored.fingerprint). Restart the daemon to use it.")
     }
 }

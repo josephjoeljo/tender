@@ -167,3 +167,37 @@ func keychainSecretStoreRoundTrip() throws {
     try store.delete("k")
     #expect(try store.read("k") == nil)
 }
+
+@Test func readsABackupWithOrWithoutANewlineBetweenBlocks() throws {
+    let ca = try CertificateAuthority.create()
+    for separator in ["", "\n"] {
+        let restored = try CertificateAuthority(backupPEM: ca.certificatePEM + separator + ca.privateKeyPEM + "\n")
+        #expect(restored.fingerprint == ca.fingerprint)
+        #expect(restored.privateKeyPEM == ca.privateKeyPEM)
+        _ = try restored.sign(csrPEM: try NodeKey.generate().makeCSR(nodeID: NodeID("n")), nodeID: NodeID("n"))
+    }
+}
+
+@Test func refusesAKeyFromAnotherCA() throws {
+    let ca = try CertificateAuthority.create()
+    let other = try CertificateAuthority.create()
+    #expect(throws: PKIError.invalidAuthority("the private key doesn't match the certificate")) {
+        try CertificateAuthority(certificatePEM: ca.certificatePEM, privateKeyPEM: other.privateKeyPEM)
+    }
+}
+
+@Test func refusesANodeCertificateAsACA() throws {
+    let ca = try CertificateAuthority.create()
+    let key = NodeKey.generate()
+    let certificate = try ca.sign(csrPEM: try key.makeCSR(nodeID: NodeID("n")), nodeID: NodeID("n"))
+    #expect(throws: PKIError.invalidAuthority("the certificate isn't a CA certificate")) {
+        try CertificateAuthority(certificatePEM: certificate, privateKeyPEM: key.privateKeyPEM)
+    }
+}
+
+@Test func refusesABackupMissingItsKey() throws {
+    let ca = try CertificateAuthority.create()
+    #expect(throws: PKIError.invalidAuthority("the backup has no private key")) {
+        try CertificateAuthority(backupPEM: ca.certificatePEM)
+    }
+}

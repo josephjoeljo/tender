@@ -122,7 +122,7 @@ extension Tender {
             @OptionGroup var options: CommonOptions
 
             func run() async throws {
-                try await options.run({ try await $0.exportCA() }) { $0.certificatePEM + $0.privateKeyPEM }
+                try await options.run({ try await $0.exportCA() }) { $0.certificatePEM + "\n" + $0.privateKeyPEM }
             }
         }
     }

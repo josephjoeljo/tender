@@ -62,7 +62,9 @@ Things about how Tender works that may not be what you'd assume.
   its own at each start, but a worker needs `tender node revoke` on the head, then `tender leave` and `tender join`.
 - **Upgrades:** Keychain items trust the binary that wrote them, so `tender daemon install
   --system` moves secrets from the old `tenderd` to the new one. Replacing the binary by hand
-  would lock it out.
+  would lock it out. If an upgrade stops partway, `secrets-handoff.json` stays in the run
+  directory with the secrets in plaintext, and installing again is refused until they're imported.
+- **Half a CA:** a head missing either `ca.crt` or `ca.key` refuses to start rather than creating a new CA.
 
 ## Cluster logs
 
