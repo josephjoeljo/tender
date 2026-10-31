@@ -6,12 +6,14 @@ import TenderClient
 /// to meter. Past a few nodes, an unlabelled dot per node takes less room.
 struct MenuBarLabel: View {
     let model: ClusterModel
+    /// Set by previews, to draw for a given menu bar. The real item follows the system.
+    var appearance: NSAppearance? = nil
 
     var body: some View {
         let meters = NodeMeter.meters(nodes: model.nodes, processes: model.processes)
         switch model.health {
         case .healthy, .degraded where !meters.isEmpty:
-            Image(nsImage: NodeMeterImage.make(meters))
+            Image(nsImage: NodeMeterImage.make(meters, appearance: appearance))
                 .accessibilityLabel(model.health.summary)
         default:
             Image(systemName: model.health.symbol)
@@ -43,17 +45,20 @@ enum NodeMeterImage {
         }
     }
 
-    static func make(_ meters: [NodeMeter]) -> NSImage {
-        meters.count > NodeMeter.maxMetersShown ? dots(meters) : labelled(meters)
+    static func make(_ meters: [NodeMeter], appearance: NSAppearance? = nil) -> NSImage {
+        meters.count > NodeMeter.maxMetersShown ? dots(meters) : labelled(meters, appearance: appearance)
     }
 
     /// Not a template image, so that colour survives. Text and outlines use label colours,
     /// resolved at draw time, so that they follow a light or dark menu bar.
-    private static func labelled(_ meters: [NodeMeter]) -> NSImage {
+    private static func labelled(_ meters: [NodeMeter], appearance: NSAppearance?) -> NSImage {
         let font = font()
         let widths = meters.map { max(($0.label as NSString).size(withAttributes: [.font: font]).width, capsule.width) }
         let width = widths.reduce(0, +) + gap * CGFloat(max(meters.count - 1, 0))
         let image = NSImage(size: NSSize(width: ceil(width), height: height), flipped: false) { _ in
+            let saved = NSAppearance.current
+            if let appearance { NSAppearance.current = appearance }
+            defer { NSAppearance.current = saved }
             let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor]
             var x: CGFloat = 0
             for (meter, slot) in zip(meters, widths) {
@@ -91,3 +96,41 @@ enum NodeMeterImage {
         return image
     }
 }
+
+#if DEBUG
+/// The label on a stand-in menu bar, in both appearances.
+private struct MenuBarLabelPreviewBar: View {
+    let model: ClusterModel
+    let dark: Bool
+
+    var body: some View {
+        MenuBarLabel(model: model, appearance: NSAppearance(named: dark ? .darkAqua : .aqua))
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(dark ? Color(white: 0.13) : Color(white: 0.88))
+            .environment(\.colorScheme, dark ? .dark : .light)
+    }
+}
+
+private struct MenuBarLabelPreviews: View {
+    private let rows: [(String, ClusterModel)] = [
+        ("Healthy", .previewHealthy), ("Degraded", .previewDegraded),
+        ("More than 4 nodes", .previewMany), ("Not configured", .previewNotConfigured),
+    ]
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+            ForEach(rows, id: \.0) { row in
+                GridRow {
+                    Text(row.0).font(.caption).foregroundStyle(.secondary)
+                    MenuBarLabelPreviewBar(model: row.1, dark: true)
+                    MenuBarLabelPreviewBar(model: row.1, dark: false)
+                }
+            }
+        }
+        .padding()
+    }
+}
+
+#Preview("Menu bar label") { MenuBarLabelPreviews() }
+#endif
