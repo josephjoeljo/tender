@@ -1,4 +1,5 @@
 import ArgumentParser
+import TenderAgent
 import TenderCore
 
 @main
@@ -10,7 +11,7 @@ struct TenderD: AsyncParsableCommand {
 
     enum Role: String, ExpressibleByArgument { case head, worker }
 
-    @Option(help: "Which role this daemon plays.")
+    @Option(help: "Which role this daemon plays. Head services arrive in milestone 2; both run the worker agent.")
     var role: Role = .worker
 
     @Flag(help: "Use per-user paths and the gui/<uid> launchd domain (no root needed).")
@@ -19,6 +20,6 @@ struct TenderD: AsyncParsableCommand {
     func run() async throws {
         let env: TenderEnvironment = dev ? .development : .production
         print("tenderd starting: role=\(role.rawValue) mode=\(env.mode.rawValue) root=\(env.root.path())")
-        // TODO(milestone 1): start the worker agent. TODO(milestone 2): head services.
+        try await AgentRuntime(environment: env).run()
     }
 }
