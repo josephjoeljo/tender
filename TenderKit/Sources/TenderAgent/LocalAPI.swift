@@ -17,9 +17,46 @@ struct ProcessController: Sendable {
     let store: StateStore
     let reconciler: Reconciler
     let releases: ReleaseManager
+    let adoption: Adoption
 
     func list() async throws -> ProcessList {
-        try await reconciler.status()
+        var list = try await reconciler.status()
+        list.processes += try await adoption.statuses()
+        return list
+    }
+
+    /// Runs `action` if `name` is an adopted job. Adopted jobs bypass the desired
+    /// state: the reconciler never touches them.
+    private func controlAdopted(_ name: String, _ action: (AdoptedJob) async throws -> Void) async throws -> ProcessList? {
+        guard let job = try store.adopted(label: name) else { return nil }
+        do {
+            try await action(job)
+        } catch let error as AdoptionError {
+            throw APIFailure(status: .conflict, code: "adopted_job", message: error.description)
+        } catch {
+            throw APIFailure(status: .internalServerError, code: "launchd_failed", message: "\(error)")
+        }
+        return try await list()
+    }
+
+    func adopt(_ request: AdoptRequest) async throws -> ProcessList {
+        do {
+            try await adoption.adopt(label: request.label, logPath: request.logPath)
+        } catch let error as AdoptionError {
+            switch error {
+            case .jobNotFound:
+                throw APIFailure(status: .notFound, code: "job_not_found", message: error.description)
+            default:
+                throw APIFailure(status: .badRequest, code: "invalid_label", message: error.description)
+            }
+        }
+        return try await list()
+    }
+
+    /// Idempotent. Leaves the launchd job exactly as it is.
+    func forget(label: String) async throws -> ProcessList {
+        try adoption.forget(label: label)
+        return try await list()
     }
 
     /// Idempotent: starting an unchanged running service does nothing.
@@ -32,6 +69,7 @@ struct ProcessController: Sendable {
     /// Starts an existing service, or creates one from the service's newest
     /// release, for a binary that was dropped into `bin/` before any `tender start`.
     func start(service: String) async throws -> ProcessList {
+        if let result = try await controlAdopted(service, adoption.start) { return result }
         if try store.service(service) == nil, let newest = try store.releases(service: service).first {
             return try await start(ServiceSpec(name: service, program: .release(sha12: newest.sha12)))
         }
@@ -41,18 +79,24 @@ struct ProcessController: Sendable {
 
     /// Idempotent for a known service. An unknown name is a 404: it is probably a typo.
     func stop(service: String) async throws -> ProcessList {
+        if let result = try await controlAdopted(service, adoption.stop) { return result }
         try requireExisting(service, try store.setDesired(.stopped, service: service))
         return try await finish(try await reconciler.reconcile(), service: service)
     }
 
     /// Also starts a stopped service.
     func restart(service: String) async throws -> ProcessList {
+        if let result = try await controlAdopted(service, adoption.restart) { return result }
         try requireExisting(service, try store.setDesired(.running, service: service))
         return try await finish(try await reconciler.restart(service: service), service: service)
     }
 
     /// Idempotent: deleting an unknown service succeeds, since it is already gone.
     func delete(service: String) async throws -> ProcessList {
+        if try store.adopted(label: service) != nil {
+            throw APIFailure(status: .conflict, code: "adopted_job",
+                             message: "'\(service)' is adopted. Use `tender adopt --forget` to stop managing it.")
+        }
         try store.deleteService(service)
         return try await finish(try await reconciler.reconcile(), service: service)
     }
@@ -81,7 +125,7 @@ struct ProcessController: Sendable {
             throw APIFailure(status: .internalServerError, code: "launchd_failed",
                              message: "\(failure.label): \(failure.message)")
         }
-        return try await reconciler.status()
+        return try await list()
     }
 
     struct LogSource {
@@ -93,6 +137,18 @@ struct ProcessController: Sendable {
 
     /// The files to read for a logs request.
     func logSources(service: String, instance: Int?, stream: LogLine.Stream?) throws -> [LogSource] {
+        if let job = try store.adopted(label: service) {
+            guard instance == nil || instance == 0 else { return [] }
+            var sources: [LogSource] = []
+            if stream != .err, let path = job.stdoutPath {
+                sources.append(LogSource(service: service, instance: 0, stream: .out, url: URL(filePath: path)))
+            }
+            // Jobs often send both streams to one file. Don't read it twice.
+            if stream != .out, let path = job.stderrPath, path != job.stdoutPath || stream == .err {
+                sources.append(LogSource(service: service, instance: 0, stream: .err, url: URL(filePath: path)))
+            }
+            return sources
+        }
         try requireExisting(service, try store.service(service) != nil)
         return try store.instances()
             .filter { $0.service == service && $0.desired != .absent && (instance == nil || $0.instance == instance) }
@@ -122,7 +178,7 @@ struct ProcessController: Sendable {
             throw APIFailure(status: .internalServerError, code: "launchd_failed",
                              message: "\(failure.label): \(failure.message)")
         }
-        return try await reconciler.status()
+        return try await list()
     }
 
     private func validate(_ spec: ServiceSpec) throws {
@@ -214,8 +270,16 @@ func makeRouter(controller: ProcessController) -> Router<BasicRequestContext> {
         }
     }
 
-    // Part of the API surface, delivered by a later milestone 1 step (F).
-    router.post("/v1/adopt") { _, _ in notImplemented("adopt") }
+    router.post("/v1/adopt") { request, _ in
+        await respond {
+            var request = request
+            let body = try await request.collectBody(upTo: 1 << 16)
+            return try await controller.adopt(try decodeBody(AdoptRequest.self, Data(body.readableBytesView)))
+        }
+    }
+    router.delete("/v1/adopt/:label") { _, context in
+        await respond { try await controller.forget(label: try context.parameters.require("label")) }
+    }
 
     return router
 }
@@ -311,10 +375,6 @@ private func respond(_ operation: () async throws -> some Encodable) async -> Re
     } catch {
         return json(APIErrorBody(code: "internal", message: "\(error)"), status: .internalServerError)
     }
-}
-
-private func notImplemented(_ feature: String) -> Response {
-    json(APIErrorBody(code: "not_implemented", message: "\(feature) is not implemented yet."), status: .notImplemented)
 }
 
 private func json(_ value: some Encodable, status: HTTPResponse.Status) -> Response {

@@ -8,7 +8,7 @@ struct Tender: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
-        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Gc.self, Version.self, Daemon.self]
+        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Gc.self, Version.self, Daemon.self]
     )
 }
 
@@ -225,6 +225,29 @@ extension Tender {
 
         func run() async throws {
             try await options.execute { try await $0.rollback(service: name, to: to) }
+        }
+    }
+
+    struct Adopt: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Manage an existing launchd job without rewriting its plist.",
+            discussion: "Control it with `tender stop|start|restart <label>` and read it with `tender logs <label>`."
+        )
+        @Argument(help: "launchd label, for example homebrew.mxcl.mongodb-community.") var label: String
+        @Option(help: "Log file to use instead of the job's StandardOutPath and StandardErrorPath.") var logPath: String?
+        @Flag(help: "Stop managing the job. The job itself isn't touched.") var forget = false
+        @OptionGroup var options: CommonOptions
+
+        func validate() throws {
+            if forget, logPath != nil { throw ValidationError("--forget and --log-path don't go together.") }
+        }
+
+        func run() async throws {
+            if forget {
+                try await options.execute { try await $0.forget(label: label) }
+            } else {
+                try await options.execute { try await $0.adopt(label: label, logPath: logPath) }
+            }
         }
     }
 

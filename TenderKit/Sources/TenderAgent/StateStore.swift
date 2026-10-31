@@ -214,6 +214,42 @@ public struct StateStore: Sendable {
         }
     }
 
+    public func saveAdopted(_ job: AdoptedJob) throws {
+        try pool.write { db in
+            try db.execute(sql: """
+                INSERT INTO adopted_jobs (label, domain, plist_path, stdout_path, stderr_path, adopted_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (label) DO UPDATE SET domain = excluded.domain, plist_path = excluded.plist_path,
+                    stdout_path = excluded.stdout_path, stderr_path = excluded.stderr_path
+                """, arguments: [job.label, job.domain, job.plistPath, job.stdoutPath, job.stderrPath,
+                                 Date().timeIntervalSince1970])
+        }
+    }
+
+    public func removeAdopted(label: String) throws {
+        try pool.write { db in
+            try db.execute(sql: "DELETE FROM adopted_jobs WHERE label = ?", arguments: [label])
+        }
+    }
+
+    public func adoptedJobs() throws -> [AdoptedJob] {
+        try pool.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM adopted_jobs ORDER BY label").map(Self.adoptedJob)
+        }
+    }
+
+    public func adopted(label: String) throws -> AdoptedJob? {
+        try pool.read { db in
+            try Row.fetchOne(db, sql: "SELECT * FROM adopted_jobs WHERE label = ?", arguments: [label])
+                .map(Self.adoptedJob)
+        }
+    }
+
+    private static func adoptedJob(_ row: Row) -> AdoptedJob {
+        AdoptedJob(label: row["label"], domain: row["domain"], plistPath: row["plist_path"],
+                   stdoutPath: row["stdout_path"], stderrPath: row["stderr_path"])
+    }
+
     private static func serviceRecord(_ row: Row) throws -> ServiceRecord {
         let json: String = row["spec"]
         return ServiceRecord(spec: try JSONDecoder().decode(ServiceSpec.self, from: Data(json.utf8)),

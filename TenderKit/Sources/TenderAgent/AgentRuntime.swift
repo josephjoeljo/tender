@@ -53,7 +53,8 @@ public struct AgentRuntime: Sendable {
         let reconciler = Reconciler(environment: environment, store: store, launchd: launchd)
         let releases = ReleaseManager(environment: environment, store: store, reconciler: reconciler)
         let controller = ProcessController(environment: environment, store: store, reconciler: reconciler,
-                                           releases: releases)
+                                           releases: releases,
+                                           adoption: Adoption(environment: environment, store: store, launchd: launchd))
         let socketPath = environment.socketPath.path(percentEncoded: false)
         let logger = self.logger
 

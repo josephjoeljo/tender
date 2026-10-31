@@ -135,13 +135,27 @@ public struct TenderClient: Sendable {
                        body: try JSONEncoder().encode(RollbackRequest(to: sha12)))
     }
 
+    /// Brings an existing launchd job under management.
+    public func adopt(label: String, logPath: String? = nil) async throws -> ProcessList {
+        try await send(.POST, "/v1/adopt", body: try JSONEncoder().encode(AdoptRequest(label: label, logPath: logPath)))
+    }
+
+    /// Stops managing an adopted job, leaving the job itself untouched.
+    public func forget(label: String) async throws -> ProcessList {
+        try await send(.DELETE, "/v1/adopt/\(try escaped(label))")
+    }
+
     /// Boots out orphaned launchd jobs.
     public func collectGarbage() async throws -> ProcessList {
         try await send(.POST, "/v1/gc")
     }
 
+    /// RFC 3986 unreserved characters. The server matches path segments literally,
+    /// so labels' dots and dashes must stay as they are.
+    private static let pathComponentCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+
     private func escaped(_ component: String) throws -> String {
-        guard let value = component.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else {
+        guard let value = component.addingPercentEncoding(withAllowedCharacters: Self.pathComponentCharacters) else {
             throw TenderClientError.invalidResponse("can't encode '\(component)'")
         }
         return value

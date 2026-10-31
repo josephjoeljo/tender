@@ -43,6 +43,16 @@ private func withDaemon(_ body: (TenderClient, TenderEnvironment) async throws -
 
 private let sleeper = ServiceSpec(name: "api", program: .executable("/bin/sleep"), arguments: ["1000"])
 
+@Test func namesWithDashesWorkOverTheSocket() async throws {
+    try await withDaemon { client, _ async throws in
+        var spec = sleeper
+        spec.name = "my-api_2"
+        _ = try await client.start(spec)
+        #expect(try await client.stop(service: "my-api_2").processes.map(\.state) == [.stopped])
+        #expect(try await client.delete(service: "my-api_2").processes.isEmpty)
+    }
+}
+
 @Test func socketIsPrivate() async throws {
     try await withDaemon { _, env async throws in
         let attributes = try FileManager.default.attributesOfItem(atPath: env.socketPath.path(percentEncoded: false))
@@ -100,12 +110,6 @@ private func apiErrorCode(_ call: () async throws -> ProcessList) async -> Strin
 
         let (status, _) = try await client.perform(.POST, "/v1/processes", body: Data("nonsense".utf8))
         #expect(status == 400)
-    }
-}
-
-@Test func laterMilestoneEndpointsAnswerNotImplemented() async throws {
-    try await withDaemon { client, _ async throws in
-        #expect(try await client.perform(.POST, "/v1/adopt").status == 501)
     }
 }
 

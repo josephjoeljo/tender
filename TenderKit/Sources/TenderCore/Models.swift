@@ -102,10 +102,13 @@ public struct InstanceStatus: Codable, Sendable, Equatable {
     public var cpu: Double?
     /// Resident set size in bytes.
     public var rss: UInt64?
+    /// A job Tender manages but didn't create. `service` is then its launchd label.
+    public var adopted: Bool
 
     public init(service: String, instance: Int, node: NodeID, state: InstanceState,
                 pid: Int32? = nil, lastExitCode: Int32? = nil, uptime: TimeInterval? = nil,
-                restarts: Int = 0, release: String? = nil, cpu: Double? = nil, rss: UInt64? = nil) {
+                restarts: Int = 0, release: String? = nil, cpu: Double? = nil, rss: UInt64? = nil,
+                adopted: Bool = false) {
         self.service = service
         self.instance = instance
         self.node = node
@@ -117,6 +120,7 @@ public struct InstanceStatus: Codable, Sendable, Equatable {
         self.release = release
         self.cpu = cpu
         self.rss = rss
+        self.adopted = adopted
     }
 }
 
@@ -195,4 +199,32 @@ public struct ReleaseList: Codable, Sendable, Equatable {
 public struct RollbackRequest: Codable, Sendable, Equatable {
     public var to: String?
     public init(to: String? = nil) { self.to = to }
+}
+
+/// A launchd job Tender manages but didn't create.
+public struct AdoptedJob: Codable, Sendable, Equatable {
+    public var label: String
+    public var domain: String
+    public var plistPath: String?
+    public var stdoutPath: String?
+    public var stderrPath: String?
+
+    public init(label: String, domain: String, plistPath: String?, stdoutPath: String?, stderrPath: String?) {
+        self.label = label
+        self.domain = domain
+        self.plistPath = plistPath
+        self.stdoutPath = stdoutPath
+        self.stderrPath = stderrPath
+    }
+}
+
+public struct AdoptRequest: Codable, Sendable, Equatable {
+    public var label: String
+    /// Overrides the job's own `StandardOutPath`/`StandardErrorPath`.
+    public var logPath: String?
+
+    public init(label: String, logPath: String? = nil) {
+        self.label = label
+        self.logPath = logPath
+    }
 }
