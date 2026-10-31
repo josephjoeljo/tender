@@ -64,6 +64,11 @@ public actor RegistryState {
         return now.timeIntervalSince(last) < downAfter
     }
 
+    /// From the latest heartbeats, so a scrape never waits on a node.
+    public func allProcesses() -> [InstanceStatus] {
+        entries.values.flatMap(\.processes)
+    }
+
     public func address(of node: NodeID) -> String? { entries[node]?.info.address }
 
     public func summaries(now: Date = Date()) -> [NodeSummary] {

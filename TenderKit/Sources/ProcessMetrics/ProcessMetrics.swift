@@ -49,6 +49,7 @@ public struct ProcessUsage: Sendable, Equatable {
     public var cpu: Double
     public var rss: UInt64
     public var uptime: TimeInterval
+    public var cpuSeconds: Double
 }
 
 /// Turns cumulative CPU time into a rate. CPU is measured since the previous
@@ -78,7 +79,8 @@ public actor UsageSampler {
             elapsed = now.timeIntervalSince(base.at)
         }
         let cpu = elapsed > 0 ? Double(cpuDelta) / 1e9 / elapsed * 100 : 0
-        return ProcessUsage(cpu: cpu, rss: sample.residentBytes, uptime: uptime)
+        return ProcessUsage(cpu: cpu, rss: sample.residentBytes, uptime: uptime,
+                            cpuSeconds: Double(sample.cpuNanoseconds) / 1e9)
     }
 
     /// Forgets pids that are no longer of interest, so the table can't grow forever.

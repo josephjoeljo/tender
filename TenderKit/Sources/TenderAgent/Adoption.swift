@@ -105,6 +105,7 @@ public struct Adoption: Sendable {
                 restarts: job?.restarts ?? 0,
                 cpu: usage?.cpu,
                 rss: usage?.rss,
+                cpuSeconds: usage?.cpuSeconds,
                 adopted: true
             ))
         }

@@ -11,6 +11,7 @@ import TenderActorSystem
 import TenderAgent
 import TenderCore
 import TenderLogStore
+import TenderMetrics
 import TenderPKI
 import TenderProtocol
 
@@ -21,9 +22,12 @@ public struct HeadOptions: Sendable {
     public var agentPort: Int
     /// Hostnames and IPs the head is reached by, for its certificate.
     public var advertisedNames: [String]
+    /// Plain HTTP on the tailnet, for Prometheus. Nil turns it off.
+    public var metricsPort: Int?
 
     public init(nodeID: NodeID, apiHost: String? = nil, apiPort: Int = 7071, agentPort: Int = 7070,
-                advertisedNames: [String] = []) {
+                advertisedNames: [String] = [], metricsPort: Int? = 7072) {
+        self.metricsPort = metricsPort
         self.nodeID = nodeID
         self.apiHost = apiHost
         self.apiPort = apiPort
@@ -38,6 +42,8 @@ public final class HeadServices: Sendable {
     public let store: HeadStore
     public let state: RegistryState
     public let logs: LogStore
+    public let audit: AuditLog
+    private let deploys = DeployCounter()
     private let environment: TenderEnvironment
     private let secrets: any SecretStore
     private let authority: CertificateAuthority
@@ -53,6 +59,7 @@ public final class HeadServices: Sendable {
         store = try HeadStore(environment: environment)
         state = RegistryState(store: store)
         logs = try LogStore(directory: environment.root.appending(path: "logstore"))
+        audit = try AuditLog(directory: environment.root.appending(path: "logstore"))
         authority = try Self.loadOrCreateAuthority(secrets: secrets)
         try Self.issueOwnIdentity(environment: environment, secrets: secrets, authority: authority, options: options)
     }
@@ -110,7 +117,16 @@ public final class HeadServices: Sendable {
                 holder.withLockedValue { $0 = (system, registry) }
             },
             installRoutes: { [self] router in installSocketRoutes(on: router) },
-            services: { [self] in [try makePublicAPI(), LogRetentionService(logs: logs, logger: logger)] }
+            services: { [self] in
+                let cloud = CloudServices(environment: environment, secrets: secrets)
+                var services: [any Service] = [
+                    try makePublicAPI(),
+                    LogRetentionService(logs: logs, logger: logger),
+                    NightlyOffload(logs: logs, audit: audit, uploader: { try cloud.uploader() }),
+                ]
+                if let metrics = makeMetricsServer() { services.append(metrics) }
+                return services
+            }
         )
     }
 
@@ -171,6 +187,71 @@ public final class HeadServices: Sendable {
         } catch let error as TransportError {
             throw NodeCallError(code: "node_unreachable", message: error.description, httpStatus: 503)
         }
+    }
+
+    /// Each node fetches and verifies on its own, in parallel. One node failing doesn't
+    /// stop the others, and the response says how each one went.
+    func deploy(_ request: DeployRequest) async -> DeployResponse {
+        let nodes = await targets(service: request.service, node: request.node)
+        var outcomes: [DeployOutcome] = []
+        await withTaskGroup(of: DeployOutcome.self) { group in
+            for node in nodes {
+                group.addTask { [self] in
+                    do {
+                        let sha12 = try await translatingTransport(node) {
+                            try await agent(on: node).deploy(service: request.service, version: request.version)
+                        }
+                        return DeployOutcome(node: node, sha12: sha12)
+                    } catch {
+                        return DeployOutcome(node: node, error: "\(error)")
+                    }
+                }
+            }
+            for await outcome in group {
+                outcomes.append(outcome)
+                deploys.add(service: request.service, result: outcome.error == nil ? "success" : "failure")
+            }
+        }
+        return DeployResponse(outcomes: outcomes.sorted { $0.node.rawValue < $1.node.rawValue })
+    }
+
+    func clusterReleases(service: String) async -> ClusterReleases {
+        let up = await state.upNodes()
+        var nodes: [NodeReleases] = []
+        await withTaskGroup(of: NodeReleases?.self) { group in
+            for node in Set(up + [options.nodeID]) {
+                group.addTask { [self] in
+                    guard let releases = try? await agent(on: node).releases(service: service) else { return nil }
+                    return NodeReleases(node: node, releases: releases)
+                }
+            }
+            for await item in group {
+                if let item, !item.releases.releases.isEmpty { nodes.append(item) }
+            }
+        }
+        return ClusterReleases(service: service, nodes: nodes.sorted { $0.node.rawValue < $1.node.rawValue })
+    }
+
+    /// Plain HTTP with no auth, like most Prometheus targets. It binds only to the tailnet
+    /// address, and Tailscale ACLs decide who reaches it. It carries no log lines or secrets.
+    func makeMetricsServer() -> (any Service)? {
+        guard let port = options.metricsPort else { return nil }
+        let router = Router()
+        router.get("/metrics") { [self] _, _ in
+            Response(status: .ok, headers: [.contentType: "text/plain; version=0.0.4"],
+                     body: ResponseBody(byteBuffer: ByteBuffer(string: await metricsText())))
+        }
+        return Application(router: router,
+                           configuration: .init(address: .hostname(options.apiHost ?? "127.0.0.1", port: port), serverName: nil),
+                           logger: logger)
+    }
+
+    func metricsText() async -> String {
+        MetricsRenderer.render(MetricsSnapshot(
+            nodes: await state.summaries(),
+            processes: await state.allProcesses(),
+            linesIngested: await logs.ingestedLines(),
+            deploys: deploys.snapshot))
     }
 
     // MARK: Tokens
@@ -257,6 +338,20 @@ public final class HeadServices: Sendable {
                 return errorResponse(NodeCallError(code: "internal", message: "\(error)"))
             }
             return await followResponse(query: query)
+        }
+        router.post("/v1/deploy") { [self] request, _ in
+            await respond {
+                let deploy = try await decode(DeployRequest.self, from: request)
+                return await self.deploy(deploy)
+            }
+        }
+        router.get("/v1/releases") { [self] request, _ in
+            await respond {
+                guard let service = request.uri.queryParameters.get("service") else {
+                    throw NodeCallError(code: "invalid_query", message: "service is required.", httpStatus: 400)
+                }
+                return await clusterReleases(service: service)
+            }
         }
         router.get("/v1/nodes") { [self] _, _ in
             await respond { NodeList(nodes: await state.summaries()) }
@@ -395,6 +490,7 @@ public final class HeadServices: Sendable {
 
     /// Administration stays on the socket: file permissions are its authentication.
     func installSocketRoutes(on router: Router<BasicRequestContext>) {
+        router.add(middleware: AuditMiddleware(audit: audit, who: { _ in "local-socket" }))
         installClusterRoutes(on: router)
         router.post("/v1/tokens") { [self] request, _ in
             await respond {
@@ -435,6 +531,13 @@ public final class HeadServices: Sendable {
     /// joining node has none, and its join token is checked in the handler.
     func makePublicRouter() -> Router<BasicRequestContext> {
         let router = Router()
+        let store = self.store
+        router.add(middleware: AuditMiddleware(audit: audit, who: { request in
+            guard let header = request.headers[.authorization], header.hasPrefix("Bearer "),
+                  let secret = header.dropFirst(7).split(separator: ".").first,
+                  let token = try? store.apiToken(secret: String(secret)) else { return "unauthenticated" }
+            return token.name
+        }))
         router.add(middleware: BearerAuthMiddleware(store: store))
         let authority = self.authority
         router.get("/v1/ca") { _, _ in

@@ -9,7 +9,7 @@ struct Tender: AsyncParsableCommand {
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
         subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Gc.self, Version.self, Daemon.self,
-                      Token.self, Join.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
+                      Deploy.self, Credentials.self, Token.self, Join.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
     )
 }
 

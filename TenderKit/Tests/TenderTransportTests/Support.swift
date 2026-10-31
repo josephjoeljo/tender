@@ -25,6 +25,7 @@ distributed actor TestAgent: NodeAgentProtocol {
     distributed func rollback(service: String, to sha12: String?) async throws -> ProcessList { ProcessList(processes: []) }
     distributed func adopt(_ request: AdoptRequest) async throws -> ProcessList { ProcessList(processes: []) }
     distributed func forgetAdopted(label: String) async throws -> ProcessList { ProcessList(processes: []) }
+    distributed func deploy(service: String, version: String) async throws -> String { version }
 }
 
 distributed actor TestRegistry: HeadRegistryProtocol {

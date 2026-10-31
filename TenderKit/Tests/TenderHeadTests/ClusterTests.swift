@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import LaunchdKit
 import Testing
@@ -5,6 +6,7 @@ import TenderActorSystem
 import TenderAgent
 import TenderClient
 import TenderCore
+import TenderLogStore
 import TenderPKI
 import TenderProtocol
 @testable import TenderHead
@@ -68,7 +70,12 @@ final class Daemon: @unchecked Sendable {
     let isHead: Bool
     let nodeName: String
 
-    init(node: String, head: Bool, env: TenderEnvironment? = nil, agentPort: Int? = nil, apiPort: Int? = nil) throws {
+    let metricsPort = freePort()
+    let source: (any ReleaseSource)?
+
+    init(node: String, head: Bool, env: TenderEnvironment? = nil, agentPort: Int? = nil, apiPort: Int? = nil,
+         source: (any ReleaseSource)? = nil) throws {
+        self.source = source
         self.env = try env ?? makeEnvironment()
         self.agentPort = agentPort ?? freePort()
         self.apiPort = apiPort ?? freePort()
@@ -83,10 +90,10 @@ final class Daemon: @unchecked Sendable {
         var hooks: ClusterHooks?
         if isHead {
             let options = HeadOptions(nodeID: NodeID(nodeName), apiHost: "127.0.0.1", apiPort: apiPort, agentPort: agentPort,
-                                      advertisedNames: ["127.0.0.1"])
+                                      advertisedNames: ["127.0.0.1"], metricsPort: metricsPort)
             hooks = try HeadServices(environment: env, secrets: secrets, options: options).hooks()
         }
-        let runtime = AgentRuntime(environment: env, secrets: secrets, cluster: cluster, hooks: hooks, launchd: launchd, shutdownSignals: [])
+        let runtime = AgentRuntime(environment: env, secrets: secrets, cluster: cluster, hooks: hooks, launchd: launchd, releaseSource: source, shutdownSignals: [])
         task = Task { try await runtime.run() }
         let socket = env.socketPath.path(percentEncoded: false)
         _ = try await eventually { FileManager.default.fileExists(atPath: socket) ? true : nil }
@@ -553,6 +560,153 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     #expect(abs((summary.clockSkew ?? 0) - 4) < 0.001)
     #expect(summary.spoolBacklog == 3)
     #expect(summary.spoolDropped == 4)
+}
+
+// MARK: Operations
+
+@Test func auditRecordsWritesWithoutSecrets() async throws {
+    try await withCluster { head, _ async throws in
+        let writer = try await head.client.createAPIToken(name: "alice", scope: .write)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let caPEM = try await ClientPinning.fetchCA(head: address, credential: writer.token)
+        let remote = TenderClient(head: address, caPEM: caPEM, token: writer.token)
+        _ = try await remote.start(sleeper)
+        _ = try await remote.list()
+        let file = head.env.root.appending(path: "logstore/audit-\(TenderLogStore.LogStore.dayName(Date())).jsonl")
+        let text = try String(contentsOf: file, encoding: .utf8)
+        let records = text.split(separator: "\n")
+        #expect(records.contains { $0.contains(#""who":"alice""#) && $0.contains(#""path":"\/v1\/processes""#) && $0.contains(#""status":200"#) })
+        #expect(records.contains { $0.contains(#""who":"local-socket""#) && $0.contains("api-tokens") })
+        #expect(!records.contains { $0.contains(#""method":"GET""#) }, "reads aren't audited")
+        let secret = String(writer.token.split(separator: ".")[0])
+        #expect(!text.contains(secret), "tokens must never reach the audit log")
+        let mode = try FileManager.default.attributesOfItem(atPath: file.path(percentEncoded: false))[.posixPermissions] as? Int
+        #expect(mode == 0o600)
+    }
+}
+
+private final class RecordingUploader: BlobUploader, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    var failing = false
+    var names: [String] { lock.withLock { stored } }
+    func upload(file: URL, as name: String) async throws {
+        if failing { throw NodeCallError(code: "x", message: "down") }
+        lock.withLock { stored.append(name) }
+    }
+}
+
+@Test func offloadUploadsClosedDaysOnceAndRetriesFailures() async throws {
+    let env = try makeEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let logs = try LogStore(directory: env.root.appending(path: "logstore"))
+    let audit = try AuditLog(directory: env.root.appending(path: "logstore"))
+    let day = Date(timeIntervalSince1970: 1_700_000_000)
+    _ = try await logs.ingest(LogBatch(node: NodeID("n"), previousSeq: 0, records: [
+        LogRecord(seq: 1, nodeTime: day, service: "a", instance: 0, stream: .out, line: "x")]), now: day)
+    audit.record(.init(time: day, who: "w", method: "POST", path: "/p", status: 200))
+    let uploader = RecordingUploader()
+    let offload = NightlyOffload(logs: logs, audit: audit, uploader: { uploader })
+
+    #expect(try await offload.runOnce(now: day) == 0, "today's files stay open")
+    let tomorrow = day.addingTimeInterval(86400)
+    uploader.failing = true
+    await #expect(throws: (any Error).self) { try await offload.runOnce(now: tomorrow) }
+    uploader.failing = false
+    #expect(try await offload.runOnce(now: tomorrow) == 2)
+    let name = LogStore.dayName(day)
+    #expect(Set(uploader.names) == ["logs/logs-\(name).db", "audit/audit-\(name).jsonl"])
+    #expect(try await offload.runOnce(now: tomorrow) == 0, "each file goes up once")
+
+    let disabled = NightlyOffload(logs: logs, audit: audit, uploader: { nil })
+    #expect(try await disabled.runOnce(now: tomorrow) == 0)
+}
+
+private struct FakeSource: ReleaseSource {
+    let contents: Data
+    let sha256: String
+    func fetch(service: String, version: String, to destination: URL) async throws -> String {
+        try contents.write(to: destination)
+        return sha256
+    }
+}
+
+@Test func deployReachesEveryNodeRunningTheServiceAndReportsEach() async throws {
+    let binary = Data("#!/bin/sh\nexec /bin/sleep 100\n".utf8)
+    let good = FakeSource(contents: binary, sha256: Data(SHA256.hash(data: binary)).map { String(format: "%02x", $0) }.joined())
+    let bad = FakeSource(contents: Data("tampered".utf8), sha256: good.sha256)
+    let head = try Daemon(node: "head", head: true, source: good)
+    let worker = try Daemon(node: "worker", head: false, source: bad)
+    try await head.start()
+    try await worker.start()
+    defer { head.cleanup(); worker.cleanup() }
+    let token = try #require(try await eventually { try await head.client.createJoinToken() })
+    _ = try await worker.client.join(head: "127.0.0.1:\(head.apiPort)", token: token.token, nodeID: "worker")
+    _ = try await eventually { try await head.client.nodes().nodes.filter(\.up).count == 2 ? true : nil }
+    var onWorker = sleeper
+    onWorker.node = NodeID("worker")
+    _ = try await head.client.start(sleeper)
+    _ = try await head.client.start(onWorker)
+    _ = try await eventually { try await head.client.nodes().nodes.allSatisfy { $0.instanceCount == 1 } ? true : nil }
+
+    let response = try await head.client.deploy(service: "api", version: "1.0")
+    #expect(response.outcomes.map(\.node) == [NodeID("head"), NodeID("worker")])
+    let sha12 = String(good.sha256.prefix(12))
+    #expect(response.outcomes[0].sha12 == sha12)
+    #expect(response.outcomes[1].sha12 == nil, "a tampered download must not install")
+    #expect(response.outcomes[1].error?.contains("Checksum mismatch") == true)
+
+    let releases = try await head.client.clusterReleases(service: "api")
+    #expect(releases.nodes.map(\.node) == [NodeID("head")])
+    #expect(releases.nodes.first?.releases.current == sha12)
+
+    let list = try await head.client.list()
+    #expect(list.processes.first { $0.node == NodeID("head") }?.release == sha12)
+    #expect(list.processes.first { $0.node == NodeID("worker") }?.release == nil, "the worker keeps running its old binary")
+    await worker.stop()
+    await head.stop()
+}
+
+@Test func deployWithoutASourceSaysSo() async throws {
+    try await withCluster { head, _ async throws in
+        _ = try await head.client.start(sleeper)
+        let response = try await head.client.deploy(service: "api", version: "1.0", node: "head")
+        #expect(response.outcomes.first?.error?.contains("isn't configured") == true)
+    }
+}
+
+@Test func metricsEndpointServesTheCluster() async throws {
+    try await withCluster { head, _ async throws in
+        let services = try await head.client.start(sleeper)
+        #expect(services.processes.count == 1)
+        let text = try #require(try await eventually { () -> String? in
+            let (data, _) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(head.metricsPort)/metrics")!)
+            let text = String(decoding: data, as: UTF8.self)
+            return text.contains("tender_process_up") && text.contains(#"service="api""#) ? text : nil
+        })
+        #expect(text.contains(#"tender_node_up{node="worker"} 1.0"#))
+        #expect(text.contains(#"tender_node_clock_skew_seconds{node="worker"}"#))
+    }
+}
+
+@Test func credentialsAreSavedOnlyOverTheSocketAndNeverReadBack() async throws {
+    try await withCluster { head, worker async throws in
+        do {
+            _ = try await worker.client.setCredentials(serviceAccountJSON: "{}")
+            Issue.record("invalid keys must be refused")
+        } catch let error as TenderClientError {
+            #expect(error.code == "invalid_credentials")
+        }
+        let writer = try await head.client.createAPIToken(name: "w", scope: .write)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let caPEM = try await ClientPinning.fetchCA(head: address, credential: writer.token)
+        do {
+            _ = try await TenderClient(head: address, caPEM: caPEM, token: writer.token).setCredentials(serviceAccountJSON: "{}")
+            Issue.record("credentials must not be settable remotely")
+        } catch let error as TenderClientError {
+            #expect(error.code == "http_404")
+        }
+    }
 }
 
 // MARK: Health

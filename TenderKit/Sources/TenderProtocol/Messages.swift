@@ -59,6 +59,8 @@ public protocol NodeAgentProtocol: DistributedActor where ActorSystem: Distribut
     distributed func rollback(service: String, to sha12: String?) async throws -> ProcessList
     distributed func adopt(_ request: AdoptRequest) async throws -> ProcessList
     distributed func forgetAdopted(label: String) async throws -> ProcessList
+    /// Fetches a release from this node's source, verifies it, and returns its sha12.
+    distributed func deploy(service: String, version: String) async throws -> String
 }
 
 /// What a worker tells the head.

@@ -52,6 +52,11 @@ distributed actor NodeAgent: NodeAgentProtocol {
         return try await translating { try await controller.rollback(service: service, to: sha12) }
     }
 
+    distributed func deploy(service: String, version: String) async throws -> String {
+        let controller = self.controller
+        return try await translating { try await controller.deploy(service: service, version: version) }
+    }
+
     distributed func adopt(_ request: AdoptRequest) async throws -> ProcessList {
         let controller = self.controller
         return try await translating { try await controller.adopt(request) }

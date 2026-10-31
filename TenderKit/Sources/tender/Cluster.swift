@@ -4,6 +4,48 @@ import TenderClient
 import TenderCore
 
 extension Tender {
+    struct Deploy: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Fetch a release from the configured source and restart on it.",
+            discussion: "Each node downloads the release itself, and verifies its sha256 before installing it."
+        )
+        @Argument(help: "Service name.") var name: String
+        @Option(help: "Release version, as CI published it.") var release: String
+        @Option(help: "Only this node. Defaults to every node running the service.") var node: String?
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            let response: DeployResponse
+            do {
+                response = try await options.makeClient().deploy(service: name, version: release, node: node)
+            } catch let error as TenderClientError {
+                try options.fail(error)
+            }
+            print(options.json ? try options.encode(response) : response.outcomes.map { outcome in
+                "\(outcome.node): " + (outcome.sha12 ?? "failed: \(outcome.error ?? "unknown error")")
+            }.joined(separator: "\n"))
+            if response.outcomes.contains(where: { $0.error != nil }) { throw ExitCode.failure }
+        }
+    }
+
+    struct Credentials: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Manage this node's cloud credentials.", subcommands: [Set.self])
+
+        struct Set: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Save a GCP service account key on this node.",
+                discussion: "The key goes to the local daemon's secret store. You can delete the file afterwards."
+            )
+            @Option(help: "Path to the key's JSON file.") var file: String
+            @OptionGroup var options: CommonOptions
+
+            func run() async throws {
+                let json = try String(contentsOf: URL(filePath: file), encoding: .utf8)
+                try await options.run({ try await $0.setCredentials(serviceAccountJSON: json) }) { "Saved credentials for \($0.clientEmail)" }
+            }
+        }
+    }
+
     struct Token: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Manage join tokens.", subcommands: [Create.self])
 

@@ -263,6 +263,19 @@ public struct TenderClient: Sendable {
         }
     }
 
+    public func deploy(service: String, version: String, node: String? = nil) async throws -> DeployResponse {
+        try await send(.POST, "/v1/deploy", body: try JSONEncoder().encode(DeployRequest(service: service, version: version, node: node)))
+    }
+
+    public func clusterReleases(service: String) async throws -> ClusterReleases {
+        try await send(.GET, "/v1/releases?service=\(try escaped(service))")
+    }
+
+    /// Saves a service account key on the node this client talks to. Socket only.
+    public func setCredentials(serviceAccountJSON: String) async throws -> CredentialsResponse {
+        try await send(.POST, "/v1/credentials", body: try JSONEncoder().encode(CredentialsRequest(serviceAccountJSON: serviceAccountJSON)))
+    }
+
     /// Boots out orphaned launchd jobs.
     public func collectGarbage(node: String? = nil) async throws -> ProcessList {
         try await send(.POST, "/v1/gc\(try nodeQuery(node))")

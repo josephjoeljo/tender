@@ -120,3 +120,62 @@ public struct LogSearchResult: Codable, Sendable, Equatable {
         self.gaps = gaps
     }
 }
+
+public struct DeployRequest: Codable, Sendable, Equatable {
+    public var service: String
+    public var version: String
+    /// Only this node. By default, every node running the service.
+    public var node: String?
+
+    public init(service: String, version: String, node: String? = nil) {
+        self.service = service
+        self.version = version
+        self.node = node
+    }
+}
+
+public struct DeployOutcome: Codable, Sendable, Equatable {
+    public var node: NodeID
+    public var sha12: String?
+    public var error: String?
+
+    public init(node: NodeID, sha12: String? = nil, error: String? = nil) {
+        self.node = node
+        self.sha12 = sha12
+        self.error = error
+    }
+}
+
+public struct DeployResponse: Codable, Sendable, Equatable {
+    public var outcomes: [DeployOutcome]
+    public init(outcomes: [DeployOutcome]) { self.outcomes = outcomes }
+}
+
+public struct NodeReleases: Codable, Sendable, Equatable {
+    public var node: NodeID
+    public var releases: ReleaseList
+    public init(node: NodeID, releases: ReleaseList) {
+        self.node = node
+        self.releases = releases
+    }
+}
+
+public struct ClusterReleases: Codable, Sendable, Equatable {
+    public var service: String
+    public var nodes: [NodeReleases]
+    public init(service: String, nodes: [NodeReleases]) {
+        self.service = service
+        self.nodes = nodes
+    }
+}
+
+public struct CredentialsRequest: Codable, Sendable, Equatable {
+    /// A GCP service account key file's contents.
+    public var serviceAccountJSON: String
+    public init(serviceAccountJSON: String) { self.serviceAccountJSON = serviceAccountJSON }
+}
+
+public struct CredentialsResponse: Codable, Sendable, Equatable {
+    public var clientEmail: String
+    public init(clientEmail: String) { self.clientEmail = clientEmail }
+}

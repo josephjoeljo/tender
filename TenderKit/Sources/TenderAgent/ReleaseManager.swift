@@ -128,14 +128,47 @@ public actor ReleaseManager {
         return false
     }
 
+    /// Installs a binary fetched from a release source: verifies it, strips quarantine,
+    /// and points the service at it. A file that fails verification goes no further.
+    public func installFetched(file: URL, service: String, expectedSHA256: String) async throws -> String {
+        let found = try Self.sha256(of: file)
+        guard found == expectedSHA256.lowercased() else {
+            throw CloudError.checksumMismatch(expected: expectedSHA256, found: found)
+        }
+        let sha12 = String(found.prefix(12))
+        let files = FileManager.default
+        let destination = environment.releasesDirectory.appending(path: "\(service)/\(sha12)")
+        if !files.fileExists(atPath: destination.path(percentEncoded: false)) {
+            let temporary = environment.releasesDirectory.appending(path: "\(service)/.tmp-\(UUID().uuidString)")
+            try files.createDirectory(at: temporary, withIntermediateDirectories: true)
+            defer { try? files.removeItem(at: temporary) }
+            let copy = temporary.appending(path: service)
+            try files.moveItem(at: file, to: copy)
+            removexattr(copy.path(percentEncoded: false), "com.apple.quarantine", 0)
+            try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: copy.path(percentEncoded: false))
+            try files.moveItem(at: temporary, to: destination)
+        }
+        let path = environment.releaseBinary(service: service, sha12: sha12).path(percentEncoded: false)
+        try store.recordRelease(Release(service: service, sha12: sha12, path: path, createdAt: Date()))
+        if try store.setProgram(.release(sha12: sha12), service: service) {
+            try await reconciler.reconcile()
+        }
+        try prune(service: service)
+        return sha12
+    }
+
     private static func sha12(of url: URL) throws -> String {
+        String(try sha256(of: url).prefix(12))
+    }
+
+    private static func sha256(of url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
         while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
             hasher.update(data: chunk)
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined().prefix(12).description
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// Keeps the newest `keep` releases, and always the one in use.
