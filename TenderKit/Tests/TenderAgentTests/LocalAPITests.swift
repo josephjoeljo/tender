@@ -7,7 +7,7 @@ import TenderCore
 @testable import TenderClient
 
 /// In-memory launchd: the API tests are about HTTP, not launchctl.
-private actor MemoryLaunchd: LaunchdControlling {
+actor MemoryLaunchd: LaunchdControlling {
     var loaded: Set<String> = []
     func bootstrap(plistURL: URL) async throws { loaded.insert(plistURL.deletingPathExtension().lastPathComponent) }
     func bootout(label: String) async throws {
@@ -105,8 +105,6 @@ private func apiErrorCode(_ call: () async throws -> ProcessList) async -> Strin
 
 @Test func laterMilestoneEndpointsAnswerNotImplemented() async throws {
     try await withDaemon { client, _ async throws in
-        #expect(try await client.perform(.GET, "/v1/releases/api").status == 501)
-        #expect(try await client.perform(.POST, "/v1/releases/api/rollback").status == 501)
         #expect(try await client.perform(.POST, "/v1/adopt").status == 501)
     }
 }
@@ -159,6 +157,16 @@ private func apiErrorCode(_ call: () async throws -> ProcessList) async -> Strin
     try LogRotationService(environment: env, store: store, rotator: LogRotator(maxBytes: 5, keep: 1)).rotateAll()
     #expect(try Data(contentsOf: out).isEmpty)
     #expect(FileManager.default.fileExists(atPath: out.path(percentEncoded: false) + ".1"))
+}
+
+@Test func releasesOverTheSocket() async throws {
+    try await withDaemon { client, _ async throws in
+        #expect(try await client.releases(service: "api").releases.isEmpty)
+        _ = try await client.start(sleeper)
+        #expect(await apiErrorCode { try await client.rollback(service: "api") } == "no_previous_release")
+        #expect(await apiErrorCode { try await client.rollback(service: "api", to: "abc") } == "release_not_found")
+        #expect(await apiErrorCode { try await client.rollback(service: "nope") } == "service_not_found")
+    }
 }
 
 @Test func secondDaemonIsRefused() async throws {

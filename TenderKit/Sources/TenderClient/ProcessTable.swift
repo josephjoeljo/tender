@@ -25,6 +25,15 @@ public enum ProcessTable {
         return output
     }
 
+    public static func render(_ list: ReleaseList) -> String {
+        guard !list.releases.isEmpty else { return "No releases." }
+        let formatter = ISO8601DateFormatter()
+        return list.releases.map { release in
+            let marker = release.sha12 == list.current ? "* " : "  "
+            return "\(marker)\(release.sha12)  \(formatter.string(from: release.createdAt))"
+        }.joined(separator: "\n")
+    }
+
     private static func row(_ status: InstanceStatus) -> [String] {
         [
             status.service,

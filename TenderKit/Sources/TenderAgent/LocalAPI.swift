@@ -16,6 +16,7 @@ struct ProcessController: Sendable {
     let environment: TenderEnvironment
     let store: StateStore
     let reconciler: Reconciler
+    let releases: ReleaseManager
 
     func list() async throws -> ProcessList {
         try await reconciler.status()
@@ -28,7 +29,12 @@ struct ProcessController: Sendable {
         return try await finish(try await reconciler.reconcile(), service: spec.name)
     }
 
+    /// Starts an existing service, or creates one from the service's newest
+    /// release, for a binary that was dropped into `bin/` before any `tender start`.
     func start(service: String) async throws -> ProcessList {
+        if try store.service(service) == nil, let newest = try store.releases(service: service).first {
+            return try await start(ServiceSpec(name: service, program: .release(sha12: newest.sha12)))
+        }
         try requireExisting(service, try store.setDesired(.running, service: service))
         return try await finish(try await reconciler.reconcile(), service: service)
     }
@@ -49,6 +55,24 @@ struct ProcessController: Sendable {
     func delete(service: String) async throws -> ProcessList {
         try store.deleteService(service)
         return try await finish(try await reconciler.reconcile(), service: service)
+    }
+
+    func rollback(service: String, to sha12: String?) async throws -> ProcessList {
+        do {
+            _ = try await releases.rollback(service: service, to: sha12)
+        } catch let error as ReleaseError {
+            switch error {
+            case .notFound:
+                throw APIFailure(status: .notFound, code: "release_not_found", message: error.description)
+            case .unknownService:
+                throw APIFailure(status: .notFound, code: "service_not_found", message: error.description)
+            case .noPrevious:
+                throw APIFailure(status: .conflict, code: "no_previous_release", message: error.description)
+            case .binaryMissing:
+                throw APIFailure(status: .conflict, code: "release_missing", message: error.description)
+            }
+        }
+        return try await finish(ReconcileReport(), service: service)
     }
 
     func collectGarbage() async throws -> ProcessList {
@@ -139,13 +163,7 @@ func makeRouter(controller: ProcessController) -> Router<BasicRequestContext> {
         await respond {
             var request = request
             let body = try await request.collectBody(upTo: 1 << 20)
-            let spec: ServiceSpec
-            do {
-                spec = try JSONDecoder().decode(ServiceSpec.self, from: Data(body.readableBytesView))
-            } catch {
-                throw APIFailure(status: .badRequest, code: "invalid_body", message: "Expected a ServiceSpec: \(error)")
-            }
-            return try await controller.start(spec)
+            return try await controller.start(try decodeBody(ServiceSpec.self, Data(body.readableBytesView)))
         }
     }
     router.post("/v1/processes/:name/:action") { _, context in
@@ -182,9 +200,21 @@ func makeRouter(controller: ProcessController) -> Router<BasicRequestContext> {
         }
     }
 
-    // Part of the API surface, delivered by later milestone 1 steps (E, F).
-    router.get("/v1/releases/:service") { _, _ in notImplemented("releases") }
-    router.post("/v1/releases/:service/rollback") { _, _ in notImplemented("rollback") }
+    router.get("/v1/releases/:service") { _, context in
+        await respond { try await controller.releases.list(service: try context.parameters.require("service")) }
+    }
+    router.post("/v1/releases/:service/rollback") { request, context in
+        await respond {
+            var request = request
+            let body = try await request.collectBody(upTo: 1 << 16)
+            let rollback = body.readableBytes == 0
+                ? RollbackRequest()
+                : try decodeBody(RollbackRequest.self, Data(body.readableBytesView))
+            return try await controller.rollback(service: try context.parameters.require("service"), to: rollback.to)
+        }
+    }
+
+    // Part of the API surface, delivered by a later milestone 1 step (F).
     router.post("/v1/adopt") { _, _ in notImplemented("adopt") }
 
     return router
@@ -265,7 +295,15 @@ private func logsResponse(request: Request, name: String, controller: ProcessCon
     )
 }
 
-private func respond(_ operation: () async throws -> ProcessList) async -> Response {
+private func decodeBody<T: Decodable>(_ type: T.Type, _ data: Data) throws -> T {
+    do {
+        return try JSONDecoder().decode(type, from: data)
+    } catch {
+        throw APIFailure(status: .badRequest, code: "invalid_body", message: "Expected a \(type): \(error)")
+    }
+}
+
+private func respond(_ operation: () async throws -> some Encodable) async -> Response {
     do {
         return json(try await operation(), status: .ok)
     } catch let failure as APIFailure {

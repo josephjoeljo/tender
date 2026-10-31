@@ -102,7 +102,7 @@ let package = Package(
         .testTarget(name: "LogTailTests", dependencies: ["LogTail", "LaunchdKit"]),
         .testTarget(name: "TenderCoreTests", dependencies: ["TenderCore"]),
         .testTarget(name: "TenderAgentTests", dependencies: [
-            "TenderAgent", "TenderClient", "TenderCore", "LaunchdKit", "LogTail",
+            "TenderAgent", "TenderClient", "TenderCore", "LaunchdKit", "LogTail", "FileWatch",
             .product(name: "GRDB", package: "GRDB.swift"),
         ]),
         .testTarget(name: "LaunchdKitTests", dependencies: ["LaunchdKit"], resources: [.copy("Fixtures")]),

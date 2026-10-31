@@ -51,7 +51,9 @@ public struct AgentRuntime: Sendable {
 
         let store = try StateStore(environment: environment)
         let reconciler = Reconciler(environment: environment, store: store, launchd: launchd)
-        let controller = ProcessController(environment: environment, store: store, reconciler: reconciler)
+        let releases = ReleaseManager(environment: environment, store: store, reconciler: reconciler)
+        let controller = ProcessController(environment: environment, store: store, reconciler: reconciler,
+                                           releases: releases)
         let socketPath = environment.socketPath.path(percentEncoded: false)
         let logger = self.logger
 
@@ -68,6 +70,7 @@ public struct AgentRuntime: Sendable {
             services: [
                 ReconcilerSweep(reconciler: reconciler, interval: sweepInterval),
                 LogRotationService(environment: environment, store: store),
+                ReleaseWatcher(environment: environment, manager: releases),
                 server,
             ],
             gracefulShutdownSignals: shutdownSignals,

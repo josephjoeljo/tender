@@ -1,4 +1,5 @@
 import Foundation
+import FileWatch
 import GRDB
 import TenderCore
 
@@ -64,6 +65,15 @@ public struct StateStore: Sendable {
                     stdout_path TEXT,
                     stderr_path TEXT,
                     adopted_at REAL NOT NULL
+                );
+                """)
+        }
+        migrator.registerMigration("v2-bin-seen") { db in
+            try db.execute(sql: """
+                CREATE TABLE bin_seen (
+                    service TEXT PRIMARY KEY,
+                    size INTEGER NOT NULL,
+                    modified REAL NOT NULL
                 );
                 """)
         }
@@ -142,6 +152,65 @@ public struct StateStore: Sendable {
                 InstanceRecord(service: row["service"], instance: row["instance"], label: row["label"],
                                desired: DesiredState(rawValue: row["desired"]) ?? .absent)
             }
+        }
+    }
+
+    /// Changes which binary a service runs, leaving its desired state alone.
+    /// Returns false if the service does not exist.
+    @discardableResult
+    public func setProgram(_ program: ProgramSource, service: String) throws -> Bool {
+        guard var record = try self.service(service) else { return false }
+        record.spec.program = program
+        let json = String(decoding: try JSONEncoder().encode(record.spec), as: UTF8.self)
+        try pool.write { db in
+            try db.execute(sql: "UPDATE services SET spec = ?, updated_at = ? WHERE name = ?",
+                           arguments: [json, Date().timeIntervalSince1970, service])
+        }
+        return true
+    }
+
+    /// Records a release. Seeing an existing sha again makes it the newest.
+    public func recordRelease(_ release: Release) throws {
+        try pool.write { db in
+            try db.execute(sql: """
+                INSERT INTO releases (service, sha12, path, created_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT (service, sha12) DO UPDATE SET path = excluded.path, created_at = excluded.created_at
+                """, arguments: [release.service, release.sha12, release.path, release.createdAt.timeIntervalSince1970])
+        }
+    }
+
+    /// Newest first.
+    public func releases(service: String) throws -> [Release] {
+        try pool.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM releases WHERE service = ? ORDER BY created_at DESC, rowid DESC",
+                             arguments: [service]).map { row in
+                Release(service: row["service"], sha12: row["sha12"], path: row["path"],
+                        createdAt: Date(timeIntervalSince1970: row["created_at"]))
+            }
+        }
+    }
+
+    public func removeRelease(service: String, sha12: String) throws {
+        try pool.write { db in
+            try db.execute(sql: "DELETE FROM releases WHERE service = ? AND sha12 = ?", arguments: [service, sha12])
+        }
+    }
+
+    /// The `bin/` file last turned into a release. Kept separately from releases so
+    /// that a rollback isn't undone by the newer binary still sitting in `bin/`.
+    public func lastSeenBinary(service: String) throws -> FileFingerprint? {
+        try pool.read { db in
+            try Row.fetchOne(db, sql: "SELECT size, modified FROM bin_seen WHERE service = ?", arguments: [service])
+                .map { FileFingerprint(size: $0["size"], modified: $0["modified"]) }
+        }
+    }
+
+    public func setLastSeenBinary(service: String, fingerprint: FileFingerprint) throws {
+        try pool.write { db in
+            try db.execute(sql: """
+                INSERT INTO bin_seen (service, size, modified) VALUES (?, ?, ?)
+                ON CONFLICT (service) DO UPDATE SET size = excluded.size, modified = excluded.modified
+                """, arguments: [service, fingerprint.size, fingerprint.modified])
         }
     }
 

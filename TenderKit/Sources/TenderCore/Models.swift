@@ -179,3 +179,20 @@ public struct LogResponse: Codable, Sendable, Equatable {
     public var lines: [LogLine]
     public init(lines: [LogLine]) { self.lines = lines }
 }
+
+public struct ReleaseList: Codable, Sendable, Equatable {
+    /// Newest first.
+    public var releases: [Release]
+    /// sha12 of the release the service runs, if any.
+    public var current: String?
+
+    public init(releases: [Release], current: String?) {
+        self.releases = releases
+        self.current = current
+    }
+}
+
+public struct RollbackRequest: Codable, Sendable, Equatable {
+    public var to: String?
+    public init(to: String? = nil) { self.to = to }
+}

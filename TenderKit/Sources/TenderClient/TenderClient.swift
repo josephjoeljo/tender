@@ -125,6 +125,16 @@ public struct TenderClient: Sendable {
         return path
     }
 
+    public func releases(service: String) async throws -> ReleaseList {
+        try await send(.GET, "/v1/releases/\(try escaped(service))")
+    }
+
+    /// Goes back to `sha12`, or by default to the release before the current one.
+    public func rollback(service: String, to sha12: String? = nil) async throws -> ProcessList {
+        try await send(.POST, "/v1/releases/\(try escaped(service))/rollback",
+                       body: try JSONEncoder().encode(RollbackRequest(to: sha12)))
+    }
+
     /// Boots out orphaned launchd jobs.
     public func collectGarbage() async throws -> ProcessList {
         try await send(.POST, "/v1/gc")

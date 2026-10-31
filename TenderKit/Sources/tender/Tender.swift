@@ -8,7 +8,7 @@ struct Tender: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
-        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Gc.self, Version.self, Daemon.self]
+        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Gc.self, Version.self, Daemon.self]
     )
 }
 
@@ -198,6 +198,33 @@ extension Tender {
                 print("\(line.service)[\(line.instance)] \(line.stream.rawValue) | \(line.text)")
             }
             fflush(stdout)
+        }
+    }
+
+    struct Releases: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "List a service's releases, newest first.")
+        @Argument(help: "Service name.") var name: String
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            let client = TenderClient(socketPath: options.socket ?? TenderClient.defaultSocketPath())
+            do {
+                let list = try await client.releases(service: name)
+                print(options.json ? try options.encode(list) : ProcessTable.render(list))
+            } catch let error as TenderClientError {
+                try options.fail(error)
+            }
+        }
+    }
+
+    struct Rollback: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Go back to an earlier release.")
+        @Argument(help: "Service name.") var name: String
+        @Option(help: "Release to go back to. Defaults to the one before the current release.") var to: String?
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            try await options.execute { try await $0.rollback(service: name, to: to) }
         }
     }
 
