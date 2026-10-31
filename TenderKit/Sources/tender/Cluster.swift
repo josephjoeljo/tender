@@ -76,6 +76,18 @@ extension Tender {
         }
     }
 
+    struct Leave: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Make this worker forget its cluster, so that it can join again.",
+            discussion: "Services keep running. The daemon restarts, under launchd. Revoke the node on the head as well."
+        )
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            try await options.run({ try await $0.leave() }) { _ in "Left the cluster." }
+        }
+    }
+
     struct Nodes: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "List the cluster's nodes.")
         @OptionGroup var options: CommonOptions
@@ -161,9 +173,13 @@ extension Tender {
         struct Set: AsyncParsableCommand {
             static let configuration = CommandConfiguration(abstract: "Save a head's address and API token.")
             @Option(help: "host or host:port.") var head: String
-            @Option(help: "From `tender api-token create`.") var token: String
+            @Option(help: "From `tender api-token create`. Prefer $TENDER_TOKEN: arguments are visible to other users in `ps`.")
+            var token: String?
 
             func run() async throws {
+                guard let token = token ?? ProcessInfo.processInfo.environment["TENDER_TOKEN"] else {
+                    throw ValidationError("Pass --token or set TENDER_TOKEN.")
+                }
                 let caPEM: String
                 do {
                     caPEM = try await ClientPinning.fetchCA(head: head, credential: token)

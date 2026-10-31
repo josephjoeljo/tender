@@ -243,7 +243,8 @@ struct ProcessController: Sendable {
             throw APIFailure(status: .badRequest, code: "invalid_instances",
                              message: "instances must be between 1 and 64.")
         }
-        guard spec.user != "root" else {
+        // By uid, since any account name can be an alias for uid 0.
+        if spec.user == "root" || getpwnam(spec.user)?.pointee.pw_uid == 0 {
             throw APIFailure(status: .badRequest, code: "invalid_user", message: "Managed processes never run as root.")
         }
         let path: String
@@ -320,6 +321,18 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
     }
 
     if let identities {
+        // Forgets the cluster so that this node can join again. Workloads keep running.
+        // The daemon then exits, because launchd restarts it with no cluster state.
+        router.post("/v1/leave") { _, _ in
+            await respond {
+                try identities.forget()
+                Task {
+                    try? await Task.sleep(for: .milliseconds(200))
+                    kill(getpid(), SIGTERM)
+                }
+                return ProcessList(processes: [])
+            }
+        }
         router.post("/v1/join") { request, _ in
             await respond {
                 var request = request

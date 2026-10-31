@@ -72,6 +72,13 @@ public struct ClusterIdentityStore: Sendable {
         try JSONEncoder().encode(config).write(to: configURL, options: .atomic)
     }
 
+    public func forget() throws {
+        try? FileManager.default.removeItem(at: configURL)
+        for name in [ClusterSecrets.nodeKey, ClusterSecrets.nodeCertificate, ClusterSecrets.caCertificate] {
+            try secrets.delete(name)
+        }
+    }
+
     /// The node's mTLS material, once it has joined.
     public func tls() throws -> TransportTLS? {
         guard let certificate = try secrets.read(ClusterSecrets.nodeCertificate),
@@ -160,7 +167,7 @@ struct ClusterLink: Service {
             verifier: NodePeerVerifier(identity: check, additional: hooks?.verifier)
         )
         let agent = TenderActorSystem.$wellKnownName.withValue(ActorNames.agent) {
-            NodeAgent(controller: controller, actorSystem: system)
+            NodeAgent(controller: controller, headNode: config.headNode, actorSystem: system)
         }
         hooks?.systemReady(system)
         guard let listen = await listenHost() else {
@@ -240,7 +247,12 @@ struct ClusterLink: Service {
                     } else {
                         try spool.acknowledge(through: acked)
                     }
-                    if !batch.records.isEmpty { delay = .zero }
+                    // No progress: the head refused, so back off instead of spinning.
+                    if !batch.records.isEmpty, acked >= (batch.records.last?.seq ?? 0) {
+                        delay = .zero
+                    } else if !batch.records.isEmpty {
+                        delay = .seconds(5)
+                    }
                 }
             } catch {
                 delay = .seconds(2)

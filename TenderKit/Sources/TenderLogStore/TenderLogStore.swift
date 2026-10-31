@@ -96,6 +96,13 @@ public actor LogStore {
            !batch.gaps.contains(where: { $0.throughSeq >= batch.previousSeq }) {
             return current
         }
+        // Over the size limit even after retention, which never deletes today: stop
+        // accepting. Lines stay in the worker's spool, within its own limits, rather
+        // than filling the head's disk.
+        if let current, (try? totalBytes()) ?? 0 > limits.maxBytes + limits.maxBytes / 10 {
+            try enforceRetention(now: now)
+            if ((try? totalBytes()) ?? 0) > limits.maxBytes + limits.maxBytes / 10 { return current }
+        }
         let floor = current ?? 0
         let fresh = batch.records.filter { $0.seq > floor }
         let node = batch.node

@@ -9,7 +9,7 @@ struct Tender: AsyncParsableCommand {
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
         subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Gc.self, Version.self, Daemon.self,
-                      Deploy.self, Credentials.self, Token.self, Join.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
+                      Deploy.self, Credentials.self, Token.self, Join.self, Leave.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
     )
 }
 
@@ -263,7 +263,7 @@ extension Tender {
                 print(String(decoding: data, as: UTF8.self))
             } else {
                 let time = ISO8601DateFormatter().string(from: entry.nodeTime)
-                print("\(time) \(entry.node)/\(entry.service)[\(entry.instance)] \(entry.stream.rawValue) | \(entry.line)")
+                print("\(time) \(entry.node)/\(entry.service)[\(entry.instance)] \(entry.stream.rawValue) | \(terminalSafe(entry.line))")
             }
             fflush(stdout)
         }
@@ -287,7 +287,7 @@ extension Tender {
             if options.json, compact, let data = try? JSONEncoder().encode(line) {
                 print(String(decoding: data, as: UTF8.self))
             } else {
-                print("\(line.service)[\(line.instance)] \(line.stream.rawValue) | \(line.text)")
+                print("\(line.service)[\(line.instance)] \(line.stream.rawValue) | \(terminalSafe(line.text))")
             }
             fflush(stdout)
         }

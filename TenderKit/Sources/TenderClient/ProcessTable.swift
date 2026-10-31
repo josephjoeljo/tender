@@ -95,3 +95,11 @@ public enum ProcessTable {
         return megabytes < 1024 ? String(format: "%.1fM", megabytes) : String(format: "%.1fG", megabytes / 1024)
     }
 }
+
+/// Log lines come from whatever the process printed. Control characters are shown as
+/// `?` so that a line can't move the cursor, rewrite the screen or set the window title.
+public func terminalSafe(_ text: String) -> String {
+    String(String.UnicodeScalarView(text.unicodeScalars.map { scalar in
+        (scalar.value < 0x20 && scalar != "\t") || scalar.value == 0x7f || (0x80...0x9f).contains(scalar.value) ? "?" : scalar
+    }))
+}

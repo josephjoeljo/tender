@@ -47,3 +47,26 @@ Things about how Tender works that may not be what you'd assume.
 - **Production CLI:** the socket is root-only, so `tender` needs sudo against a
   production daemon. The manual production check is in
   [production-install.md](production-install.md).
+
+## Cluster
+
+- **Node names:** a node's ID must match its Tailscale machine name, or the transport refuses
+  it. A name already in use can't be joined until `tender node revoke` frees it.
+- **Commands flow from the head:** a node only takes commands from its head. Workers can't
+  command each other, even with valid certificates.
+- **Write tokens run code:** an API token with `write` scope can start any executable on any
+  node, as any account except root. Treat it like SSH access.
+- **Socket-only:** `tender adopt`, join and API tokens, CA export and cloud credentials work
+  over the local socket only, never with `--remote`.
+- **Certificates expire** after 2 years and aren't renewed automatically yet. The head reissues
+  its own at each start, but a worker needs `tender node revoke` on the head, then `tender leave` and `tender join`.
+- **Upgrades:** Keychain items trust the binary that wrote them, so `tender daemon install
+  --system` moves secrets from the old `tenderd` to the new one. Replacing the binary by hand
+  would lock it out.
+
+## Cluster logs
+
+- **Head over its limit:** if the head can't get under 5 GB by deleting old days, it stops
+  accepting lines. They wait in the workers' spools (1 GiB, 7 days), then get dropped oldest first.
+- **Order:** within a node, lines are in order. Across nodes it's approximate, because clocks differ.
+- **Long lines:** cut at 64 KB before shipping.

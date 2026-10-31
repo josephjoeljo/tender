@@ -403,14 +403,6 @@ public final class HeadServices: Sendable {
                 return await clusterStatus()
             }
         }
-        router.post("/v1/adopt") { [self] request, _ in
-            await respond {
-                let adopt = try await decode(AdoptRequest.self, from: request)
-                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
-                _ = try await translatingTransport(target) { try await agent(on: target).adopt(adopt) }
-                return await clusterStatus()
-            }
-        }
         router.delete("/v1/adopt/:label") { [self] request, context in
             await respond {
                 let label = try context.parameters.require("label")
@@ -492,6 +484,16 @@ public final class HeadServices: Sendable {
     func installSocketRoutes(on router: Router<BasicRequestContext>) {
         router.add(middleware: AuditMiddleware(audit: audit, who: { _ in "local-socket" }))
         installClusterRoutes(on: router)
+        // Socket only: `--log-path` makes the daemon, which runs as root, read a file of the
+        // caller's choosing, so a remote token could use it to read any file on any node.
+        router.post("/v1/adopt") { [self] request, _ in
+            await respond {
+                let adopt = try await decode(AdoptRequest.self, from: request)
+                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                _ = try await translatingTransport(target) { try await agent(on: target).adopt(adopt) }
+                return await clusterStatus()
+            }
+        }
         router.post("/v1/tokens") { [self] request, _ in
             await respond {
                 let body = try await decodeOptional(JoinTokenRequest.self, from: request)
@@ -634,7 +636,7 @@ func respond(_ operation: () async throws -> some Encodable) async -> Response {
     }
 }
 
-/// Applies the head's log retention hourly.
+/// Applies the head's log retention every 5 minutes.
 struct LogRetentionService: Service {
     let logs: LogStore
     let logger: Logger
@@ -648,7 +650,7 @@ struct LogRetentionService: Service {
                 } catch {
                     logger.error("log retention failed", metadata: ["error": "\(error)"])
                 }
-                try? await Task.sleep(for: .seconds(3600))
+                try? await Task.sleep(for: .seconds(300))
             }
         }
     }

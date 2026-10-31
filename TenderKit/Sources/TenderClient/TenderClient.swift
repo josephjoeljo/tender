@@ -106,6 +106,11 @@ public struct TenderClient: Sendable {
         try await send(.POST, "/v1/join", body: try JSONEncoder().encode(LocalJoinRequest(head: head, token: token, nodeID: nodeID)))
     }
 
+    /// Makes the local daemon forget its cluster and restart. A worker's socket only.
+    public func leave() async throws -> ProcessList {
+        try await send(.POST, "/v1/leave")
+    }
+
     public func revokeNode(_ id: String) async throws -> NodeList {
         try await send(.POST, "/v1/nodes/\(try escaped(id))/revoke")
     }

@@ -562,6 +562,83 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     #expect(summary.spoolDropped == 4)
 }
 
+// MARK: Security
+
+@Test func aWorkerCantCommandAnotherNode() async throws {
+    try await withCluster { head, worker async throws in
+        // A real certificate for the cluster, as a compromised worker holds.
+        let exported = try await head.client.exportCA()
+        let authority = try CertificateAuthority(certificatePEM: exported.certificatePEM, privateKeyPEM: exported.privateKeyPEM)
+        let key = NodeKey.generate()
+        let tls = TransportTLS(certificatePEM: try authority.sign(csrPEM: try key.makeCSR(nodeID: NodeID("rogue")), nodeID: NodeID("rogue")),
+                               privateKeyPEM: key.privateKeyPEM, trustRootPEM: exported.certificatePEM)
+        let resolver = StaticNodeResolver([NodeID("head"): NodeAddress(host: "127.0.0.1", port: head.agentPort),
+                                           NodeID("worker"): NodeAddress(host: "127.0.0.1", port: worker.agentPort)])
+        let rogue = TenderActorSystem(localNode: NodeID("rogue"), tls: tls, resolver: resolver)
+        defer { Task { await rogue.shutdown() } }
+        for target in ["head", "worker"] {
+            let agent = try $NodeAgentProtocol.resolve(id: ActorIdentity(node: NodeID(target), name: ActorNames.agent), using: rogue)
+            await #expect(throws: NodeCallError(code: "forbidden", message: "Only the head can command this node.", httpStatus: 403)) {
+                _ = try await agent.apply(.start(sleeper))
+            }
+            await #expect(throws: NodeCallError.self) { _ = try await agent.status() }
+            await #expect(throws: NodeCallError.self) { _ = try await agent.releases(service: "api") }
+            await #expect(throws: NodeCallError.self) { _ = try await agent.deploy(service: "api", version: "1") }
+        }
+        // Nor can it speak for another node to the head.
+        let registry = try $HeadRegistryProtocol.resolve(id: ActorIdentity(node: NodeID("head"), name: ActorNames.registry), using: rogue)
+        await #expect(throws: NodeCallError.self) {
+            _ = try await registry.ingest(LogBatch(node: NodeID("worker"), previousSeq: 0, records: []))
+        }
+        await #expect(throws: NodeCallError.self) {
+            try await registry.heartbeat(Heartbeat(node: NodeID("worker"), nodeClock: Date(), processes: []))
+        }
+        #expect(await head.launchd.loaded.isEmpty)
+        #expect(await worker.launchd.loaded.isEmpty)
+    }
+}
+
+@Test func adoptIsNotAvailableRemotely() async throws {
+    try await withCluster { head, _ async throws in
+        let writer = try await head.client.createAPIToken(name: "w", scope: .write)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let caPEM = try await ClientPinning.fetchCA(head: address, credential: writer.token)
+        do {
+            _ = try await TenderClient(head: address, caPEM: caPEM, token: writer.token).adopt(label: "x.y", logPath: "/etc/master.passwd")
+            Issue.record("remote adopt would read any file as root")
+        } catch let error as TenderClientError {
+            #expect(error.code == "http_404")
+        }
+    }
+}
+
+@Test func systemJobsCantBeAdopted() async throws {
+    let env = try makeEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let adoption = Adoption(environment: env, store: try StateStore(environment: env), launchd: MemoryLaunchd())
+    await #expect(throws: AdoptionError.systemJob("com.apple.syslogd")) { try await adoption.adopt(label: "com.apple.syslogd") }
+}
+
+@Test func uidZeroAliasesAreRefused() async throws {
+    try await withCluster { head, _ async throws in
+        var spec = sleeper
+        spec.user = "root"
+        do {
+            _ = try await head.client.start(spec)
+            Issue.record("root must be refused")
+        } catch let error as TenderClientError {
+            #expect(error.code == "invalid_user")
+        }
+    }
+}
+
+@Test func terminalControlCharactersAreNeutralized() {
+    let safe = terminalSafe("a\u{1B}[2Jb\tc\u{7F}d\u{9B}é")
+    #expect(!safe.unicodeScalars.contains { $0.value == 0x1B || $0.value == 0x7F || $0.value == 0x9B })
+    #expect(safe.contains("\t"))
+    #expect(safe.contains("é"))
+}
+
 // MARK: Operations
 
 @Test func auditRecordsWritesWithoutSecrets() async throws {

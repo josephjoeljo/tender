@@ -106,15 +106,16 @@ private let day1 = Date(timeIntervalSince1970: 1_700_000_000)
 }
 
 @Test func retentionDeletesByAgeThenSizeButNeverToday() async throws {
-    let (store, directory) = try makeStore(limits: LogStoreLimits(maxAgeDays: 30, maxBytes: 1))
+    let (filling, directory) = try makeStore()
     defer { try? FileManager.default.removeItem(at: directory) }
     var seq: UInt64 = 0
     for daysAgo in [40, 2, 1, 0] {
         seq += 1
-        _ = try await store.ingest(LogBatch(node: node, previousSeq: seq - 1, records: [record(seq, "x")]),
-                                   now: day1.addingTimeInterval(-TimeInterval(daysAgo) * 86400))
+        _ = try await filling.ingest(LogBatch(node: node, previousSeq: seq - 1, records: [record(seq, "x")]),
+                                     now: day1.addingTimeInterval(-TimeInterval(daysAgo) * 86400))
     }
-    #expect(try await store.dayFiles().count == 4)
+    #expect(try await filling.dayFiles().count == 4)
+    let store = try LogStore(directory: directory, limits: LogStoreLimits(maxAgeDays: 30, maxBytes: 1))
     let removed = try await store.enforceRetention(now: day1)
     #expect(removed.count == 3)
     #expect(try await store.dayFiles() == [LogStore.dayName(day1)])
@@ -127,6 +128,15 @@ private let day1 = Date(timeIntervalSince1970: 1_700_000_000)
     _ = try await store.ingest(LogBatch(node: node, previousSeq: 1, records: [record(2, "new")]), now: day1.addingTimeInterval(-29 * 86400))
     #expect(try await store.enforceRetention(now: day1).count == 1)
     #expect(try await store.search(LogQuery()).entries.map(\.line) == ["new"])
+}
+
+@Test func ingestStopsAcceptingWhenOverTheLimitSoTheDiskCantFill() async throws {
+    let (store, directory) = try makeStore(limits: LogStoreLimits(maxBytes: 1))
+    defer { try? FileManager.default.removeItem(at: directory) }
+    #expect(try await store.ingest(LogBatch(node: node, previousSeq: 0, records: [record(1, "a")]), now: day1) == 1)
+    // Not acknowledged, so the worker keeps the line in its spool.
+    #expect(try await store.ingest(LogBatch(node: node, previousSeq: 1, records: [record(2, "b")]), now: day1) == 1)
+    #expect(try await store.search(LogQuery()).entries.map(\.line) == ["a"])
 }
 
 @Test func subscribersGetMatchingLines() async throws {

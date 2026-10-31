@@ -40,6 +40,16 @@ private func append(_ text: String, to url: URL) throws {
     #expect(bounded.allSatisfy { $0 != "first" })
 }
 
+@Test func tailOfALargeFileIsFast() throws {
+    let url = try tempFile()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let line = String(repeating: "x", count: 99) + "\n"
+    try Data(String(repeating: line, count: 500_000).utf8).write(to: url) // 50 MB, the rotation size
+    let start = ContinuousClock.now
+    #expect(try LogReader.lastLines(of: url, count: 10_000).count == 10_000)
+    #expect(ContinuousClock.now - start < .seconds(1))
+}
+
 @Test func followerSeesOnlyNewCompleteLines() throws {
     let url = try tempFile()
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
