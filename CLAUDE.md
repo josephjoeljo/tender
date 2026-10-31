@@ -171,6 +171,8 @@ Production uses `/opt/tender`, `/Library/LaunchDaemons`, and the `system` domain
 
 ## Milestones
 
+Detailed plans: `docs/plans/milestone-{1..5}.md`.
+
 1. **Single-node agent** — pm2 parity on launchd: start/stop/restart/delete/list,
    logs, adopt, binaries-folder watching. ← current (scaffold builds in Xcode;
    plan: `docs/plans/milestone-1.md`)
@@ -183,6 +185,7 @@ Production uses `/opt/tender`, `/Library/LaunchDaemons`, and the `system` domain
    offload of closed day files to GCS/S3, `tender logs -f` across nodes; release
    fetching from GCP Artifact Registry / GCS / S3.
    Plus the TenderApp dashboard: nodes, processes, logs (search + follow), releases.
+   Plus Prometheus `/metrics` on the head.
 4. **MCP server** — read tools (`list_nodes`, `list_processes`,
    `describe_process`, `search_logs`) + mutating tools (`start/stop/restart_process`),
    per-token scopes, audit log.
