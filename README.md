@@ -95,14 +95,16 @@ To debug the daemon instead of installing it, add these launch arguments to the 
 | `tender adopt <label>` | Manage an existing launchd job, such as Homebrew's `mongod` |
 | `tender releases <name>` | List a service's releases |
 | `tender rollback <name>` | Go back to an earlier release |
-| `tender deploy <name> --release <version>` | Fetch a release and restart on it |
+| `tender deploy <name> --release <version>` | Fetch a release and restart on it. Needs a [release source](docs/ops/releases-and-logs.md) |
 | `tender nodes` | List the cluster's nodes |
 
 `tender start` also takes `--instances`, `--env KEY=VALUE`, `--cwd`, `--user`, and `--node`. Services start in `/` unless you set `--cwd`. Run `tender help <command>` for the rest.
 
 ### Ship a new binary
 
-Tender watches a folder for each service: `/opt/tender/bin/<service>/` in production and `~/Library/Application Support/Tender/bin/<service>/` in dev mode. Drop a new binary there, and Tender copies it to a new release and restarts the service on it.
+Tender watches a folder for each service: `/opt/tender/bin/<service>/` in production and `~/Library/Application Support/Tender/bin/<service>/` in dev mode. Drop a new binary there, and Tender copies it to a new release. It uses `<service>/<service>` if that file exists, and otherwise the newest file in the folder.
+
+If the service already exists, Tender restarts it on the new release. If it doesn't, nothing runs until you create it with `tender start <service>`.
 
 ## Run it in production
 
@@ -112,6 +114,10 @@ On each Mac, build a release and copy both binaries somewhere `sudo` can find th
 
 ```sh
 swift build -c release --package-path TenderKit
+```
+
+```sh
+sudo mkdir -p /usr/local/bin
 ```
 
 ```sh
@@ -176,15 +182,19 @@ On your laptop, save the head's address and the token. Passing the token through
 TENDER_TOKEN=<token> tender context set --head <head-address>
 ```
 
+If a dev daemon is also running on the laptop, the CLI talks to that instead. Add `--remote` to reach the head, as in `tender list --remote`.
+
 For the menu bar app, enter the same two values in Settings.
 
 ## Test
 
-Run the tests with ⌘U in Xcode, or from the command line:
+Run all the tests from the command line:
 
 ```sh
 swift test --package-path TenderKit
 ```
+
+In Xcode, each test module has its own scheme, such as `TenderPKITests`. Pick one and press ⌘U.
 
 ## Layout
 
