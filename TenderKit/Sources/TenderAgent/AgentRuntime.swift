@@ -65,7 +65,11 @@ public struct AgentRuntime: Sendable {
             logger: logger
         )
         let group = ServiceGroup(
-            services: [ReconcilerSweep(reconciler: reconciler, interval: sweepInterval), server],
+            services: [
+                ReconcilerSweep(reconciler: reconciler, interval: sweepInterval),
+                LogRotationService(environment: environment, store: store),
+                server,
+            ],
             gracefulShutdownSignals: shutdownSignals,
             logger: logger
         )

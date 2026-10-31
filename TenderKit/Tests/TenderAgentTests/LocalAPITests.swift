@@ -1,5 +1,6 @@
 import Foundation
 import LaunchdKit
+import LogTail
 import Testing
 import TenderCore
 @testable import TenderAgent
@@ -104,11 +105,60 @@ private func apiErrorCode(_ call: () async throws -> ProcessList) async -> Strin
 
 @Test func laterMilestoneEndpointsAnswerNotImplemented() async throws {
     try await withDaemon { client, _ async throws in
-        #expect(try await client.perform(.GET, "/v1/processes/api/logs").status == 501)
         #expect(try await client.perform(.GET, "/v1/releases/api").status == 501)
         #expect(try await client.perform(.POST, "/v1/releases/api/rollback").status == 501)
         #expect(try await client.perform(.POST, "/v1/adopt").status == 501)
     }
+}
+
+@Test func logsOverTheSocket() async throws {
+    try await withDaemon { client, env async throws in
+        _ = try await client.start(sleeper)
+        let directory = env.logDirectory(service: "api")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let out = env.stdoutLog(service: "api", instance: 0)
+        try Data("o1\no2\no3\n".utf8).write(to: out)
+        try Data("e1\n".utf8).write(to: env.stderrLog(service: "api", instance: 0))
+
+        let tail = try await client.logs(service: "api", lines: 2)
+        #expect(tail.lines.map(\.text) == ["o2", "o3", "e1"])
+        #expect(tail.lines.last?.stream == .err)
+        #expect(try await client.logs(service: "api", stream: .err).lines.map(\.text) == ["e1"])
+        #expect(try await client.logs(service: "api", instance: 9).lines.isEmpty)
+
+        var iterator = client.followLogs(service: "api", lines: 1, stream: .out).makeAsyncIterator()
+        #expect(try await iterator.next()?.text == "o3")
+        let handle = try FileHandle(forWritingTo: out)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("live\n".utf8))
+        try handle.close()
+        #expect(try await iterator.next()?.text == "live")
+    }
+}
+
+@Test func logsForUnknownServiceFail() async throws {
+    try await withDaemon { client, _ async throws in
+        do {
+            _ = try await client.logs(service: "nope")
+            Issue.record("expected an error")
+        } catch let error as TenderClientError {
+            #expect(error.code == "service_not_found")
+        }
+    }
+}
+
+@Test func rotationServiceRotatesManagedLogs() throws {
+    let env = try makeTestEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let store = try StateStore(environment: env)
+    try store.upsert(sleeper)
+    try FileManager.default.createDirectory(at: env.logDirectory(service: "api"), withIntermediateDirectories: true)
+    let out = env.stdoutLog(service: "api", instance: 0)
+    try Data("0123456789".utf8).write(to: out)
+
+    try LogRotationService(environment: env, store: store, rotator: LogRotator(maxBytes: 5, keep: 1)).rotateAll()
+    #expect(try Data(contentsOf: out).isEmpty)
+    #expect(FileManager.default.fileExists(atPath: out.path(percentEncoded: false) + ".1"))
 }
 
 @Test func secondDaemonIsRefused() async throws {

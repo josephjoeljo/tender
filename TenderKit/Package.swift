@@ -98,9 +98,11 @@ let package = Package(
         ]),
 
         // MARK: Tests
+        .testTarget(name: "ProcessMetricsTests", dependencies: ["ProcessMetrics"]),
+        .testTarget(name: "LogTailTests", dependencies: ["LogTail", "LaunchdKit"]),
         .testTarget(name: "TenderCoreTests", dependencies: ["TenderCore"]),
         .testTarget(name: "TenderAgentTests", dependencies: [
-            "TenderAgent", "TenderClient", "TenderCore", "LaunchdKit",
+            "TenderAgent", "TenderClient", "TenderCore", "LaunchdKit", "LogTail",
             .product(name: "GRDB", package: "GRDB.swift"),
         ]),
         .testTarget(name: "LaunchdKitTests", dependencies: ["LaunchdKit"], resources: [.copy("Fixtures")]),

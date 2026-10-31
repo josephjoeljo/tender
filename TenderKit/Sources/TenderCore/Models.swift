@@ -157,3 +157,25 @@ public struct APIErrorBody: Codable, Sendable, Equatable {
         self.message = message
     }
 }
+
+/// One line of a process's output.
+public struct LogLine: Codable, Sendable, Equatable {
+    public enum Stream: String, Codable, Sendable { case out, err }
+
+    public var service: String
+    public var instance: Int
+    public var stream: Stream
+    public var text: String
+
+    public init(service: String, instance: Int, stream: Stream, text: String) {
+        self.service = service
+        self.instance = instance
+        self.stream = stream
+        self.text = text
+    }
+}
+
+public struct LogResponse: Codable, Sendable, Equatable {
+    public var lines: [LogLine]
+    public init(lines: [LogLine]) { self.lines = lines }
+}

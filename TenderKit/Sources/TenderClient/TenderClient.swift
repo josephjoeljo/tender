@@ -74,6 +74,57 @@ public struct TenderClient: Sendable {
         try await send(.DELETE, "/v1/processes/\(try escaped(service))")
     }
 
+    public func logs(service: String, lines: Int = 200, instance: Int? = nil,
+                     stream: LogLine.Stream? = nil) async throws -> LogResponse {
+        try await send(.GET, try logsPath(service, lines, instance, stream, follow: false))
+    }
+
+    /// The last `lines` lines, then new lines as they are written, until cancelled.
+    public func followLogs(service: String, lines: Int = 200, instance: Int? = nil,
+                           stream: LogLine.Stream? = nil) -> AsyncThrowingStream<LogLine, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try self.probeSocket()
+                    let path = try self.logsPath(service, lines, instance, stream, follow: true)
+                    guard let url = URL(httpURLWithSocketPath: self.socketPath, uri: path) else {
+                        throw TenderClientError.invalidResponse("bad socket path \(self.socketPath)")
+                    }
+                    let response = try await HTTPClient.shared.execute(
+                        HTTPClientRequest(url: url.absoluteString), deadline: .distantFuture)
+                    guard response.status == .ok else {
+                        let body = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
+                        throw Self.apiError(status: Int(response.status.code), data: body)
+                    }
+                    var pending = Data()
+                    for try await chunk in response.body {
+                        pending.append(contentsOf: chunk.readableBytesView)
+                        while let newline = pending.firstIndex(of: 10) {
+                            let line = pending[pending.startIndex..<newline]
+                            pending = Data(pending[pending.index(after: newline)...])
+                            if !line.isEmpty {
+                                continuation.yield(try JSONDecoder().decode(LogLine.self, from: line))
+                            }
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func logsPath(_ service: String, _ lines: Int, _ instance: Int?, _ stream: LogLine.Stream?,
+                          follow: Bool) throws -> String {
+        var path = "/v1/processes/\(try escaped(service))/logs?lines=\(lines)"
+        if let instance { path += "&instance=\(instance)" }
+        if let stream { path += "&stream=\(stream.rawValue)" }
+        if follow { path += "&follow=true" }
+        return path
+    }
+
     /// Boots out orphaned launchd jobs.
     public func collectGarbage() async throws -> ProcessList {
         try await send(.POST, "/v1/gc")
@@ -89,16 +140,20 @@ public struct TenderClient: Sendable {
     private func send<T: Decodable>(_ method: HTTPMethod, _ path: String, body: Data? = nil) async throws -> T {
         let (status, data) = try await perform(method, path, body: body)
         guard (200..<300).contains(status) else {
-            if let error = try? JSONDecoder().decode(APIErrorBody.self, from: data) {
-                throw TenderClientError.api(status: status, code: error.code, message: error.message)
-            }
-            throw TenderClientError.api(status: status, code: "http_\(status)", message: "tenderd returned HTTP \(status).")
+            throw Self.apiError(status: status, data: data)
         }
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
             throw TenderClientError.invalidResponse("\(error)")
         }
+    }
+
+    private static func apiError(status: Int, data: Data) -> TenderClientError {
+        if let error = try? JSONDecoder().decode(APIErrorBody.self, from: data) {
+            return .api(status: status, code: error.code, message: error.message)
+        }
+        return .api(status: status, code: "http_\(status)", message: "tenderd returned HTTP \(status).")
     }
 
     private func probeSocket() throws {

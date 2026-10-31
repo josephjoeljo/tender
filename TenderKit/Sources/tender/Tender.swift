@@ -8,7 +8,7 @@ struct Tender: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
-        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Gc.self, Version.self, Daemon.self]
+        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Gc.self, Version.self, Daemon.self]
     )
 }
 
@@ -20,22 +20,26 @@ struct CommonOptions: ParsableArguments {
     var socket: String?
 
     /// Runs one API call and prints its result, or the error on failure.
+    func fail(_ error: TenderClientError) throws -> Never {
+        if json {
+            print(try encode(APIErrorBody(code: error.code, message: error.description)))
+        } else {
+            FileHandle.standardError.write(Data("error: \(error.description)\n".utf8))
+        }
+        throw ExitCode.failure
+    }
+
     func execute(_ call: (TenderClient) async throws -> ProcessList) async throws {
         let client = TenderClient(socketPath: socket ?? TenderClient.defaultSocketPath())
         do {
             let list = try await call(client)
             print(json ? try encode(list) : ProcessTable.render(list))
         } catch let error as TenderClientError {
-            if json {
-                print(try encode(APIErrorBody(code: error.code, message: error.description)))
-            } else {
-                FileHandle.standardError.write(Data("error: \(error.description)\n".utf8))
-            }
-            throw ExitCode.failure
+            try fail(error)
         }
     }
 
-    private func encode(_ value: some Encodable) throws -> String {
+    func encode(_ value: some Encodable) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return String(decoding: try encoder.encode(value), as: UTF8.self)
@@ -147,6 +151,53 @@ extension Tender {
 
         func run() async throws {
             try await options.execute { try await $0.list() }
+        }
+    }
+
+    struct Logs: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Show a service's stdout and stderr.")
+
+        @Argument(help: "Service name.") var name: String
+        @Flag(name: .shortAndLong, help: "Keep printing new lines.") var follow = false
+        @Option(name: [.customShort("n"), .long], help: "Lines to show per file.") var lines = 200
+        @Option(help: "Only this instance.") var instance: Int?
+        @Option(help: "Only this stream: out or err.") var stream: String?
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            var selected: LogLine.Stream?
+            if let stream {
+                guard let parsed = LogLine.Stream(rawValue: stream) else {
+                    throw ValidationError("--stream must be out or err.")
+                }
+                selected = parsed
+            }
+            let client = TenderClient(socketPath: options.socket ?? TenderClient.defaultSocketPath())
+            do {
+                if follow {
+                    for try await line in client.followLogs(service: name, lines: lines, instance: instance, stream: selected) {
+                        emit(line, compact: true)
+                    }
+                } else {
+                    let response = try await client.logs(service: name, lines: lines, instance: instance, stream: selected)
+                    if options.json {
+                        print(try options.encode(response))
+                    } else {
+                        response.lines.forEach { emit($0, compact: false) }
+                    }
+                }
+            } catch let error as TenderClientError {
+                try options.fail(error)
+            }
+        }
+
+        private func emit(_ line: LogLine, compact: Bool) {
+            if options.json, compact, let data = try? JSONEncoder().encode(line) {
+                print(String(decoding: data, as: UTF8.self))
+            } else {
+                print("\(line.service)[\(line.instance)] \(line.stream.rawValue) | \(line.text)")
+            }
+            fflush(stdout)
         }
     }
 

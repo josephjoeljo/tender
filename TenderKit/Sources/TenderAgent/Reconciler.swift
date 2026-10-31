@@ -1,6 +1,8 @@
 import Foundation
 import LaunchdKit
 import Logging
+import LogTail
+import ProcessMetrics
 import ServiceLifecycle
 import TenderCore
 
@@ -64,6 +66,7 @@ public actor Reconciler {
     private let launchd: any LaunchdControlling
     private let throttleInterval: Int?
     private let logger: Logger
+    private let sampler = UsageSampler()
     private var tail: Task<Void, Never>?
 
     public init(
@@ -218,6 +221,9 @@ public actor Reconciler {
             if let job { state = job.instanceState }
             else { state = record.desired == .stopped ? .stopped : .unknown }
 
+            let usage: ProcessUsage?
+            if let pid = job?.pid { usage = await sampler.usage(pid: pid) } else { usage = nil }
+
             processes.append(InstanceStatus(
                 service: record.service,
                 instance: record.instance,
@@ -225,10 +231,14 @@ public actor Reconciler {
                 state: state,
                 pid: job?.pid,
                 lastExitCode: job?.lastExitCode,
+                uptime: usage?.uptime,
                 restarts: job?.restarts ?? 0,
-                release: release
+                release: release,
+                cpu: usage?.cpu,
+                rss: usage?.rss
             ))
         }
+        await sampler.retain(pids: Set(processes.compactMap(\.pid)))
         let known = Set(try store.instances().map(\.label))
         let loaded = try await launchd.listLabels(prefix: "\(environment.serviceLabelPrefix).")
         return ProcessList(processes: processes, orphans: loaded.filter { !known.contains($0) })
@@ -359,6 +369,50 @@ public struct ReconcilerSweep: Service {
                     try await reconciler.reconcile()
                 } catch {
                     logger.error("sweep failed", metadata: ["error": "\(error)"])
+                }
+                try? await Task.sleep(for: interval)
+            }
+        }
+    }
+}
+
+/// Rotates the logs of managed instances. Adopted jobs' logs are not ours to touch.
+public struct LogRotationService: Service {
+    private let environment: TenderEnvironment
+    private let store: StateStore
+    private let rotator: LogRotator
+    private let interval: Duration
+    private let logger: Logger
+
+    public init(environment: TenderEnvironment, store: StateStore, rotator: LogRotator = LogRotator(),
+                interval: Duration = .seconds(30), logger: Logger = Logger(label: "tender.logrotate")) {
+        self.environment = environment
+        self.store = store
+        self.rotator = rotator
+        self.interval = interval
+        self.logger = logger
+    }
+
+    func rotateAll() throws {
+        for record in try store.instances() where record.desired != .absent {
+            for url in [environment.stdoutLog(service: record.service, instance: record.instance),
+                        environment.stderrLog(service: record.service, instance: record.instance)] {
+                do {
+                    try rotator.rotateIfNeeded(url)
+                } catch {
+                    logger.error("rotation failed", metadata: ["file": "\(url.path())", "error": "\(error)"])
+                }
+            }
+        }
+    }
+
+    public func run() async throws {
+        await cancelWhenGracefulShutdown {
+            while !Task.isCancelled {
+                do {
+                    try rotateAll()
+                } catch {
+                    logger.error("rotation sweep failed", metadata: ["error": "\(error)"])
                 }
                 try? await Task.sleep(for: interval)
             }
