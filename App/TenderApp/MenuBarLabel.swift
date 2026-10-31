@@ -12,7 +12,8 @@ struct MenuBarLabel: View {
     var body: some View {
         let meters = NodeMeter.meters(nodes: model.nodes, processes: model.processes)
         switch model.health {
-        case .healthy, .degraded where !meters.isEmpty:
+        case .healthy where !meters.isEmpty, 
+                .degraded where !meters.isEmpty:
             Image(nsImage: NodeMeterImage.make(meters, appearance: appearance))
                 .accessibilityLabel(model.health.summary)
         default:
@@ -56,24 +57,28 @@ enum NodeMeterImage {
         let widths = meters.map { max(($0.label as NSString).size(withAttributes: [.font: font]).width, capsule.width) }
         let width = widths.reduce(0, +) + gap * CGFloat(max(meters.count - 1, 0))
         let image = NSImage(size: NSSize(width: ceil(width), height: height), flipped: false) { _ in
-            let saved = NSAppearance.current
-            if let appearance { NSAppearance.current = appearance }
-            defer { NSAppearance.current = saved }
-            let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor]
-            var x: CGFloat = 0
-            for (meter, slot) in zip(meters, widths) {
-                let size = (meter.label as NSString).size(withAttributes: attributes)
-                (meter.label as NSString).draw(at: NSPoint(x: x + (slot - size.width) / 2, y: 10.5), withAttributes: attributes)
-                let frame = NSRect(x: x + (slot - capsule.width) / 2, y: 2, width: capsule.width, height: capsule.height)
-                NSColor.tertiaryLabelColor.setStroke()
-                let outline = NSBezierPath(roundedRect: frame, xRadius: 2.5, yRadius: 2.5)
-                outline.lineWidth = 0.75
-                outline.stroke()
-                color(meter.level).setFill()
-                let inner = frame.insetBy(dx: 1.25, dy: 1.25)
-                let fill = NSRect(x: inner.minX, y: inner.minY, width: inner.width * meter.fraction, height: inner.height)
-                NSBezierPath(roundedRect: fill, xRadius: 1.25, yRadius: 1.25).fill()
-                x += slot + gap
+            let draw = {
+                let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor]
+                var x: CGFloat = 0
+                for (meter, slot) in zip(meters, widths) {
+                    let size = (meter.label as NSString).size(withAttributes: attributes)
+                    (meter.label as NSString).draw(at: NSPoint(x: x + (slot - size.width) / 2, y: 10.5), withAttributes: attributes)
+                    let frame = NSRect(x: x + (slot - capsule.width) / 2, y: 2, width: capsule.width, height: capsule.height)
+                    NSColor.tertiaryLabelColor.setStroke()
+                    let outline = NSBezierPath(roundedRect: frame, xRadius: 2.5, yRadius: 2.5)
+                    outline.lineWidth = 0.75
+                    outline.stroke()
+                    color(meter.level).setFill()
+                    let inner = frame.insetBy(dx: 1.25, dy: 1.25)
+                    let fill = NSRect(x: inner.minX, y: inner.minY, width: inner.width * meter.fraction, height: inner.height)
+                    NSBezierPath(roundedRect: fill, xRadius: 1.25, yRadius: 1.25).fill()
+                    x += slot + gap
+                }
+            }
+            if let appearance {
+                appearance.performAsCurrentDrawingAppearance(draw)
+            } else {
+                draw()
             }
             return true
         }

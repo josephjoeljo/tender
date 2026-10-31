@@ -286,7 +286,7 @@ public actor LogStore {
         let done = try meta.read { db in Set(try String.fetchAll(db, sql: "SELECT name FROM offloaded")) }
         var result: [(String, URL)] = []
         for day in try dayFiles() where day < today && !done.contains("logs-\(day).db") {
-            try database(day: day).writeWithoutTransaction { db in
+            _ = try database(day: day).writeWithoutTransaction { db in
                 try db.checkpoint(.truncate)
             }
             result.append((day, fileURL(day: day)))

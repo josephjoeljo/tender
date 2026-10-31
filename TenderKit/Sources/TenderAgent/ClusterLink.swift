@@ -189,7 +189,7 @@ struct ClusterLink: Service {
             id: config.nodeID,
             version: TenderVersion.current,
             macOS: process.operatingSystemVersionString,
-            hardware: String(cString: hardware),
+            hardware: String(decoding: hardware.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self),
             address: advertised.map { "\($0):\(options.agentPort)" }
         )
     }
