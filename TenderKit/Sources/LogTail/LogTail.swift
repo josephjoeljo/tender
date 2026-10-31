@@ -35,6 +35,28 @@ public struct LogFollower: Sendable {
     private var partial = Data()
     private let maxReadPerPoll = 1 << 20
 
+    /// Where a follower has read to: complete lines only, so it can be saved and resumed.
+    public struct Position: Sendable, Equatable {
+        public var inode: UInt64
+        public var offset: UInt64
+
+        public init(inode: UInt64, offset: UInt64) {
+            self.inode = inode
+            self.offset = offset
+        }
+    }
+
+    public var position: Position { Position(inode: inode ?? 0, offset: offset - UInt64(partial.count)) }
+
+    /// Resumes from a saved position. Without one, reads the file from its start.
+    public init(url: URL, resumingFrom position: Position?) {
+        self.url = url
+        if let position {
+            offset = position.offset
+            inode = position.inode
+        }
+    }
+
     public init(url: URL, startAtEnd: Bool = true) {
         self.url = url
         if startAtEnd, let status = Self.status(of: url) {

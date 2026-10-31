@@ -1,6 +1,7 @@
 import Distributed
 import Foundation
 import Logging
+import LogTail
 import ServiceLifecycle
 import TenderActorSystem
 import TenderCore
@@ -123,7 +124,13 @@ struct ClusterLink: Service {
                     if let tls = try identities.tls(), let config = try identities.config() {
                         (system, agent) = try await start(config: config, tls: tls)
                         guard let system, agent != nil else { continue }
-                        await heartbeats(config: config, system: system)
+                        let spool = try LogSpool(directory: identities.environment.spoolDirectory)
+                        await withTaskGroup(of: Void.self) { group in
+                            group.addTask { await heartbeats(config: config, system: system, spool: spool) }
+                            group.addTask { await tailLogs(spool: spool) }
+                            group.addTask { await shipLogs(config: config, system: system, spool: spool) }
+                            await group.waitForAll()
+                        }
                         await system.shutdown()
                         return
                     }
@@ -185,8 +192,67 @@ struct ClusterLink: Service {
         return await listenHost()
     }
 
-    private func heartbeats(config: ClusterConfig, system: TenderActorSystem) async {
+    /// Copies new lines from log files into the spool, with their offsets in one transaction.
+    private func tailLogs(spool: LogSpool) async {
+        var followers: [URL: LogFollower] = [:]
+        var lastLimitCheck = ContinuousClock.now
+        while !Task.isCancelled {
+            do {
+                var pending: [LogSpool.Pending] = []
+                let sources = try controller.allLogSources()
+                for source in sources {
+                    var follower = try followers[source.url] ?? LogFollower(url: source.url, resumingFrom: spool.position(of: source.url))
+                    let lines = (try? follower.poll()) ?? []
+                    followers[source.url] = follower
+                    if !lines.isEmpty {
+                        pending.append(LogSpool.Pending(service: source.service, instance: source.instance, stream: source.stream,
+                                                        lines: lines, file: source.url, position: follower.position))
+                    }
+                }
+                if !pending.isEmpty { try spool.append(pending) }
+                let current = Set(sources.map(\.url))
+                followers = followers.filter { current.contains($0.key) }
+                if ContinuousClock.now - lastLimitCheck > .seconds(30) {
+                    lastLimitCheck = .now
+                    let dropped = try spool.enforceLimits()
+                    if dropped > 0 { logger.warning("log spool over its limits", metadata: ["dropped": "\(dropped)"]) }
+                }
+            } catch {
+                logger.error("log tailing failed", metadata: ["error": "\(error)"])
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+    }
+
+    /// Sends one batch at a time. A batch goes out as soon as there are lines; when there
+    /// are none or the head is away, it waits.
+    private func shipLogs(config: ClusterConfig, system: TenderActorSystem, spool: LogSpool) async {
+        while !Task.isCancelled {
+            var delay: Duration = .milliseconds(250)
+            do {
+                let batch = try spool.nextBatch(node: config.nodeID)
+                if !batch.records.isEmpty || !batch.gaps.isEmpty {
+                    let registry = try $HeadRegistryProtocol.resolve(
+                        id: ActorIdentity(node: config.headNode, name: ActorNames.registry), using: system)
+                    let acked = try await registry.ingest(batch)
+                    if let last = batch.records.last?.seq ?? batch.gaps.last?.throughSeq, acked < last, acked < batch.previousSeq {
+                        try spool.rewind(to: acked)
+                    } else {
+                        try spool.acknowledge(through: acked)
+                    }
+                    if !batch.records.isEmpty { delay = .zero }
+                }
+            } catch {
+                delay = .seconds(2)
+                logger.debug("log shipping failed", metadata: ["error": "\(error)"])
+            }
+            try? await Task.sleep(for: delay)
+        }
+    }
+
+    private func heartbeats(config: ClusterConfig, system: TenderActorSystem, spool: LogSpool) async {
         var registered = false
+        var roundTrip: TimeInterval?
         let info = await nodeInfo(config: config)
         while !Task.isCancelled {
             do {
@@ -198,8 +264,13 @@ struct ClusterLink: Service {
                     logger.info("registered with head", metadata: ["head": "\(config.headNode)"])
                 }
                 let list = try await controller.list()
-                try await registry.heartbeat(Heartbeat(node: config.nodeID, nodeClock: Date(),
-                                                       processes: list.processes, orphans: list.orphans))
+                let start = ContinuousClock.now
+                try await registry.heartbeat(Heartbeat(
+                    node: config.nodeID, nodeClock: Date(), processes: list.processes, orphans: list.orphans,
+                    previousRoundTrip: roundTrip, spoolBacklog: (try? spool.backlog()) ?? 0,
+                    spoolDropped: (try? spool.droppedTotal()) ?? 0))
+                let elapsed = (ContinuousClock.now - start).components
+                roundTrip = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
             } catch {
                 // The head restarted, or is away. Re-registering on reconnect rebuilds its registry.
                 registered = false

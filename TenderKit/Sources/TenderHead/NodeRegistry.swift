@@ -2,6 +2,7 @@ import Distributed
 import Foundation
 import TenderActorSystem
 import TenderCore
+import TenderLogStore
 import TenderProtocol
 
 /// The head's view of the cluster: a cache rebuilt from what workers report.
@@ -11,6 +12,13 @@ public actor RegistryState {
         var lastHeartbeat: Date?
         var processes: [InstanceStatus] = []
         var orphans: [String] = []
+        var skew: TimeInterval?
+        var spoolBacklog = 0
+        var spoolDropped = 0
+    }
+
+    public static func skew(now: Date, nodeClock: Date, roundTrip: TimeInterval?) -> TimeInterval {
+        now.timeIntervalSince(nodeClock) - (roundTrip ?? 0) / 2
     }
 
     public static let nodeDownAfter: TimeInterval = 20
@@ -42,6 +50,9 @@ public actor RegistryState {
         entry.lastHeartbeat = now
         entry.processes = heartbeat.processes
         entry.orphans = heartbeat.orphans
+        entry.skew = Self.skew(now: now, nodeClock: heartbeat.nodeClock, roundTrip: heartbeat.previousRoundTrip)
+        entry.spoolBacklog = heartbeat.spoolBacklog
+        entry.spoolDropped = heartbeat.spoolDropped
         entries[heartbeat.node] = entry
         return true
     }
@@ -62,7 +73,10 @@ public actor RegistryState {
                 up: entry.lastHeartbeat.map { now.timeIntervalSince($0) < downAfter } ?? false,
                 lastHeartbeatAge: entry.lastHeartbeat.map { now.timeIntervalSince($0) },
                 instanceCount: entry.processes.count,
-                crashedCount: entry.processes.filter { $0.state == .crashed }.count
+                crashedCount: entry.processes.filter { $0.state == .crashed }.count,
+                clockSkew: entry.skew,
+                spoolBacklog: entry.spoolBacklog,
+                spoolDropped: entry.spoolDropped
             )
         }.sorted { $0.info.id.rawValue < $1.info.id.rawValue }
     }
@@ -121,10 +135,12 @@ public struct RevocationVerifier: PeerVerifier {
 distributed actor HeadRegistry: HeadRegistryProtocol {
     typealias ActorSystem = TenderActorSystem
     private let state: RegistryState
+    private let logs: LogStore
     private var registered: Set<NodeID> = []
 
-    init(state: RegistryState, actorSystem: TenderActorSystem) {
+    init(state: RegistryState, logs: LogStore, actorSystem: TenderActorSystem) {
         self.state = state
+        self.logs = logs
         self.actorSystem = actorSystem
     }
 
@@ -140,6 +156,11 @@ distributed actor HeadRegistry: HeadRegistryProtocol {
         try requireCaller(is: node.id)
         try await state.register(node)
         registered.insert(node.id)
+    }
+
+    distributed func ingest(_ batch: LogBatch) async throws -> UInt64 {
+        try requireCaller(is: batch.node)
+        return try await logs.ingest(batch)
     }
 
     distributed func heartbeat(_ heartbeat: Heartbeat) async throws {

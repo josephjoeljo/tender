@@ -469,6 +469,92 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     #expect(summaries.first?.up == false)
 }
 
+// MARK: Logs
+
+/// The plan's definition of done: lines written while the head is away arrive after it
+/// returns, in order, with none lost and none duplicated.
+@Test func logsShipAcrossAHeadOutageWithoutLossOrDuplicates() async throws {
+    let head = try Daemon(node: "head", head: true)
+    let worker = try Daemon(node: "worker", head: false)
+    try await head.start()
+    try await worker.start()
+    defer { head.cleanup(); worker.cleanup() }
+    let token = try #require(try await eventually { try await head.client.createJoinToken() })
+    _ = try await worker.client.join(head: "127.0.0.1:\(head.apiPort)", token: token.token, nodeID: "worker")
+    var spec = sleeper
+    spec.node = NodeID("worker")
+    _ = try await eventually { try await head.client.nodes().nodes.count == 2 ? true : nil }
+    _ = try await head.client.start(spec)
+
+    let log = worker.env.stdoutLog(service: "api", instance: 0)
+    FileManager.default.createFile(atPath: log.path(percentEncoded: false), contents: nil)
+    func write(_ range: ClosedRange<Int>) throws {
+        let handle = try FileHandle(forWritingTo: log)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(range.map { "line \($0)\n" }.joined().utf8))
+        try handle.close()
+    }
+    func received(from client: TenderClient) async throws -> [String] {
+        try await client.searchLogs(LogQuery(service: "api", limit: 5000)).entries.map(\.line)
+    }
+
+    try write(1...100)
+    #expect(try await eventually { try await received(from: head.client).count == 100 ? true : nil } == true)
+
+    await head.stop()
+    try write(101...300)
+    try await Task.sleep(for: .milliseconds(600))
+    await worker.stop() // A restart while disconnected: offsets and spool must both survive.
+    let workerAgain = try Daemon(node: "worker", head: false, env: worker.env, agentPort: worker.agentPort)
+    try await workerAgain.start()
+    try write(301...400)
+
+    let back = try Daemon(node: "head", head: true, env: head.env, agentPort: head.agentPort, apiPort: head.apiPort)
+    try await back.start()
+    #expect(try await eventually { try await received(from: back.client).count >= 400 ? true : nil } == true)
+    let lines = try await received(from: back.client)
+    #expect(lines == (1...400).map { "line \($0)" })
+    let result = try await back.client.searchLogs(LogQuery(service: "api", text: "399"))
+    #expect(result.entries.map(\.line) == ["line 399"])
+    await workerAgain.stop()
+    await back.stop()
+}
+
+@Test func followStreamsLinesFromEveryNode() async throws {
+    try await withCluster { head, worker async throws in
+        var spec = sleeper
+        spec.node = NodeID("worker")
+        _ = try await head.client.start(spec)
+        let log = worker.env.stdoutLog(service: "api", instance: 0)
+        FileManager.default.createFile(atPath: log.path(percentEncoded: false), contents: nil)
+
+        var iterator = head.client.followClusterLogs(LogQuery(service: "api")).makeAsyncIterator()
+        try await Task.sleep(for: .milliseconds(200))
+        let handle = try FileHandle(forWritingTo: log)
+        try handle.write(contentsOf: Data("live line\n".utf8))
+        try handle.close()
+        let entry = try await iterator.next()
+        #expect(entry?.line == "live line")
+        #expect(entry?.node == NodeID("worker"))
+    }
+}
+
+@Test func skewAndSpoolStatsReachTheSummary() async throws {
+    let store = try makeEnvironment()
+    defer { try? FileManager.default.removeItem(at: store.root) }
+    let summaryState = RegistryState(store: nil)
+    let info = NodeInfo(id: NodeID("n"), version: "1", macOS: "x", hardware: "y")
+    try await summaryState.register(info)
+    let now = Date()
+    _ = await summaryState.heartbeat(Heartbeat(node: NodeID("n"), nodeClock: now.addingTimeInterval(-5), processes: [],
+                                               previousRoundTrip: 2, spoolBacklog: 3, spoolDropped: 4),
+                                     registeredThisRun: true, now: now)
+    let summary = try #require(await summaryState.summaries(now: now).first)
+    #expect(abs((summary.clockSkew ?? 0) - 4) < 0.001)
+    #expect(summary.spoolBacklog == 3)
+    #expect(summary.spoolDropped == 4)
+}
+
 // MARK: Health
 
 @Test func healthSummarizesTheCluster() {

@@ -28,8 +28,16 @@ public struct Heartbeat: Codable, Sendable, Equatable {
     public var nodeClock: Date
     public var processes: [InstanceStatus]
     public var orphans: [String]
+    /// How long the previous heartbeat took, for estimating clock skew.
+    public var previousRoundTrip: TimeInterval?
+    public var spoolBacklog: Int
+    public var spoolDropped: Int
 
-    public init(node: NodeID, nodeClock: Date, processes: [InstanceStatus], orphans: [String] = []) {
+    public init(node: NodeID, nodeClock: Date, processes: [InstanceStatus], orphans: [String] = [],
+                previousRoundTrip: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0) {
+        self.previousRoundTrip = previousRoundTrip
+        self.spoolBacklog = spoolBacklog
+        self.spoolDropped = spoolDropped
         self.node = node
         self.nodeClock = nodeClock
         self.processes = processes
@@ -58,4 +66,6 @@ public protocol NodeAgentProtocol: DistributedActor where ActorSystem: Distribut
 public protocol HeadRegistryProtocol: DistributedActor where ActorSystem: DistributedActorSystem<any Codable> {
     distributed func register(_ node: NodeInfo) async throws
     distributed func heartbeat(_ heartbeat: Heartbeat) async throws
+    /// Stores log lines and returns the highest sequence number that's safe to prune.
+    distributed func ingest(_ batch: LogBatch) async throws -> UInt64
 }

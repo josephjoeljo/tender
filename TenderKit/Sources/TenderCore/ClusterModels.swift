@@ -3,7 +3,7 @@ import Foundation
 extension TenderVersion {
     /// Exact match required at handshake. Add new `distributed func`s rather than
     /// changing shipped ones, and bump this when a node can't serve an older peer.
-    public static let protocolVersion = 1
+    public static let protocolVersion = 2
 }
 
 /// How a failed call on a node is reported, locally and across the wire.
@@ -49,8 +49,16 @@ public struct NodeSummary: Codable, Sendable, Equatable {
     public var lastHeartbeatAge: TimeInterval?
     public var instanceCount: Int
     public var crashedCount: Int
+    /// Head clock minus node clock. Positive means the node is behind.
+    public var clockSkew: TimeInterval?
+    public var spoolBacklog: Int
+    public var spoolDropped: Int
 
-    public init(info: NodeInfo, up: Bool, lastHeartbeatAge: TimeInterval?, instanceCount: Int, crashedCount: Int) {
+    public init(info: NodeInfo, up: Bool, lastHeartbeatAge: TimeInterval?, instanceCount: Int, crashedCount: Int,
+                clockSkew: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0) {
+        self.clockSkew = clockSkew
+        self.spoolBacklog = spoolBacklog
+        self.spoolDropped = spoolDropped
         self.info = info
         self.up = up
         self.lastHeartbeatAge = lastHeartbeatAge

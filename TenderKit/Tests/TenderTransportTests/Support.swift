@@ -32,6 +32,7 @@ distributed actor TestRegistry: HeadRegistryProtocol {
     private var beats = 0
     distributed func register(_ node: NodeInfo) async throws {}
     distributed func heartbeat(_ heartbeat: Heartbeat) async throws { beats += 1 }
+    distributed func ingest(_ batch: LogBatch) async throws -> UInt64 { batch.records.last?.seq ?? 0 }
     distributed func count() -> Int { beats }
 }
 

@@ -215,6 +215,54 @@ public struct TenderClient: Sendable {
         try await send(.DELETE, "/v1/adopt/\(try escaped(label))\(try nodeQuery(node))")
     }
 
+    private func logQueryItems(_ query: LogQuery) throws -> String {
+        var items: [String] = ["limit=\(query.limit)"]
+        if let service = query.service { items.append("service=\(try escaped(service))") }
+        if let node = query.node { items.append("node=\(try escaped(node))") }
+        if let stream = query.stream { items.append("stream=\(stream.rawValue)") }
+        if let since = query.since { items.append("since=\(since.timeIntervalSince1970)") }
+        if let until = query.until { items.append("until=\(until.timeIntervalSince1970)") }
+        if let text = query.text { items.append("query=\(try escaped(text))") }
+        return items.joined(separator: "&")
+    }
+
+    /// Searches the head's logs. A worker's daemon answers `http_404`.
+    public func searchLogs(_ query: LogQuery) async throws -> LogSearchResult {
+        try await send(.GET, "/v1/logs?\(try logQueryItems(query))")
+    }
+
+    /// New matching lines from every node, from the head, until cancelled.
+    public func followClusterLogs(_ query: LogQuery) -> AsyncThrowingStream<LogEntry, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let (client, request) = try self.request("/v1/logs/follow?\(try self.logQueryItems(query))")
+                    let response = try await client.execute(request, deadline: .distantFuture)
+                    guard response.status == .ok else {
+                        let body = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
+                        throw Self.apiError(status: Int(response.status.code), data: body)
+                    }
+                    var pending = Data()
+                    let separator = Data("\n\n".utf8)
+                    for try await chunk in response.body {
+                        pending.append(contentsOf: chunk.readableBytesView)
+                        while let range = pending.range(of: separator) {
+                            let event = pending[pending.startIndex..<range.lowerBound]
+                            pending = Data(pending[range.upperBound...])
+                            if event.starts(with: Data("data: ".utf8)) {
+                                continuation.yield(try JSONDecoder().decode(LogEntry.self, from: event.dropFirst(6)))
+                            }
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     /// Boots out orphaned launchd jobs.
     public func collectGarbage(node: String? = nil) async throws -> ProcessList {
         try await send(.POST, "/v1/gc\(try nodeQuery(node))")

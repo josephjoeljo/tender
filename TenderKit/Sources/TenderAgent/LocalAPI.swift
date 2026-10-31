@@ -172,6 +172,21 @@ struct ProcessController: Sendable {
             }
     }
 
+    /// Every file whose lines should reach the head.
+    func allLogSources() throws -> [LogSource] {
+        var sources: [LogSource] = []
+        for record in try store.instances() where record.desired != .absent {
+            sources.append(LogSource(service: record.service, instance: record.instance, stream: .out,
+                                     url: environment.stdoutLog(service: record.service, instance: record.instance)))
+            sources.append(LogSource(service: record.service, instance: record.instance, stream: .err,
+                                     url: environment.stderrLog(service: record.service, instance: record.instance)))
+        }
+        for job in try store.adoptedJobs() {
+            sources += try logSources(service: job.label, instance: nil, stream: nil)
+        }
+        return sources
+    }
+
     private func requireExisting(_ service: String, _ exists: Bool) throws {
         guard exists else {
             throw APIFailure(status: .notFound, code: "service_not_found", message: "No service named '\(service)'.")

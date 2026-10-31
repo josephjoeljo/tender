@@ -24,7 +24,7 @@ public enum ProcessTable {
 
     public static func render(_ list: NodeList) -> String {
         guard !list.nodes.isEmpty else { return "No nodes." }
-        let rows = [["NODE", "STATE", "ADDRESS", "PROCESSES", "CRASHED", "LAST SEEN", "VERSION"]] + list.nodes.map { node in
+        let rows = [["NODE", "STATE", "ADDRESS", "PROCESSES", "CRASHED", "LAST SEEN", "SKEW", "VERSION"]] + list.nodes.map { node in
             [
                 node.info.id.rawValue,
                 node.up ? "up" : "down",
@@ -32,10 +32,20 @@ public enum ProcessTable {
                 String(node.instanceCount),
                 String(node.crashedCount),
                 node.lastHeartbeatAge.map { duration($0) + " ago" } ?? "-",
+                node.clockSkew.map { String(format: "%.1fs", $0) } ?? "-",
                 node.info.version,
             ]
         }
-        return aligned(rows)
+        var output = aligned(rows)
+        let skewed = list.nodes.filter { abs($0.clockSkew ?? 0) > 1 }
+        for node in skewed {
+            output += String(format: "\nwarning: %@'s clock is off by %.1f s, so its log times are unreliable.",
+                             node.info.id.rawValue, node.clockSkew ?? 0)
+        }
+        for node in list.nodes where node.spoolDropped > 0 {
+            output += "\nwarning: \(node.info.id) has dropped \(node.spoolDropped) log lines."
+        }
+        return output
     }
 
     private static func aligned(_ rows: [[String]]) -> String {

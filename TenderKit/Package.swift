@@ -123,6 +123,7 @@ let package = Package(
         .testTarget(name: "TenderHeadTests", dependencies: [
             "TenderHead", "TenderAgent", "TenderClient", "TenderCore", "TenderPKI", "TenderActorSystem", "TenderProtocol", "LaunchdKit",
         ]),
+        .testTarget(name: "TenderLogStoreTests", dependencies: ["TenderLogStore", "TenderCore"]),
         .testTarget(name: "TenderPKITests", dependencies: [
             "TenderPKI", "TenderCore",
             .product(name: "Crypto", package: "swift-crypto"),

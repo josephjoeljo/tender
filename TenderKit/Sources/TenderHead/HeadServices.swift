@@ -10,6 +10,7 @@ import ServiceLifecycle
 import TenderActorSystem
 import TenderAgent
 import TenderCore
+import TenderLogStore
 import TenderPKI
 import TenderProtocol
 
@@ -36,6 +37,7 @@ public final class HeadServices: Sendable {
     public let options: HeadOptions
     public let store: HeadStore
     public let state: RegistryState
+    public let logs: LogStore
     private let environment: TenderEnvironment
     private let secrets: any SecretStore
     private let authority: CertificateAuthority
@@ -50,6 +52,7 @@ public final class HeadServices: Sendable {
         self.logger = logger
         store = try HeadStore(environment: environment)
         state = RegistryState(store: store)
+        logs = try LogStore(directory: environment.root.appending(path: "logstore"))
         authority = try Self.loadOrCreateAuthority(secrets: secrets)
         try Self.issueOwnIdentity(environment: environment, secrets: secrets, authority: authority, options: options)
     }
@@ -102,12 +105,12 @@ public final class HeadServices: Sendable {
             verifier: RevocationVerifier(store: store),
             systemReady: { [self] system in
                 let registry = TenderActorSystem.$wellKnownName.withValue(ActorNames.registry) {
-                    HeadRegistry(state: state, actorSystem: system)
+                    HeadRegistry(state: state, logs: logs, actorSystem: system)
                 }
                 holder.withLockedValue { $0 = (system, registry) }
             },
             installRoutes: { [self] router in installSocketRoutes(on: router) },
-            services: { [self] in [try makePublicAPI()] }
+            services: { [self] in [try makePublicAPI(), LogRetentionService(logs: logs, logger: logger)] }
         )
     }
 
@@ -241,6 +244,20 @@ public final class HeadServices: Sendable {
 
     /// Shared by the Unix socket and the public listener.
     private func installClusterRoutes(on router: Router<BasicRequestContext>) {
+        router.get("/v1/logs") { [self] request, _ in
+            await respond { try await logs.search(try logQuery(from: request)) }
+        }
+        router.get("/v1/logs/follow") { [self] request, _ in
+            let query: LogQuery
+            do {
+                query = try logQuery(from: request)
+            } catch let error as NodeCallError {
+                return errorResponse(error)
+            } catch {
+                return errorResponse(NodeCallError(code: "internal", message: "\(error)"))
+            }
+            return await followResponse(query: query)
+        }
         router.get("/v1/nodes") { [self] _, _ in
             await respond { NodeList(nodes: await state.summaries()) }
         }
@@ -314,6 +331,66 @@ public final class HeadServices: Sendable {
                 return await clusterStatus()
             }
         }
+    }
+
+    private func logQuery(from request: Request) throws -> LogQuery {
+        let parameters = request.uri.queryParameters
+        func date(_ name: Substring) throws -> Date? {
+            guard let raw = parameters.get(String(name)) else { return nil }
+            guard let seconds = Double(raw) else {
+                throw NodeCallError(code: "invalid_query", message: "\(name) must be Unix seconds.", httpStatus: 400)
+            }
+            return Date(timeIntervalSince1970: seconds)
+        }
+        var stream: LogLine.Stream?
+        if let raw = parameters.get("stream") {
+            guard let parsed = LogLine.Stream(rawValue: raw) else {
+                throw NodeCallError(code: "invalid_query", message: "stream must be out or err.", httpStatus: 400)
+            }
+            stream = parsed
+        }
+        return LogQuery(service: parameters.get("service"), node: parameters.get("node"), stream: stream,
+                        since: try date("since"), until: try date("until"), text: parameters.get("query"),
+                        limit: parameters.get("limit").flatMap { Int($0) } ?? 200)
+    }
+
+    /// Server-Sent Events: one JSON `LogEntry` per event, plus a comment as a heartbeat
+    /// so that a closed connection is noticed even when no lines arrive.
+    private func followResponse(query: LogQuery) async -> Response {
+        let stream = await logs.subscribe(query)
+        return Response(
+            status: .ok,
+            headers: [.contentType: "text/event-stream", .cacheControl: "no-cache"],
+            body: ResponseBody { writer in
+                let encoder = JSONEncoder()
+                // Lines and heartbeats merge into one sequence, because an AsyncStream
+                // iterator can't be raced against a timer without losing lines.
+                let (events, continuation) = AsyncStream.makeStream(of: LogEntry?.self)
+                let forward = Task {
+                    for await entry in stream { continuation.yield(entry) }
+                    continuation.finish()
+                }
+                let beat = Task {
+                    while !Task.isCancelled {
+                        try await Task.sleep(for: .seconds(5))
+                        continuation.yield(nil)
+                    }
+                }
+                defer {
+                    forward.cancel()
+                    beat.cancel()
+                }
+                for await event in events {
+                    if Task.isCancelled || Task.isShuttingDownGracefully { break }
+                    if let event {
+                        try await writer.write(ByteBuffer(bytes: Data("data: ".utf8) + (try encoder.encode(event)) + Data("\n\n".utf8)))
+                    } else {
+                        try await writer.write(ByteBuffer(string: ": keep-alive\n\n"))
+                    }
+                }
+                try await writer.finish(nil)
+            }
+        )
     }
 
     /// Administration stays on the socket: file permissions are its authentication.
@@ -451,5 +528,25 @@ func respond(_ operation: () async throws -> some Encodable) async -> Response {
         return errorResponse(error)
     } catch {
         return errorResponse(NodeCallError(code: "internal", message: "\(error)"))
+    }
+}
+
+/// Applies the head's log retention hourly.
+struct LogRetentionService: Service {
+    let logs: LogStore
+    let logger: Logger
+
+    func run() async throws {
+        await cancelWhenGracefulShutdown {
+            while !Task.isCancelled {
+                do {
+                    let removed = try await logs.enforceRetention()
+                    if !removed.isEmpty { logger.info("log retention removed days", metadata: ["days": "\(removed)"]) }
+                } catch {
+                    logger.error("log retention failed", metadata: ["error": "\(error)"])
+                }
+                try? await Task.sleep(for: .seconds(3600))
+            }
+        }
     }
 }
