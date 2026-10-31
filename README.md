@@ -33,6 +33,16 @@ Add these launch arguments to the `tenderd` scheme (Product → Scheme → Edit 
 
 `--dev` uses `~/Library/Application Support/Tender/` and your user's launchd domain, so no `sudo` is needed.
 
+## Back up the CA
+
+The head creates an internal CA on first start. If you lose it, every node has to join again, so keep a backup offline. Anyone holding the backup can issue certificates for your cluster.
+
+```sh
+sudo tender ca export > tender-ca-backup.pem
+```
+
+To restore it, use `tenderd ca-import`. See [`docs/ops/cluster.md`](docs/ops/cluster.md#restore-the-ca) for the steps.
+
 ## Layout
 
 ```
