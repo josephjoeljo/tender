@@ -3,6 +3,7 @@ import Hummingbird
 import LaunchdKit
 import Logging
 import ServiceLifecycle
+import TenderActorSystem
 import TenderCore
 import UnixSignals
 
@@ -16,6 +17,28 @@ public enum AgentRuntimeError: Error, CustomStringConvertible {
     }
 }
 
+/// What the head adds to the agent. The agent knows nothing about the head beyond this,
+/// and `tenderd` connects the two.
+public struct ClusterHooks: Sendable {
+    public var resolver: any NodeResolver
+    public var verifier: any PeerVerifier
+    public var systemReady: @Sendable (TenderActorSystem) -> Void
+    /// Replaces the socket's process routes with cluster-wide ones.
+    public var installRoutes: @Sendable (Router<BasicRequestContext>) -> Void
+    public var services: @Sendable () throws -> [any Service]
+
+    public init(resolver: any NodeResolver, verifier: any PeerVerifier,
+                systemReady: @escaping @Sendable (TenderActorSystem) -> Void,
+                installRoutes: @escaping @Sendable (Router<BasicRequestContext>) -> Void,
+                services: @escaping @Sendable () throws -> [any Service]) {
+        self.resolver = resolver
+        self.verifier = verifier
+        self.systemReady = systemReady
+        self.installRoutes = installRoutes
+        self.services = services
+    }
+}
+
 /// Composes the worker: StateStore → Reconciler → API server. Stopping it leaves
 /// managed jobs running: launchd supervises them, not this process.
 public struct AgentRuntime: Sendable {
@@ -24,15 +47,24 @@ public struct AgentRuntime: Sendable {
     private let sweepInterval: Duration
     private let shutdownSignals: [UnixSignal]
     private let logger: Logger
+    private let secrets: any SecretStore
+    private let cluster: ClusterOptions
+    private let hooks: ClusterHooks?
 
     public init(
         environment: TenderEnvironment,
+        secrets: (any SecretStore)? = nil,
+        cluster: ClusterOptions = ClusterOptions(),
+        hooks: ClusterHooks? = nil,
         launchd: (any LaunchdControlling)? = nil,
         sweepInterval: Duration = .seconds(10),
         shutdownSignals: [UnixSignal] = [.sigterm, .sigint],
         logger: Logger = Logger(label: "tenderd")
     ) {
         self.environment = environment
+        self.secrets = secrets ?? environment.makeSecretStore()
+        self.cluster = cluster
+        self.hooks = hooks
         self.launchd = launchd ?? Launchctl(domain: .forEnvironment(environment))
         self.sweepInterval = sweepInterval
         self.shutdownSignals = shutdownSignals
@@ -52,14 +84,17 @@ public struct AgentRuntime: Sendable {
         let store = try StateStore(environment: environment)
         let reconciler = Reconciler(environment: environment, store: store, launchd: launchd)
         let releases = ReleaseManager(environment: environment, store: store, reconciler: reconciler)
+        let identities = ClusterIdentityStore(environment: environment, secrets: secrets)
         let controller = ProcessController(environment: environment, store: store, reconciler: reconciler,
                                            releases: releases,
-                                           adoption: Adoption(environment: environment, store: store, launchd: launchd))
+                                           adoption: Adoption(environment: environment, store: store, launchd: launchd),
+                                           identities: identities)
         let socketPath = environment.socketPath.path(percentEncoded: false)
         let logger = self.logger
 
+        let router = makeRouter(controller: controller, identities: identities, clusterRoutes: hooks?.installRoutes)
         let server = Application(
-            router: makeRouter(controller: controller),
+            router: router,
             configuration: .init(address: .unixDomainSocket(path: socketPath), serverName: nil),
             onServerRunning: { _ in
                 chmod(socketPath, 0o600)
@@ -73,7 +108,8 @@ public struct AgentRuntime: Sendable {
                 LogRotationService(environment: environment, store: store),
                 ReleaseWatcher(environment: environment, manager: releases),
                 server,
-            ],
+                ClusterLink(identities: identities, options: cluster, controller: controller, hooks: hooks, logger: logger),
+            ] + (try hooks?.services() ?? []),
             gracefulShutdownSignals: shutdownSignals,
             logger: logger
         )

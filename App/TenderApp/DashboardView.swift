@@ -2,6 +2,8 @@ import SwiftUI
 
 /// Full dashboard: nodes, processes, logs, releases.
 struct DashboardView: View {
+    let model: ClusterModel
+
     enum Section: String, CaseIterable, Identifiable {
         case nodes = "Nodes", processes = "Processes", logs = "Logs", releases = "Releases"
         var id: String { rawValue }
@@ -27,7 +29,7 @@ struct DashboardView: View {
             ContentUnavailableView(
                 selection?.rawValue ?? "Tender",
                 systemImage: selection?.symbol ?? "leaf",
-                description: Text("Coming in milestone 2.")
+                description: Text("Coming in milestone 3.")
             )
         }
     }

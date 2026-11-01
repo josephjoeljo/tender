@@ -2,6 +2,7 @@ import Foundation
 import Hummingbird
 import LogTail
 import ServiceLifecycle
+import TenderPKI
 import TenderCore
 
 /// A request that can't be fulfilled, as an HTTP status plus a stable error code.
@@ -18,10 +19,15 @@ struct ProcessController: Sendable {
     let reconciler: Reconciler
     let releases: ReleaseManager
     let adoption: Adoption
+    var identities: ClusterIdentityStore? = nil
 
     func list() async throws -> ProcessList {
         var list = try await reconciler.status()
         list.processes += try await adoption.statuses()
+        // A joined node reports under its cluster name rather than its hostname.
+        if let node = try identities?.config()?.nodeID {
+            for index in list.processes.indices { list.processes[index].node = node }
+        }
         return list
     }
 
@@ -212,8 +218,39 @@ struct ProcessController: Sendable {
 }
 
 /// Routes of the local HTTP/JSON API. The head serves the same API in milestone 2.
-func makeRouter(controller: ProcessController) -> Router<BasicRequestContext> {
+func makeRouter(controller: ProcessController, identities: ClusterIdentityStore? = nil,
+                clusterRoutes: (@Sendable (Router<BasicRequestContext>) -> Void)? = nil) -> Router<BasicRequestContext> {
     let router = Router()
+
+    // Logs stay local to each node until milestone 3.
+    router.get("/v1/processes/:name/logs") { request, context in
+        do {
+            return try logsResponse(
+                request: request,
+                name: try context.parameters.require("name"),
+                controller: controller
+            )
+        } catch let failure as APIFailure {
+            return json(APIErrorBody(code: failure.code, message: failure.message), status: failure.status)
+        } catch {
+            return json(APIErrorBody(code: "internal", message: "\(error)"), status: .internalServerError)
+        }
+    }
+
+    if let clusterRoutes {
+        clusterRoutes(router)
+        return router
+    }
+
+    if let identities {
+        router.post("/v1/join") { request, _ in
+            await respond {
+                var request = request
+                let body = try await request.collectBody(upTo: 1 << 16)
+                return try await joinCluster(try decodeBody(LocalJoinRequest.self, Data(body.readableBytesView)), identities: identities)
+            }
+        }
+    }
 
     router.get("/v1/processes") { _, _ in
         await respond { try await controller.list() }
@@ -245,20 +282,6 @@ func makeRouter(controller: ProcessController) -> Router<BasicRequestContext> {
         await respond { try await controller.collectGarbage() }
     }
 
-    router.get("/v1/processes/:name/logs") { request, context in
-        do {
-            return try logsResponse(
-                request: request,
-                name: try context.parameters.require("name"),
-                controller: controller
-            )
-        } catch let failure as APIFailure {
-            return json(APIErrorBody(code: failure.code, message: failure.message), status: failure.status)
-        } catch {
-            return json(APIErrorBody(code: "internal", message: "\(error)"), status: .internalServerError)
-        }
-    }
-
     router.get("/v1/releases/:service") { _, context in
         await respond { try await controller.releases.list(service: try context.parameters.require("service")) }
     }
@@ -285,6 +308,30 @@ func makeRouter(controller: ProcessController) -> Router<BasicRequestContext> {
     }
 
     return router
+}
+
+/// Generates this node's key, asks the head for a certificate, and saves both. The
+/// daemon does this, not the CLI, so that the Keychain items belong to `tenderd`.
+private func joinCluster(_ request: LocalJoinRequest, identities: ClusterIdentityStore) async throws -> JoinStatus {
+    if let existing = try identities.config() {
+        throw APIFailure(status: .conflict, code: "already_joined", message: JoinError.alreadyJoined(existing.headNode.rawValue).description)
+    }
+    let nodeID = NodeID(request.nodeID ?? defaultNodeID())
+    let key = NodeKey.generate()
+    let response: JoinResponse
+    do {
+        response = try await JoinClient().join(head: request.head, token: request.token, nodeID: nodeID, key: key)
+    } catch let error as JoinError {
+        throw APIFailure(status: .badRequest, code: "join_failed", message: error.description)
+    } catch {
+        throw APIFailure(status: .badGateway, code: "join_failed", message: "Can't reach the head at \(request.head): \(error.localizedDescription)")
+    }
+    try identities.secrets.write(ClusterSecrets.nodeKey, Data(key.privateKeyPEM.utf8))
+    try identities.secrets.write(ClusterSecrets.nodeCertificate, Data(response.certificatePEM.utf8))
+    try identities.secrets.write(ClusterSecrets.caCertificate, Data(response.caPEM.utf8))
+    let config = ClusterConfig(nodeID: nodeID, headNode: response.headNode, headAgentAddress: response.headAgentAddress)
+    try identities.save(config)
+    return JoinStatus(nodeID: nodeID, headNode: response.headNode)
 }
 
 private let maxLogLines = 10_000
@@ -375,6 +422,8 @@ private func respond(_ operation: () async throws -> some Encodable) async -> Re
         return json(try await operation(), status: .ok)
     } catch let failure as APIFailure {
         return json(APIErrorBody(code: failure.code, message: failure.message), status: failure.status)
+    } catch let error as NodeCallError {
+        return json(APIErrorBody(code: error.code, message: error.message), status: HTTPResponse.Status(code: error.httpStatus))
     } catch {
         return json(APIErrorBody(code: "internal", message: "\(error)"), status: .internalServerError)
     }

@@ -68,6 +68,12 @@ extension Tender {
             @Option(help: "Path to the tenderd binary. Defaults to the one next to this `tender`.")
             var tenderdPath: String?
 
+            @Option(help: "head or worker.")
+            var role = "worker"
+
+            @Option(help: "With --dev: address to listen on.")
+            var listen = "127.0.0.1"
+
             @Flag(help: "With --system: print what would be done and change nothing. Doesn't need root.")
             var dryRun = false
 
@@ -95,7 +101,7 @@ extension Tender {
                 let plist = environment.plistPath(label: environment.agentLabel)
                 try PlistRenderer().render(
                     label: environment.agentLabel,
-                    programArguments: [tenderd, "--role", "worker", "--dev"],
+                    programArguments: [tenderd, "run", "--role", role, "--dev", "--identity-mode", "warn", "--listen", listen],
                     stdoutPath: environment.logsDirectory.appending(path: "tenderd.out.log").path(percentEncoded: false),
                     stderrPath: environment.logsDirectory.appending(path: "tenderd.err.log").path(percentEncoded: false)
                 ).write(to: plist, options: .atomic)
@@ -117,20 +123,37 @@ extension Tender {
                 if dryRun {
                     commands.forEach { print($0) }
                     print("write \(plist.path(percentEncoded: false)) (root:wheel 644):")
-                    print(String(decoding: try plan.renderDaemonPlist(), as: UTF8.self))
+                    print(String(decoding: try plan.renderDaemonPlist(role: role), as: UTF8.self))
                     print("launchctl bootout system/\(environment.agentLabel)")
                     print("launchctl enable system/\(environment.agentLabel)")
                     print("launchctl bootstrap system \(plist.path(percentEncoded: false))")
                     return
                 }
 
+                // Keychain items trust the binary that wrote them, so the old daemon hands
+                // them to the new one. The file is 0600 in a root-only directory.
+                let handoff = environment.runDirectory.appending(path: "secrets-handoff.json").path(percentEncoded: false)
+                let installed = plan.installedDaemon.path(percentEncoded: false)
+                let upgrading = FileManager.default.isExecutableFile(atPath: installed)
+                if upgrading {
+                    let export = try await ProcessLaunchctlRunner.runTool(executable: installed, arguments: ["secrets-export", "--to", handoff])
+                    guard export.exitCode == 0 else {
+                        throw SystemInstallError.commandFailed("tenderd secrets-export", export.stderr)
+                    }
+                }
                 for command in commands {
                     let result = try await ProcessLaunchctlRunner.runTool(executable: command.executable, arguments: command.arguments)
                     guard result.exitCode == 0 else {
                         throw SystemInstallError.commandFailed(command.description, result.stderr)
                     }
                 }
-                try plan.renderDaemonPlist().write(to: plist, options: .atomic)
+                if upgrading {
+                    let restore = try await ProcessLaunchctlRunner.runTool(executable: installed, arguments: ["secrets-import", "--from", handoff])
+                    guard restore.exitCode == 0 else {
+                        throw SystemInstallError.commandFailed("tenderd secrets-import", restore.stderr)
+                    }
+                }
+                try plan.renderDaemonPlist(role: role).write(to: plist, options: .atomic)
                 try FileManager.default.setAttributes(
                     [.posixPermissions: 0o644, .ownerAccountID: 0, .groupOwnerAccountID: 0],
                     ofItemAtPath: plist.path(percentEncoded: false))
