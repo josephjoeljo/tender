@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "7A0000000000000000000006"
-               BuildableName = "TenderApp.app"
+               BuildableName = "Tender.app"
                ReferencedContainer = "container:TenderApp.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -45,7 +45,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "7A0000000000000000000006"
-            BuildableName = "TenderApp.app"
+            BuildableName = "Tender.app"
             ReferencedContainer = "container:TenderApp.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -61,7 +61,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "7A0000000000000000000006"
-            BuildableName = "TenderApp.app"
+            BuildableName = "Tender.app"
             ReferencedContainer = "container:TenderApp.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
