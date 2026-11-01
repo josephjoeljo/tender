@@ -41,3 +41,5 @@ TenderKit/           Swift package: all modules, tenderd, tender CLI
 App/                 TenderApp (menu bar + dashboard)
 docs/DESIGN.md       architecture and decisions
 ```
+
+Behaviors worth remembering: [`docs/behaviors.md`](docs/behaviors.md).

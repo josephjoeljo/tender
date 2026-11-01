@@ -4,12 +4,14 @@ import PackageDescription
 // Layering rule: a target may only depend on targets in its own layer or below.
 //   0 Foundation  → TenderCore, TenderProtocol
 //   1 Platform    → LaunchdKit, ProcessMetrics, FileWatch, LogTail   (no networking)
-//   2 Features    → TenderAgent, TenderLogStore, TenderPKI, TenderScheduler,
+//   2 Features    → TenderActorSystem, TenderAgent, TenderLogStore, TenderPKI, TenderScheduler,
 //                   TenderMetrics, TenderMCP, TenderClient, TenderHead
 //   3 Executables → tenderd, tender
 //
-// Networking deps (grpc-swift, swift-nio-ssl, hummingbird, MCP swift-sdk,
-// swift-prometheus) are added in milestone 2.
+// Hummingbird and AsyncHTTPClient carry the local HTTP/JSON API (Unix socket).
+// Other networking deps (swift-nio-ssl, MCP swift-sdk, swift-prometheus) are
+// added in milestone 2. Head<->worker traffic uses Swift
+// distributed actors over our own TenderActorSystem (no grpc-swift).
 
 let package = Package(
     name: "TenderKit",
@@ -26,6 +28,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.6.0"),
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.21.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.60.0"),
     ],
     targets: [
         // MARK: 0 — Foundation
@@ -48,11 +53,17 @@ let package = Package(
         ]),
 
         // MARK: 2 — Features
+        .target(name: "TenderActorSystem", dependencies: [
+            "TenderCore",
+            .product(name: "Logging", package: "swift-log"),
+        ]),
         .target(name: "TenderAgent", dependencies: [
-            "TenderCore", "TenderProtocol", "LaunchdKit", "ProcessMetrics", "FileWatch", "LogTail",
+            "TenderCore", "TenderProtocol", "TenderActorSystem", "LaunchdKit", "ProcessMetrics", "FileWatch", "LogTail",
             .product(name: "GRDB", package: "GRDB.swift"),
             .product(name: "Logging", package: "swift-log"),
             .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+            .product(name: "Hummingbird", package: "hummingbird"),
+            .product(name: "UnixSignals", package: "swift-service-lifecycle"),
         ]),
         .target(name: "TenderLogStore", dependencies: [
             "TenderCore",
@@ -61,10 +72,15 @@ let package = Package(
         .target(name: "TenderPKI", dependencies: ["TenderCore"]),
         .target(name: "TenderScheduler", dependencies: ["TenderCore"]),
         .target(name: "TenderMetrics", dependencies: ["TenderCore"]),
-        .target(name: "TenderClient", dependencies: ["TenderCore", "TenderProtocol"]),
+        .target(name: "TenderClient", dependencies: [
+            "TenderCore", "TenderProtocol",
+            .product(name: "AsyncHTTPClient", package: "async-http-client"),
+            .product(name: "NIOCore", package: "swift-nio"),
+            .product(name: "NIOHTTP1", package: "swift-nio"),
+        ]),
         .target(name: "TenderMCP", dependencies: ["TenderCore", "TenderClient"]),
         .target(name: "TenderHead", dependencies: [
-            "TenderCore", "TenderProtocol", "TenderLogStore", "TenderPKI",
+            "TenderCore", "TenderProtocol", "TenderActorSystem", "TenderLogStore", "TenderPKI",
             "TenderScheduler", "TenderMetrics", "TenderMCP",
             .product(name: "Logging", package: "swift-log"),
             .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
@@ -82,7 +98,13 @@ let package = Package(
         ]),
 
         // MARK: Tests
+        .testTarget(name: "ProcessMetricsTests", dependencies: ["ProcessMetrics"]),
+        .testTarget(name: "LogTailTests", dependencies: ["LogTail", "LaunchdKit"]),
         .testTarget(name: "TenderCoreTests", dependencies: ["TenderCore"]),
-        .testTarget(name: "LaunchdKitTests", dependencies: ["LaunchdKit"]),
+        .testTarget(name: "TenderAgentTests", dependencies: [
+            "TenderAgent", "TenderClient", "TenderCore", "LaunchdKit", "LogTail", "FileWatch",
+            .product(name: "GRDB", package: "GRDB.swift"),
+        ]),
+        .testTarget(name: "LaunchdKitTests", dependencies: ["LaunchdKit"], resources: [.copy("Fixtures")]),
     ]
 )

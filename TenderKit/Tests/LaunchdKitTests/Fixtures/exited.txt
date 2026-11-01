@@ -1,0 +1,62 @@
+gui/501/com.olympsis.tender.test.fixture = {
+	active count = 0
+	path = /tmp/com.olympsis.tender.test.fixture.plist
+	type = LaunchAgent
+	state = not running
+
+	program = /bin/sleep
+	arguments = {
+		/bin/sleep
+		0
+	}
+
+	stdout path = /tmp/tender-fixture.out
+	stderr path = /tmp/tender-fixture.err
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.XXXXXXXXXX/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		FOO => bar
+		XPC_SERVICE_NAME => com.olympsis.tender.test.fixture
+	}
+
+	domain = gui/501 [100015]
+	asid = 100015
+	minimum runtime = 1
+	exit timeout = 5
+	runs = 1
+	last exit code = 0
+
+	resource coalition = {
+		ID = 19665
+		type = resource
+		state = active
+		active count = 1
+		name = com.olympsis.tender.test.fixture
+	}
+
+	jetsam coalition = {
+		ID = 19666
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.olympsis.tender.test.fixture
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+	sanitizer flags = 0x0
+
+	properties = runatload | inferred program
+}
