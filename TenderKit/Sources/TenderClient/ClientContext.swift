@@ -46,8 +46,9 @@ public struct ClientContextStore: Sendable {
 
     public func save(_ context: ClientContext, token: String) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try JSONEncoder().encode(context).write(to: file, options: .atomic)
+        // The token goes first, so that a failed save doesn't leave a head with no token.
         try secrets.write(Self.tokenName, Data(token.utf8))
+        try JSONEncoder().encode(context).write(to: file, options: .atomic)
     }
 
     public func load() throws -> (context: ClientContext, token: String)? {

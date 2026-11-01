@@ -11,6 +11,8 @@ final class ClusterModel {
     private(set) var nodes: [NodeSummary] = []
     private(set) var processes: [InstanceStatus] = []
     private(set) var head: String?
+    /// Why the saved connection couldn't be read, such as a token saved by another build.
+    private(set) var savedConnectionError: String?
     var actionError: String?
 
     private var client: TenderClient?
@@ -29,9 +31,13 @@ final class ClusterModel {
 
     init() {
         store = Self.makeStore()
-        if let saved = try? store.load() {
-            head = saved.context.head
-            client = TenderClient(head: saved.context.head, caPEM: saved.context.caPEM, token: saved.token)
+        do {
+            if let saved = try store.load() {
+                head = saved.context.head
+                client = TenderClient(head: saved.context.head, caPEM: saved.context.caPEM, token: saved.token)
+            }
+        } catch {
+            savedConnectionError = "Can't read the saved connection: \(error)"
         }
         startPolling()
     }
@@ -56,6 +62,7 @@ final class ClusterModel {
         let candidate = TenderClient(head: head, caPEM: caPEM, token: token)
         _ = try await candidate.nodes()
         try store.save(ClientContext(head: head, caPEM: caPEM), token: token)
+        savedConnectionError = nil
         self.head = head
         client = candidate
         await refresh()
@@ -81,7 +88,7 @@ final class ClusterModel {
 
     func refresh() async {
         guard let client else {
-            health = .notConfigured
+            health = savedConnectionError.map { .unreachable($0) } ?? .notConfigured
             return
         }
         do {

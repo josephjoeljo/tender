@@ -35,7 +35,7 @@ struct SettingsView: View {
                 }
                 .disabled(busy || head.isEmpty || token.isEmpty)
             }
-            if let error {
+            if let error = error ?? model.savedConnectionError {
                 Text(error).foregroundStyle(.red).font(.caption)
             }
         }
