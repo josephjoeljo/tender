@@ -20,6 +20,8 @@ struct ProcessController: Sendable {
     let releases: ReleaseManager
     let adoption: Adoption
     var identities: ClusterIdentityStore? = nil
+    var cloud: CloudServices? = nil
+    var releaseSourceOverride: (any ReleaseSource)? = nil
 
     func list() async throws -> ProcessList {
         var list = try await reconciler.status()
@@ -125,6 +127,36 @@ struct ProcessController: Sendable {
         return try await finish(ReconcileReport(), service: service)
     }
 
+    /// Downloads a release from the configured source, verifies it, and restarts on it.
+    func deploy(service: String, version: String) async throws -> String {
+        guard ServiceSpec.isValidName(service) else {
+            throw APIFailure(status: .badRequest, code: "invalid_name", message: "'\(service)' isn't a valid service name.")
+        }
+        do {
+            let source: any ReleaseSource
+            if let override = releaseSourceOverride {
+                source = override
+            } else if let cloud {
+                source = try cloud.releaseSource()
+            } else {
+                throw CloudError.notConfigured("A release source")
+            }
+            let directory = environment.releasesDirectory.appending(path: service)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let download = directory.appending(path: ".download-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: download) }
+            let expected = try await source.fetch(service: service, version: version, to: download)
+            return try await releases.installFetched(file: download, service: service, expectedSHA256: expected)
+        } catch let error as CloudError {
+            switch error {
+            case .invalidVersion: throw APIFailure(status: .badRequest, code: "invalid_version", message: error.description)
+            case .notConfigured, .noCredentials: throw APIFailure(status: .conflict, code: "not_configured", message: error.description)
+            case .checksumMismatch: throw APIFailure(status: .badGateway, code: "checksum_mismatch", message: error.description)
+            case .http, .invalidManifest, .invalidCredentials: throw APIFailure(status: .badGateway, code: "release_fetch_failed", message: error.description)
+            }
+        }
+    }
+
     func collectGarbage() async throws -> ProcessList {
         let report = try await reconciler.collectGarbage()
         if let failure = report.failures.first {
@@ -172,6 +204,21 @@ struct ProcessController: Sendable {
             }
     }
 
+    /// Every file whose lines should reach the head.
+    func allLogSources() throws -> [LogSource] {
+        var sources: [LogSource] = []
+        for record in try store.instances() where record.desired != .absent {
+            sources.append(LogSource(service: record.service, instance: record.instance, stream: .out,
+                                     url: environment.stdoutLog(service: record.service, instance: record.instance)))
+            sources.append(LogSource(service: record.service, instance: record.instance, stream: .err,
+                                     url: environment.stderrLog(service: record.service, instance: record.instance)))
+        }
+        for job in try store.adoptedJobs() {
+            sources += try logSources(service: job.label, instance: nil, stream: nil)
+        }
+        return sources
+    }
+
     private func requireExisting(_ service: String, _ exists: Bool) throws {
         guard exists else {
             throw APIFailure(status: .notFound, code: "service_not_found", message: "No service named '\(service)'.")
@@ -196,7 +243,8 @@ struct ProcessController: Sendable {
             throw APIFailure(status: .badRequest, code: "invalid_instances",
                              message: "instances must be between 1 and 64.")
         }
-        guard spec.user != "root" else {
+        // By uid, since any account name can be an alias for uid 0.
+        if spec.user == "root" || getpwnam(spec.user)?.pointee.pw_uid == 0 {
             throw APIFailure(status: .badRequest, code: "invalid_user", message: "Managed processes never run as root.")
         }
         let path: String
@@ -237,12 +285,54 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
         }
     }
 
+    // Socket only, on every node: credentials stay on the node they belong to. Validated
+    // here, and never readable back through any API.
+    if let identities {
+        router.post("/v1/credentials") { request, _ in
+            await respond {
+                var request = request
+                let body = try await request.collectBody(upTo: 1 << 16)
+                let credentials = try decodeBody(CredentialsRequest.self, Data(body.readableBytesView))
+                let json = Data(credentials.serviceAccountJSON.utf8)
+                do {
+                    let parsed = try GoogleCredentials(json: json)
+                    try identities.secrets.write(GoogleCredentials.secretName, json)
+                    return CredentialsResponse(clientEmail: parsed.clientEmail)
+                } catch let error as CloudError {
+                    throw APIFailure(status: .badRequest, code: "invalid_credentials", message: error.description)
+                }
+            }
+        }
+    }
+
     if let clusterRoutes {
         clusterRoutes(router)
         return router
     }
 
+    router.post("/v1/deploy") { request, _ in
+        await respond {
+            var request = request
+            let body = try await request.collectBody(upTo: 1 << 16)
+            let deploy = try decodeBody(DeployRequest.self, Data(body.readableBytesView))
+            let sha12 = try await controller.deploy(service: deploy.service, version: deploy.version)
+            return DeployResponse(outcomes: [DeployOutcome(node: NodeID(defaultNodeID()), sha12: sha12)])
+        }
+    }
+
     if let identities {
+        // Forgets the cluster so that this node can join again. Workloads keep running.
+        // The daemon then exits, because launchd restarts it with no cluster state.
+        router.post("/v1/leave") { _, _ in
+            await respond {
+                try identities.forget()
+                Task {
+                    try? await Task.sleep(for: .milliseconds(200))
+                    kill(getpid(), SIGTERM)
+                }
+                return ProcessList(processes: [])
+            }
+        }
         router.post("/v1/join") { request, _ in
             await respond {
                 var request = request

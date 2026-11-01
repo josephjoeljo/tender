@@ -9,7 +9,7 @@ struct Tender: AsyncParsableCommand {
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
         subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Gc.self, Version.self, Daemon.self,
-                      Token.self, Join.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
+                      Deploy.self, Credentials.self, Token.self, Join.self, Leave.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
     )
 }
 
@@ -201,6 +201,9 @@ extension Tender {
         @Option(name: [.customShort("n"), .long], help: "Lines to show per file.") var lines = 200
         @Option(help: "Only this instance.") var instance: Int?
         @Option(help: "Only this stream: out or err.") var stream: String?
+        @Option(help: "Only this node.") var node: String?
+        @Option(help: "Only lines newer than this, like 1h or 30m.") var since: String?
+        @Option(help: "Only lines containing these words.") var grep: String?
         @OptionGroup var options: CommonOptions
 
         func run() async throws {
@@ -211,22 +214,73 @@ extension Tender {
                 }
                 selected = parsed
             }
-            let client = try options.makeClient()
             do {
-                if follow {
-                    for try await line in client.followLogs(service: name, lines: lines, instance: instance, stream: selected) {
-                        emit(line, compact: true)
+                let client = try options.makeClient()
+                let query = LogQuery(service: name, node: node, stream: selected,
+                                     since: try since.map { try Self.parseSince($0) }, text: grep, limit: lines)
+                // A head answers with every node's logs. A worker has only its own.
+                do {
+                    try await runCluster(client: client, query: query)
+                } catch let error as TenderClientError where error.code == "http_404" {
+                    if since != nil || grep != nil || node != nil {
+                        throw ValidationError("--since, --grep and --node need a head. This daemon is a worker.")
                     }
-                } else {
-                    let response = try await client.logs(service: name, lines: lines, instance: instance, stream: selected)
-                    if options.json {
-                        print(try options.encode(response))
-                    } else {
-                        response.lines.forEach { emit($0, compact: false) }
-                    }
+                    try await runLocal(client: client, stream: selected)
                 }
             } catch let error as TenderClientError {
                 try options.fail(error)
+            }
+        }
+
+        /// `1h`, `30m`, `2d`, `45s`.
+        static func parseSince(_ text: String, now: Date = Date()) throws -> Date {
+            let units: [Character: TimeInterval] = ["s": 1, "m": 60, "h": 3600, "d": 86400]
+            guard let unit = text.last.flatMap({ units[$0] }), let amount = Double(text.dropLast()), amount >= 0 else {
+                throw ValidationError("--since expects something like 45s, 30m, 1h or 2d.")
+            }
+            return now.addingTimeInterval(-amount * unit)
+        }
+
+        private func runCluster(client: TenderClient, query: LogQuery) async throws {
+            // `-n 0` means no history: only new lines when following.
+            let result = lines == 0 ? LogSearchResult(entries: []) : try await client.searchLogs(query)
+            if options.json, !follow {
+                print(try options.encode(result))
+                return
+            }
+            for gap in result.gaps {
+                print("-- \(gap.node?.rawValue ?? "?") dropped \(gap.droppedLines) lines --")
+            }
+            result.entries.forEach(emit)
+            if follow {
+                var live = query
+                live.since = nil
+                for try await entry in client.followClusterLogs(live) { emit(entry) }
+            }
+        }
+
+        private func emit(_ entry: LogEntry) {
+            if options.json, let data = try? JSONEncoder().encode(entry) {
+                print(String(decoding: data, as: UTF8.self))
+            } else {
+                let time = ISO8601DateFormatter().string(from: entry.nodeTime)
+                print("\(time) \(entry.node)/\(entry.service)[\(entry.instance)] \(entry.stream.rawValue) | \(terminalSafe(entry.line))")
+            }
+            fflush(stdout)
+        }
+
+        private func runLocal(client: TenderClient, stream: LogLine.Stream?) async throws {
+            if follow {
+                for try await line in client.followLogs(service: name, lines: lines, instance: instance, stream: stream) {
+                    emit(line, compact: true)
+                }
+            } else {
+                let response = try await client.logs(service: name, lines: lines, instance: instance, stream: stream)
+                if options.json {
+                    print(try options.encode(response))
+                } else {
+                    response.lines.forEach { emit($0, compact: false) }
+                }
             }
         }
 
@@ -234,7 +288,7 @@ extension Tender {
             if options.json, compact, let data = try? JSONEncoder().encode(line) {
                 print(String(decoding: data, as: UTF8.self))
             } else {
-                print("\(line.service)[\(line.instance)] \(line.stream.rawValue) | \(line.text)")
+                print("\(line.service)[\(line.instance)] \(line.stream.rawValue) | \(terminalSafe(line.text))")
             }
             fflush(stdout)
         }

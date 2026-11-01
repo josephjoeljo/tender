@@ -10,14 +10,21 @@ public enum LogReader {
 
         let size = try handle.seekToEnd()
         var position = size
-        var data = Data()
+        var chunks: [Data] = []
+        var total = 0
+        var newlines = 0
         let chunk: UInt64 = 64 * 1024
-        while position > 0, data.count < maxBytes, data.reduce(0, { $0 + ($1 == 10 ? 1 : 0) }) <= count {
+        while position > 0, total < maxBytes, newlines <= count {
             let length = min(chunk, position)
             position -= length
             try handle.seek(toOffset: position)
-            data.insert(contentsOf: try handle.read(upToCount: Int(length)) ?? Data(), at: data.startIndex)
+            let bytes = try handle.read(upToCount: Int(length)) ?? Data()
+            newlines += bytes.reduce(0) { $0 + ($1 == 10 ? 1 : 0) }
+            total += bytes.count
+            chunks.append(bytes)
         }
+        var data = Data(capacity: total)
+        for part in chunks.reversed() { data.append(part) }
         var lines = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false)
         if lines.last == "" { lines.removeLast() }
         // If the read stopped mid-file, the first line is probably cut off.
@@ -34,6 +41,28 @@ public struct LogFollower: Sendable {
     private var inode: UInt64?
     private var partial = Data()
     private let maxReadPerPoll = 1 << 20
+
+    /// Where a follower has read to: complete lines only, so it can be saved and resumed.
+    public struct Position: Sendable, Equatable {
+        public var inode: UInt64
+        public var offset: UInt64
+
+        public init(inode: UInt64, offset: UInt64) {
+            self.inode = inode
+            self.offset = offset
+        }
+    }
+
+    public var position: Position { Position(inode: inode ?? 0, offset: offset - UInt64(partial.count)) }
+
+    /// Resumes from a saved position. Without one, reads the file from its start.
+    public init(url: URL, resumingFrom position: Position?) {
+        self.url = url
+        if let position {
+            offset = position.offset
+            inode = position.inode
+        }
+    }
 
     public init(url: URL, startAtEnd: Bool = true) {
         self.url = url

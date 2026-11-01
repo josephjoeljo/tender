@@ -8,6 +8,8 @@ import PackageDescription
 //                   TenderMetrics, TenderMCP, TenderClient, TenderHead
 //   3 Executables → tenderd, tender
 //
+// TenderApp is a separate Xcode project (App/) on top of this package. It imports only TenderClient and TenderCore.
+//
 // Hummingbird and AsyncHTTPClient carry the local HTTP/JSON API (Unix socket).
 // Other networking deps (swift-nio-ssl, MCP swift-sdk, swift-prometheus) are
 // added in milestone 2. Head<->worker traffic uses Swift
@@ -73,6 +75,8 @@ let package = Package(
             .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
             .product(name: "Hummingbird", package: "hummingbird"),
             .product(name: "UnixSignals", package: "swift-service-lifecycle"),
+            .product(name: "Crypto", package: "swift-crypto"),
+            .product(name: "_CryptoExtras", package: "swift-crypto"),
         ]),
         .target(name: "TenderLogStore", dependencies: [
             "TenderCore",
@@ -121,8 +125,11 @@ let package = Package(
             "TenderActorSystem", "TenderProtocol", "TenderPKI", "TenderCore",
         ]),
         .testTarget(name: "TenderHeadTests", dependencies: [
-            "TenderHead", "TenderAgent", "TenderClient", "TenderCore", "TenderPKI", "TenderActorSystem", "TenderProtocol", "LaunchdKit",
+            "TenderHead", "TenderAgent", "TenderClient", "TenderCore", "TenderPKI", "TenderActorSystem", "TenderProtocol", "LaunchdKit", "TenderLogStore",
+            .product(name: "Crypto", package: "swift-crypto"),
         ]),
+        .testTarget(name: "TenderLogStoreTests", dependencies: ["TenderLogStore", "TenderCore"]),
+        .testTarget(name: "TenderMetricsTests", dependencies: ["TenderMetrics", "TenderCore"]),
         .testTarget(name: "TenderPKITests", dependencies: [
             "TenderPKI", "TenderCore",
             .product(name: "Crypto", package: "swift-crypto"),
@@ -133,6 +140,8 @@ let package = Package(
         .testTarget(name: "TenderCoreTests", dependencies: ["TenderCore"]),
         .testTarget(name: "TenderAgentTests", dependencies: [
             "TenderAgent", "TenderClient", "TenderCore", "LaunchdKit", "LogTail", "FileWatch",
+            .product(name: "Crypto", package: "swift-crypto"),
+            .product(name: "_CryptoExtras", package: "swift-crypto"),
             .product(name: "GRDB", package: "GRDB.swift"),
         ]),
         .testTarget(name: "LaunchdKitTests", dependencies: ["LaunchdKit"], resources: [.copy("Fixtures")]),

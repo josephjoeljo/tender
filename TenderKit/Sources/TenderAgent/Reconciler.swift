@@ -245,7 +245,8 @@ public actor Reconciler {
                 restarts: job?.restarts ?? 0,
                 release: release,
                 cpu: usage?.cpu,
-                rss: usage?.rss
+                rss: usage?.rss,
+                cpuSeconds: usage?.cpuSeconds
             ))
         }
         await sampler.retain(pids: Set(processes.compactMap(\.pid)))

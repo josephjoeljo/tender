@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import LaunchdKit
 import Testing
@@ -5,6 +6,7 @@ import TenderActorSystem
 import TenderAgent
 import TenderClient
 import TenderCore
+import TenderLogStore
 import TenderPKI
 import TenderProtocol
 @testable import TenderHead
@@ -68,7 +70,12 @@ final class Daemon: @unchecked Sendable {
     let isHead: Bool
     let nodeName: String
 
-    init(node: String, head: Bool, env: TenderEnvironment? = nil, agentPort: Int? = nil, apiPort: Int? = nil) throws {
+    let metricsPort = freePort()
+    let source: (any ReleaseSource)?
+
+    init(node: String, head: Bool, env: TenderEnvironment? = nil, agentPort: Int? = nil, apiPort: Int? = nil,
+         source: (any ReleaseSource)? = nil) throws {
+        self.source = source
         self.env = try env ?? makeEnvironment()
         self.agentPort = agentPort ?? freePort()
         self.apiPort = apiPort ?? freePort()
@@ -83,10 +90,10 @@ final class Daemon: @unchecked Sendable {
         var hooks: ClusterHooks?
         if isHead {
             let options = HeadOptions(nodeID: NodeID(nodeName), apiHost: "127.0.0.1", apiPort: apiPort, agentPort: agentPort,
-                                      advertisedNames: ["127.0.0.1"])
+                                      advertisedNames: ["127.0.0.1"], metricsPort: metricsPort)
             hooks = try HeadServices(environment: env, secrets: secrets, options: options).hooks()
         }
-        let runtime = AgentRuntime(environment: env, secrets: secrets, cluster: cluster, hooks: hooks, launchd: launchd, shutdownSignals: [])
+        let runtime = AgentRuntime(environment: env, secrets: secrets, cluster: cluster, hooks: hooks, launchd: launchd, releaseSource: source, shutdownSignals: [])
         task = Task { try await runtime.run() }
         let socket = env.socketPath.path(percentEncoded: false)
         _ = try await eventually { FileManager.default.fileExists(atPath: socket) ? true : nil }
@@ -469,6 +476,316 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     #expect(summaries.first?.up == false)
 }
 
+// MARK: Logs
+
+/// The plan's definition of done: lines written while the head is away arrive after it
+/// returns, in order, with none lost and none duplicated.
+@Test func logsShipAcrossAHeadOutageWithoutLossOrDuplicates() async throws {
+    let head = try Daemon(node: "head", head: true)
+    let worker = try Daemon(node: "worker", head: false)
+    try await head.start()
+    try await worker.start()
+    defer { head.cleanup(); worker.cleanup() }
+    let token = try #require(try await eventually { try await head.client.createJoinToken() })
+    _ = try await worker.client.join(head: "127.0.0.1:\(head.apiPort)", token: token.token, nodeID: "worker")
+    var spec = sleeper
+    spec.node = NodeID("worker")
+    _ = try await eventually { try await head.client.nodes().nodes.count == 2 ? true : nil }
+    _ = try await head.client.start(spec)
+
+    let log = worker.env.stdoutLog(service: "api", instance: 0)
+    FileManager.default.createFile(atPath: log.path(percentEncoded: false), contents: nil)
+    func write(_ range: ClosedRange<Int>) throws {
+        let handle = try FileHandle(forWritingTo: log)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(range.map { "line \($0)\n" }.joined().utf8))
+        try handle.close()
+    }
+    func received(from client: TenderClient) async throws -> [String] {
+        try await client.searchLogs(LogQuery(service: "api", limit: 5000)).entries.map(\.line)
+    }
+
+    try write(1...100)
+    #expect(try await eventually { try await received(from: head.client).count == 100 ? true : nil } == true)
+
+    await head.stop()
+    try write(101...300)
+    try await Task.sleep(for: .milliseconds(600))
+    await worker.stop() // A restart while disconnected: offsets and spool must both survive.
+    let workerAgain = try Daemon(node: "worker", head: false, env: worker.env, agentPort: worker.agentPort)
+    try await workerAgain.start()
+    try write(301...400)
+
+    let back = try Daemon(node: "head", head: true, env: head.env, agentPort: head.agentPort, apiPort: head.apiPort)
+    try await back.start()
+    #expect(try await eventually { try await received(from: back.client).count >= 400 ? true : nil } == true)
+    let lines = try await received(from: back.client)
+    #expect(lines == (1...400).map { "line \($0)" })
+    let result = try await back.client.searchLogs(LogQuery(service: "api", text: "399"))
+    #expect(result.entries.map(\.line) == ["line 399"])
+    await workerAgain.stop()
+    await back.stop()
+}
+
+@Test func followStreamsLinesFromEveryNode() async throws {
+    try await withCluster { head, worker async throws in
+        var spec = sleeper
+        spec.node = NodeID("worker")
+        _ = try await head.client.start(spec)
+        let log = worker.env.stdoutLog(service: "api", instance: 0)
+        FileManager.default.createFile(atPath: log.path(percentEncoded: false), contents: nil)
+
+        var iterator = head.client.followClusterLogs(LogQuery(service: "api")).makeAsyncIterator()
+        try await Task.sleep(for: .milliseconds(200))
+        let handle = try FileHandle(forWritingTo: log)
+        try handle.write(contentsOf: Data("live line\n".utf8))
+        try handle.close()
+        let entry = try await iterator.next()
+        #expect(entry?.line == "live line")
+        #expect(entry?.node == NodeID("worker"))
+    }
+}
+
+@Test func skewAndSpoolStatsReachTheSummary() async throws {
+    let store = try makeEnvironment()
+    defer { try? FileManager.default.removeItem(at: store.root) }
+    let summaryState = RegistryState(store: nil)
+    let info = NodeInfo(id: NodeID("n"), version: "1", macOS: "x", hardware: "y")
+    try await summaryState.register(info)
+    let now = Date()
+    _ = await summaryState.heartbeat(Heartbeat(node: NodeID("n"), nodeClock: now.addingTimeInterval(-5), processes: [],
+                                               previousRoundTrip: 2, spoolBacklog: 3, spoolDropped: 4),
+                                     registeredThisRun: true, now: now)
+    let summary = try #require(await summaryState.summaries(now: now).first)
+    #expect(abs((summary.clockSkew ?? 0) - 4) < 0.001)
+    #expect(summary.spoolBacklog == 3)
+    #expect(summary.spoolDropped == 4)
+}
+
+// MARK: Security
+
+@Test func aWorkerCantCommandAnotherNode() async throws {
+    try await withCluster { head, worker async throws in
+        // A real certificate for the cluster, as a compromised worker holds.
+        let exported = try await head.client.exportCA()
+        let authority = try CertificateAuthority(certificatePEM: exported.certificatePEM, privateKeyPEM: exported.privateKeyPEM)
+        let key = NodeKey.generate()
+        let tls = TransportTLS(certificatePEM: try authority.sign(csrPEM: try key.makeCSR(nodeID: NodeID("rogue")), nodeID: NodeID("rogue")),
+                               privateKeyPEM: key.privateKeyPEM, trustRootPEM: exported.certificatePEM)
+        let resolver = StaticNodeResolver([NodeID("head"): NodeAddress(host: "127.0.0.1", port: head.agentPort),
+                                           NodeID("worker"): NodeAddress(host: "127.0.0.1", port: worker.agentPort)])
+        let rogue = TenderActorSystem(localNode: NodeID("rogue"), tls: tls, resolver: resolver)
+        defer { Task { await rogue.shutdown() } }
+        for target in ["head", "worker"] {
+            let agent = try $NodeAgentProtocol.resolve(id: ActorIdentity(node: NodeID(target), name: ActorNames.agent), using: rogue)
+            await #expect(throws: NodeCallError(code: "forbidden", message: "Only the head can command this node.", httpStatus: 403)) {
+                _ = try await agent.apply(.start(sleeper))
+            }
+            await #expect(throws: NodeCallError.self) { _ = try await agent.status() }
+            await #expect(throws: NodeCallError.self) { _ = try await agent.releases(service: "api") }
+            await #expect(throws: NodeCallError.self) { _ = try await agent.deploy(service: "api", version: "1") }
+        }
+        // Nor can it speak for another node to the head.
+        let registry = try $HeadRegistryProtocol.resolve(id: ActorIdentity(node: NodeID("head"), name: ActorNames.registry), using: rogue)
+        await #expect(throws: NodeCallError.self) {
+            _ = try await registry.ingest(LogBatch(node: NodeID("worker"), previousSeq: 0, records: []))
+        }
+        await #expect(throws: NodeCallError.self) {
+            try await registry.heartbeat(Heartbeat(node: NodeID("worker"), nodeClock: Date(), processes: []))
+        }
+        #expect(await head.launchd.loaded.isEmpty)
+        #expect(await worker.launchd.loaded.isEmpty)
+    }
+}
+
+@Test func adoptIsNotAvailableRemotely() async throws {
+    try await withCluster { head, _ async throws in
+        let writer = try await head.client.createAPIToken(name: "w", scope: .write)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let caPEM = try await ClientPinning.fetchCA(head: address, credential: writer.token)
+        do {
+            _ = try await TenderClient(head: address, caPEM: caPEM, token: writer.token).adopt(label: "x.y", logPath: "/etc/master.passwd")
+            Issue.record("remote adopt would read any file as root")
+        } catch let error as TenderClientError {
+            #expect(error.code == "http_404")
+        }
+    }
+}
+
+@Test func systemJobsCantBeAdopted() async throws {
+    let env = try makeEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let adoption = Adoption(environment: env, store: try StateStore(environment: env), launchd: MemoryLaunchd())
+    await #expect(throws: AdoptionError.systemJob("com.apple.syslogd")) { try await adoption.adopt(label: "com.apple.syslogd") }
+}
+
+@Test func uidZeroAliasesAreRefused() async throws {
+    try await withCluster { head, _ async throws in
+        var spec = sleeper
+        spec.user = "root"
+        do {
+            _ = try await head.client.start(spec)
+            Issue.record("root must be refused")
+        } catch let error as TenderClientError {
+            #expect(error.code == "invalid_user")
+        }
+    }
+}
+
+@Test func terminalControlCharactersAreNeutralized() {
+    let safe = terminalSafe("a\u{1B}[2Jb\tc\u{7F}d\u{9B}é")
+    #expect(!safe.unicodeScalars.contains { $0.value == 0x1B || $0.value == 0x7F || $0.value == 0x9B })
+    #expect(safe.contains("\t"))
+    #expect(safe.contains("é"))
+}
+
+// MARK: Operations
+
+@Test func auditRecordsWritesWithoutSecrets() async throws {
+    try await withCluster { head, _ async throws in
+        let writer = try await head.client.createAPIToken(name: "alice", scope: .write)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let caPEM = try await ClientPinning.fetchCA(head: address, credential: writer.token)
+        let remote = TenderClient(head: address, caPEM: caPEM, token: writer.token)
+        _ = try await remote.start(sleeper)
+        _ = try await remote.list()
+        let file = head.env.root.appending(path: "logstore/audit-\(TenderLogStore.LogStore.dayName(Date())).jsonl")
+        let text = try String(contentsOf: file, encoding: .utf8)
+        let records = text.split(separator: "\n")
+        #expect(records.contains { $0.contains(#""who":"alice""#) && $0.contains(#""path":"\/v1\/processes""#) && $0.contains(#""status":200"#) })
+        #expect(records.contains { $0.contains(#""who":"local-socket""#) && $0.contains("api-tokens") })
+        #expect(!records.contains { $0.contains(#""method":"GET""#) }, "reads aren't audited")
+        let secret = String(writer.token.split(separator: ".")[0])
+        #expect(!text.contains(secret), "tokens must never reach the audit log")
+        let mode = try FileManager.default.attributesOfItem(atPath: file.path(percentEncoded: false))[.posixPermissions] as? Int
+        #expect(mode == 0o600)
+    }
+}
+
+private final class RecordingUploader: BlobUploader, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    var failing = false
+    var names: [String] { lock.withLock { stored } }
+    func upload(file: URL, as name: String) async throws {
+        if failing { throw NodeCallError(code: "x", message: "down") }
+        lock.withLock { stored.append(name) }
+    }
+}
+
+@Test func offloadUploadsClosedDaysOnceAndRetriesFailures() async throws {
+    let env = try makeEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let logs = try LogStore(directory: env.root.appending(path: "logstore"))
+    let audit = try AuditLog(directory: env.root.appending(path: "logstore"))
+    let day = Date(timeIntervalSince1970: 1_700_000_000)
+    _ = try await logs.ingest(LogBatch(node: NodeID("n"), previousSeq: 0, records: [
+        LogRecord(seq: 1, nodeTime: day, service: "a", instance: 0, stream: .out, line: "x")]), now: day)
+    audit.record(.init(time: day, who: "w", method: "POST", path: "/p", status: 200))
+    let uploader = RecordingUploader()
+    let offload = NightlyOffload(logs: logs, audit: audit, uploader: { uploader })
+
+    #expect(try await offload.runOnce(now: day) == 0, "today's files stay open")
+    let tomorrow = day.addingTimeInterval(86400)
+    uploader.failing = true
+    await #expect(throws: (any Error).self) { try await offload.runOnce(now: tomorrow) }
+    uploader.failing = false
+    #expect(try await offload.runOnce(now: tomorrow) == 2)
+    let name = LogStore.dayName(day)
+    #expect(Set(uploader.names) == ["logs/logs-\(name).db", "audit/audit-\(name).jsonl"])
+    #expect(try await offload.runOnce(now: tomorrow) == 0, "each file goes up once")
+
+    let disabled = NightlyOffload(logs: logs, audit: audit, uploader: { nil })
+    #expect(try await disabled.runOnce(now: tomorrow) == 0)
+}
+
+private struct FakeSource: ReleaseSource {
+    let contents: Data
+    let sha256: String
+    func fetch(service: String, version: String, to destination: URL) async throws -> String {
+        try contents.write(to: destination)
+        return sha256
+    }
+}
+
+@Test func deployReachesEveryNodeRunningTheServiceAndReportsEach() async throws {
+    let binary = Data("#!/bin/sh\nexec /bin/sleep 100\n".utf8)
+    let good = FakeSource(contents: binary, sha256: Data(SHA256.hash(data: binary)).map { String(format: "%02x", $0) }.joined())
+    let bad = FakeSource(contents: Data("tampered".utf8), sha256: good.sha256)
+    let head = try Daemon(node: "head", head: true, source: good)
+    let worker = try Daemon(node: "worker", head: false, source: bad)
+    try await head.start()
+    try await worker.start()
+    defer { head.cleanup(); worker.cleanup() }
+    let token = try #require(try await eventually { try await head.client.createJoinToken() })
+    _ = try await worker.client.join(head: "127.0.0.1:\(head.apiPort)", token: token.token, nodeID: "worker")
+    _ = try await eventually { try await head.client.nodes().nodes.filter(\.up).count == 2 ? true : nil }
+    var onWorker = sleeper
+    onWorker.node = NodeID("worker")
+    _ = try await head.client.start(sleeper)
+    _ = try await head.client.start(onWorker)
+    _ = try await eventually { try await head.client.nodes().nodes.allSatisfy { $0.instanceCount == 1 } ? true : nil }
+
+    let response = try await head.client.deploy(service: "api", version: "1.0")
+    #expect(response.outcomes.map(\.node) == [NodeID("head"), NodeID("worker")])
+    let sha12 = String(good.sha256.prefix(12))
+    #expect(response.outcomes[0].sha12 == sha12)
+    #expect(response.outcomes[1].sha12 == nil, "a tampered download must not install")
+    #expect(response.outcomes[1].error?.contains("Checksum mismatch") == true)
+
+    let releases = try await head.client.clusterReleases(service: "api")
+    #expect(releases.nodes.map(\.node) == [NodeID("head")])
+    #expect(releases.nodes.first?.releases.current == sha12)
+
+    let list = try await head.client.list()
+    #expect(list.processes.first { $0.node == NodeID("head") }?.release == sha12)
+    #expect(list.processes.first { $0.node == NodeID("worker") }?.release == nil, "the worker keeps running its old binary")
+    await worker.stop()
+    await head.stop()
+}
+
+@Test func deployWithoutASourceSaysSo() async throws {
+    try await withCluster { head, _ async throws in
+        _ = try await head.client.start(sleeper)
+        let response = try await head.client.deploy(service: "api", version: "1.0", node: "head")
+        #expect(response.outcomes.first?.error?.contains("isn't configured") == true)
+    }
+}
+
+@Test func metricsEndpointServesTheCluster() async throws {
+    try await withCluster { head, _ async throws in
+        let services = try await head.client.start(sleeper)
+        #expect(services.processes.count == 1)
+        let text = try #require(try await eventually { () -> String? in
+            let (data, _) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(head.metricsPort)/metrics")!)
+            let text = String(decoding: data, as: UTF8.self)
+            return text.contains("tender_process_up") && text.contains(#"service="api""#) ? text : nil
+        })
+        #expect(text.contains(#"tender_node_up{node="worker"} 1.0"#))
+        #expect(text.contains(#"tender_node_clock_skew_seconds{node="worker"}"#))
+    }
+}
+
+@Test func credentialsAreSavedOnlyOverTheSocketAndNeverReadBack() async throws {
+    try await withCluster { head, worker async throws in
+        do {
+            _ = try await worker.client.setCredentials(serviceAccountJSON: "{}")
+            Issue.record("invalid keys must be refused")
+        } catch let error as TenderClientError {
+            #expect(error.code == "invalid_credentials")
+        }
+        let writer = try await head.client.createAPIToken(name: "w", scope: .write)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let caPEM = try await ClientPinning.fetchCA(head: address, credential: writer.token)
+        do {
+            _ = try await TenderClient(head: address, caPEM: caPEM, token: writer.token).setCredentials(serviceAccountJSON: "{}")
+            Issue.record("credentials must not be settable remotely")
+        } catch let error as TenderClientError {
+            #expect(error.code == "http_404")
+        }
+    }
+}
+
 // MARK: Health
 
 @Test func healthSummarizesTheCluster() {
@@ -483,6 +800,50 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     #expect(downAndCrashed == .degraded(downNodes: 1, crashed: 1))
     #expect(downAndCrashed.summary == "1 node down, 1 crashed")
     #expect(ClusterHealth.notConfigured.symbol == "leaf")
+}
+
+@Test func metersReflectEachNode() {
+    func node(_ name: String, up: Bool = true) -> NodeSummary {
+        NodeSummary(info: NodeInfo(id: NodeID(name), version: "1", macOS: "x", hardware: "y"), up: up,
+                    lastHeartbeatAge: nil, instanceCount: 0, crashedCount: 0)
+    }
+    func process(_ name: String, _ state: InstanceState) -> InstanceStatus {
+        InstanceStatus(service: "a", instance: 0, node: NodeID(name), state: state)
+    }
+    let meters = NodeMeter.meters(
+        nodes: [node("ok"), node("hurt"), node("gone", up: false), node("idle"), node("off"), node("joels-macbook-pro")],
+        processes: [process("ok", .running), process("ok", .starting),
+                    process("hurt", .running), process("hurt", .crashed), process("hurt", .stopped),
+                    process("gone", .running), process("off", .stopped)])
+    #expect(meters[0] == NodeMeter(label: "ok", fraction: 1, level: .healthy))
+    #expect(meters[1] == NodeMeter(label: "hurt", fraction: 0.5, level: .degraded), "stopped isn't a failure")
+    #expect(meters[2] == NodeMeter(label: "gone", fraction: 1, level: .down), "a stale report doesn't matter once it's down")
+    #expect(meters[3].level == .healthy)
+    #expect(meters[4].level == .healthy, "stopping everything on purpose is healthy")
+    #expect(meters[5].label == "joels-macbook-p…")
+    #expect(NodeMeter.shortLabel("exactly-sixteen!") == "exactly-sixteen!")
+}
+
+@Test func theHeadsMeterIsMarked() {
+    func node(_ name: String, labels: [String: String] = [:]) -> NodeSummary {
+        NodeSummary(info: NodeInfo(id: NodeID(name), version: "1", macOS: "x", hardware: "y", labels: labels), up: true,
+                    lastHeartbeatAge: nil, instanceCount: 0, crashedCount: 0)
+    }
+    let head = node("head", labels: [NodeInfo.roleLabel: NodeInfo.headRole])
+    #expect(NodeMeter.meters(nodes: [head, node("worker")], processes: []).map(\.isHead) == [true, false])
+}
+
+@Test func aOneNodeClusterMeterTakesTheConnectionName() {
+    func node(_ name: String) -> NodeSummary {
+        NodeSummary(info: NodeInfo(id: NodeID(name), version: "1", macOS: "x", hardware: "y"), up: true,
+                    lastHeartbeatAge: nil, instanceCount: 0, crashedCount: 0)
+    }
+    let one = [node("joels-mac-mini")]
+    #expect(NodeMeter.meters(nodes: one, processes: [], clusterName: "mini-0")[0].label == "mini-0")
+    #expect(NodeMeter.meters(nodes: one, processes: [], clusterName: "a-very-long-connection")[0].label == "a-very-long-con…")
+    #expect(NodeMeter.meters(nodes: one, processes: [])[0].label == "joels-mac-mini")
+    let two = NodeMeter.meters(nodes: [node("mac-1"), node("mac-2")], processes: [], clusterName: "mini-0")
+    #expect(two.map(\.label) == ["mac-1", "mac-2"])
 }
 
 @Test func contextStorePersistsAndClears() throws {

@@ -10,6 +10,8 @@ import ServiceLifecycle
 import TenderActorSystem
 import TenderAgent
 import TenderCore
+import TenderLogStore
+import TenderMetrics
 import TenderPKI
 import TenderProtocol
 
@@ -20,9 +22,12 @@ public struct HeadOptions: Sendable {
     public var agentPort: Int
     /// Hostnames and IPs the head is reached by, for its certificate.
     public var advertisedNames: [String]
+    /// Plain HTTP on the tailnet, for Prometheus. Nil turns it off.
+    public var metricsPort: Int?
 
     public init(nodeID: NodeID, apiHost: String? = nil, apiPort: Int = 7071, agentPort: Int = 7070,
-                advertisedNames: [String] = []) {
+                advertisedNames: [String] = [], metricsPort: Int? = 7072) {
+        self.metricsPort = metricsPort
         self.nodeID = nodeID
         self.apiHost = apiHost
         self.apiPort = apiPort
@@ -31,11 +36,30 @@ public struct HeadOptions: Sendable {
     }
 }
 
+public enum AuthorityStoreError: Error, Equatable, CustomStringConvertible {
+    case incomplete(missing: String)
+    case differentAuthority(backup: String)
+
+    public var description: String {
+        switch self {
+        case .incomplete(let missing):
+            "This node has part of a CA, but \(missing) is missing. Restore a backup with `tenderd ca-import`, "
+                + "or see docs/ops/cluster.md if there's no backup or this node used to be a worker."
+        case .differentAuthority(let backup):
+            "This node holds a different CA from the backup (\(backup)). "
+                + "Pass --replace to overwrite it. Nodes that joined the current CA will have to join again."
+        }
+    }
+}
+
 /// Everything only the head does: CA, registry, command routing, public API.
 public final class HeadServices: Sendable {
     public let options: HeadOptions
     public let store: HeadStore
     public let state: RegistryState
+    public let logs: LogStore
+    public let audit: AuditLog
+    private let deploys = DeployCounter()
     private let environment: TenderEnvironment
     private let secrets: any SecretStore
     private let authority: CertificateAuthority
@@ -50,22 +74,53 @@ public final class HeadServices: Sendable {
         self.logger = logger
         store = try HeadStore(environment: environment)
         state = RegistryState(store: store)
+        logs = try LogStore(directory: environment.root.appending(path: "logstore"))
+        audit = try AuditLog(directory: environment.root.appending(path: "logstore"))
         authority = try Self.loadOrCreateAuthority(secrets: secrets)
         try Self.issueOwnIdentity(environment: environment, secrets: secrets, authority: authority, options: options)
     }
 
     /// Creates the CA on first start. Losing it means every node has to re-join, so
-    /// it's printed nowhere and leaves only through `tender ca export`.
-    private static func loadOrCreateAuthority(secrets: any SecretStore) throws -> CertificateAuthority {
-        if let certificate = try secrets.read(ClusterSecrets.caCertificate),
-           let key = try secrets.read(ClusterSecrets.caKey) {
+    /// it's printed nowhere and leaves only through `tender ca export`. Half a CA is
+    /// refused: creating a new one would overwrite the half that's left.
+    static func loadOrCreateAuthority(secrets: any SecretStore) throws -> CertificateAuthority {
+        let certificate = try secrets.read(ClusterSecrets.caCertificate)
+        let key = try secrets.read(ClusterSecrets.caKey)
+        switch (certificate, key) {
+        case (let certificate?, let key?):
             return try CertificateAuthority(certificatePEM: String(decoding: certificate, as: UTF8.self),
                                             privateKeyPEM: String(decoding: key, as: UTF8.self))
+        case (nil, nil):
+            let created = try CertificateAuthority.create()
+            try secrets.write(ClusterSecrets.caKey, Data(created.privateKeyPEM.utf8))
+            try secrets.write(ClusterSecrets.caCertificate, Data(created.certificatePEM.utf8))
+            return created
+        case (_?, nil):
+            throw AuthorityStoreError.incomplete(missing: ClusterSecrets.caKey)
+        case (nil, _?):
+            throw AuthorityStoreError.incomplete(missing: ClusterSecrets.caCertificate)
         }
-        let created = try CertificateAuthority.create()
-        try secrets.write(ClusterSecrets.caKey, Data(created.privateKeyPEM.utf8))
-        try secrets.write(ClusterSecrets.caCertificate, Data(created.certificatePEM.utf8))
-        return created
+    }
+
+    /// Puts a `tender ca export` backup back. The caller restarts the daemon, which
+    /// reads the CA once at start. Without `replace`, a different CA is left alone.
+    @discardableResult
+    public static func restoreAuthority(backupPEM: String, secrets: any SecretStore, replace: Bool) throws -> CertificateAuthority {
+        let backup = try CertificateAuthority(backupPEM: backupPEM)
+        if !replace {
+            let certificate = try secrets.read(ClusterSecrets.caCertificate)
+            let key = try secrets.read(ClusterSecrets.caKey)
+            let sameCertificate = certificate.map {
+                CertificateAuthority.fingerprint(ofPEM: String(decoding: $0, as: UTF8.self)) == backup.fingerprint
+            }
+            let sameKey = key.map { String(decoding: $0, as: UTF8.self) == backup.privateKeyPEM }
+            guard sameCertificate != false, sameKey != false else {
+                throw AuthorityStoreError.differentAuthority(backup: backup.fingerprint)
+            }
+        }
+        try secrets.write(ClusterSecrets.caKey, Data(backup.privateKeyPEM.utf8))
+        try secrets.write(ClusterSecrets.caCertificate, Data(backup.certificatePEM.utf8))
+        return backup
     }
 
     /// The head is a node too. Its certificate is reissued at each start so that it
@@ -102,12 +157,21 @@ public final class HeadServices: Sendable {
             verifier: RevocationVerifier(store: store),
             systemReady: { [self] system in
                 let registry = TenderActorSystem.$wellKnownName.withValue(ActorNames.registry) {
-                    HeadRegistry(state: state, actorSystem: system)
+                    HeadRegistry(state: state, logs: logs, actorSystem: system)
                 }
                 holder.withLockedValue { $0 = (system, registry) }
             },
             installRoutes: { [self] router in installSocketRoutes(on: router) },
-            services: { [self] in [try makePublicAPI()] }
+            services: { [self] in
+                let cloud = CloudServices(environment: environment, secrets: secrets)
+                var services: [any Service] = [
+                    try makePublicAPI(),
+                    LogRetentionService(logs: logs, logger: logger),
+                    NightlyOffload(logs: logs, audit: audit, uploader: { try cloud.uploader() }),
+                ]
+                if let metrics = makeMetricsServer() { services.append(metrics) }
+                return services
+            }
         )
     }
 
@@ -168,6 +232,71 @@ public final class HeadServices: Sendable {
         } catch let error as TransportError {
             throw NodeCallError(code: "node_unreachable", message: error.description, httpStatus: 503)
         }
+    }
+
+    /// Each node fetches and verifies on its own, in parallel. One node failing doesn't
+    /// stop the others, and the response says how each one went.
+    func deploy(_ request: DeployRequest) async -> DeployResponse {
+        let nodes = await targets(service: request.service, node: request.node)
+        var outcomes: [DeployOutcome] = []
+        await withTaskGroup(of: DeployOutcome.self) { group in
+            for node in nodes {
+                group.addTask { [self] in
+                    do {
+                        let sha12 = try await translatingTransport(node) {
+                            try await agent(on: node).deploy(service: request.service, version: request.version)
+                        }
+                        return DeployOutcome(node: node, sha12: sha12)
+                    } catch {
+                        return DeployOutcome(node: node, error: "\(error)")
+                    }
+                }
+            }
+            for await outcome in group {
+                outcomes.append(outcome)
+                deploys.add(service: request.service, result: outcome.error == nil ? "success" : "failure")
+            }
+        }
+        return DeployResponse(outcomes: outcomes.sorted { $0.node.rawValue < $1.node.rawValue })
+    }
+
+    func clusterReleases(service: String) async -> ClusterReleases {
+        let up = await state.upNodes()
+        var nodes: [NodeReleases] = []
+        await withTaskGroup(of: NodeReleases?.self) { group in
+            for node in Set(up + [options.nodeID]) {
+                group.addTask { [self] in
+                    guard let releases = try? await agent(on: node).releases(service: service) else { return nil }
+                    return NodeReleases(node: node, releases: releases)
+                }
+            }
+            for await item in group {
+                if let item, !item.releases.releases.isEmpty { nodes.append(item) }
+            }
+        }
+        return ClusterReleases(service: service, nodes: nodes.sorted { $0.node.rawValue < $1.node.rawValue })
+    }
+
+    /// Plain HTTP with no auth, like most Prometheus targets. It binds only to the tailnet
+    /// address, and Tailscale ACLs decide who reaches it. It carries no log lines or secrets.
+    func makeMetricsServer() -> (any Service)? {
+        guard let port = options.metricsPort else { return nil }
+        let router = Router()
+        router.get("/metrics") { [self] _, _ in
+            Response(status: .ok, headers: [.contentType: "text/plain; version=0.0.4"],
+                     body: ResponseBody(byteBuffer: ByteBuffer(string: await metricsText())))
+        }
+        return Application(router: router,
+                           configuration: .init(address: .hostname(options.apiHost ?? "127.0.0.1", port: port), serverName: nil),
+                           logger: logger)
+    }
+
+    func metricsText() async -> String {
+        MetricsRenderer.render(MetricsSnapshot(
+            nodes: await state.summaries(),
+            processes: await state.allProcesses(),
+            linesIngested: await logs.ingestedLines(),
+            deploys: deploys.snapshot))
     }
 
     // MARK: Tokens
@@ -241,6 +370,34 @@ public final class HeadServices: Sendable {
 
     /// Shared by the Unix socket and the public listener.
     private func installClusterRoutes(on router: Router<BasicRequestContext>) {
+        router.get("/v1/logs") { [self] request, _ in
+            await respond { try await logs.search(try logQuery(from: request)) }
+        }
+        router.get("/v1/logs/follow") { [self] request, _ in
+            let query: LogQuery
+            do {
+                query = try logQuery(from: request)
+            } catch let error as NodeCallError {
+                return errorResponse(error)
+            } catch {
+                return errorResponse(NodeCallError(code: "internal", message: "\(error)"))
+            }
+            return await followResponse(query: query)
+        }
+        router.post("/v1/deploy") { [self] request, _ in
+            await respond {
+                let deploy = try await decode(DeployRequest.self, from: request)
+                return await self.deploy(deploy)
+            }
+        }
+        router.get("/v1/releases") { [self] request, _ in
+            await respond {
+                guard let service = request.uri.queryParameters.get("service") else {
+                    throw NodeCallError(code: "invalid_query", message: "service is required.", httpStatus: 400)
+                }
+                return await clusterReleases(service: service)
+            }
+        }
         router.get("/v1/nodes") { [self] _, _ in
             await respond { NodeList(nodes: await state.summaries()) }
         }
@@ -291,14 +448,6 @@ public final class HeadServices: Sendable {
                 return await clusterStatus()
             }
         }
-        router.post("/v1/adopt") { [self] request, _ in
-            await respond {
-                let adopt = try await decode(AdoptRequest.self, from: request)
-                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
-                _ = try await translatingTransport(target) { try await agent(on: target).adopt(adopt) }
-                return await clusterStatus()
-            }
-        }
         router.delete("/v1/adopt/:label") { [self] request, context in
             await respond {
                 let label = try context.parameters.require("label")
@@ -316,9 +465,80 @@ public final class HeadServices: Sendable {
         }
     }
 
+    private func logQuery(from request: Request) throws -> LogQuery {
+        let parameters = request.uri.queryParameters
+        func date(_ name: Substring) throws -> Date? {
+            guard let raw = parameters.get(String(name)) else { return nil }
+            guard let seconds = Double(raw) else {
+                throw NodeCallError(code: "invalid_query", message: "\(name) must be Unix seconds.", httpStatus: 400)
+            }
+            return Date(timeIntervalSince1970: seconds)
+        }
+        var stream: LogLine.Stream?
+        if let raw = parameters.get("stream") {
+            guard let parsed = LogLine.Stream(rawValue: raw) else {
+                throw NodeCallError(code: "invalid_query", message: "stream must be out or err.", httpStatus: 400)
+            }
+            stream = parsed
+        }
+        return LogQuery(service: parameters.get("service"), node: parameters.get("node"), stream: stream,
+                        since: try date("since"), until: try date("until"), text: parameters.get("query"),
+                        limit: parameters.get("limit").flatMap { Int($0) } ?? 200)
+    }
+
+    /// Server-Sent Events: one JSON `LogEntry` per event, plus a comment as a heartbeat
+    /// so that a closed connection is noticed even when no lines arrive.
+    private func followResponse(query: LogQuery) async -> Response {
+        let stream = await logs.subscribe(query)
+        return Response(
+            status: .ok,
+            headers: [.contentType: "text/event-stream", .cacheControl: "no-cache"],
+            body: ResponseBody { writer in
+                let encoder = JSONEncoder()
+                // Lines and heartbeats merge into one sequence, because an AsyncStream
+                // iterator can't be raced against a timer without losing lines.
+                let (events, continuation) = AsyncStream.makeStream(of: LogEntry?.self)
+                let forward = Task {
+                    for await entry in stream { continuation.yield(entry) }
+                    continuation.finish()
+                }
+                let beat = Task {
+                    while !Task.isCancelled {
+                        try await Task.sleep(for: .seconds(5))
+                        continuation.yield(nil)
+                    }
+                }
+                defer {
+                    forward.cancel()
+                    beat.cancel()
+                }
+                for await event in events {
+                    if Task.isCancelled || Task.isShuttingDownGracefully { break }
+                    if let event {
+                        try await writer.write(ByteBuffer(bytes: Data("data: ".utf8) + (try encoder.encode(event)) + Data("\n\n".utf8)))
+                    } else {
+                        try await writer.write(ByteBuffer(string: ": keep-alive\n\n"))
+                    }
+                }
+                try await writer.finish(nil)
+            }
+        )
+    }
+
     /// Administration stays on the socket: file permissions are its authentication.
     func installSocketRoutes(on router: Router<BasicRequestContext>) {
+        router.add(middleware: AuditMiddleware(audit: audit, who: { _ in "local-socket" }))
         installClusterRoutes(on: router)
+        // Socket only: `--log-path` makes the daemon, which runs as root, read a file of the
+        // caller's choosing, so a remote token could use it to read any file on any node.
+        router.post("/v1/adopt") { [self] request, _ in
+            await respond {
+                let adopt = try await decode(AdoptRequest.self, from: request)
+                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                _ = try await translatingTransport(target) { try await agent(on: target).adopt(adopt) }
+                return await clusterStatus()
+            }
+        }
         router.post("/v1/tokens") { [self] request, _ in
             await respond {
                 let body = try await decodeOptional(JoinTokenRequest.self, from: request)
@@ -358,6 +578,13 @@ public final class HeadServices: Sendable {
     /// joining node has none, and its join token is checked in the handler.
     func makePublicRouter() -> Router<BasicRequestContext> {
         let router = Router()
+        let store = self.store
+        router.add(middleware: AuditMiddleware(audit: audit, who: { request in
+            guard let header = request.headers[.authorization], header.hasPrefix("Bearer "),
+                  let secret = header.dropFirst(7).split(separator: ".").first,
+                  let token = try? store.apiToken(secret: String(secret)) else { return "unauthenticated" }
+            return token.name
+        }))
         router.add(middleware: BearerAuthMiddleware(store: store))
         let authority = self.authority
         router.get("/v1/ca") { _, _ in
@@ -451,5 +678,25 @@ func respond(_ operation: () async throws -> some Encodable) async -> Response {
         return errorResponse(error)
     } catch {
         return errorResponse(NodeCallError(code: "internal", message: "\(error)"))
+    }
+}
+
+/// Applies the head's log retention every 5 minutes.
+struct LogRetentionService: Service {
+    let logs: LogStore
+    let logger: Logger
+
+    func run() async throws {
+        await cancelWhenGracefulShutdown {
+            while !Task.isCancelled {
+                do {
+                    let removed = try await logs.enforceRetention()
+                    if !removed.isEmpty { logger.info("log retention removed days", metadata: ["days": "\(removed)"]) }
+                } catch {
+                    logger.error("log retention failed", metadata: ["error": "\(error)"])
+                }
+                try? await Task.sleep(for: .seconds(300))
+            }
+        }
     }
 }

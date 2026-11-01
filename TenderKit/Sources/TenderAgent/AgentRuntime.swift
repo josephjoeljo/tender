@@ -50,6 +50,7 @@ public struct AgentRuntime: Sendable {
     private let secrets: any SecretStore
     private let cluster: ClusterOptions
     private let hooks: ClusterHooks?
+    private let releaseSource: (any ReleaseSource)?
 
     public init(
         environment: TenderEnvironment,
@@ -57,6 +58,7 @@ public struct AgentRuntime: Sendable {
         cluster: ClusterOptions = ClusterOptions(),
         hooks: ClusterHooks? = nil,
         launchd: (any LaunchdControlling)? = nil,
+        releaseSource: (any ReleaseSource)? = nil,
         sweepInterval: Duration = .seconds(10),
         shutdownSignals: [UnixSignal] = [.sigterm, .sigint],
         logger: Logger = Logger(label: "tenderd")
@@ -65,6 +67,7 @@ public struct AgentRuntime: Sendable {
         self.secrets = secrets ?? environment.makeSecretStore()
         self.cluster = cluster
         self.hooks = hooks
+        self.releaseSource = releaseSource
         self.launchd = launchd ?? Launchctl(domain: .forEnvironment(environment))
         self.sweepInterval = sweepInterval
         self.shutdownSignals = shutdownSignals
@@ -88,7 +91,9 @@ public struct AgentRuntime: Sendable {
         let controller = ProcessController(environment: environment, store: store, reconciler: reconciler,
                                            releases: releases,
                                            adoption: Adoption(environment: environment, store: store, launchd: launchd),
-                                           identities: identities)
+                                           identities: identities,
+                                           cloud: CloudServices(environment: environment, secrets: secrets),
+                                           releaseSourceOverride: releaseSource)
         let socketPath = environment.socketPath.path(percentEncoded: false)
         let logger = self.logger
 

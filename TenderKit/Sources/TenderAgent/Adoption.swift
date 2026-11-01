@@ -8,12 +8,14 @@ public enum AdoptionError: Error, Equatable, CustomStringConvertible {
     case ownLabel(String)
     case invalidLabel(String)
     case noPlist(String)
+    case systemJob(String)
 
     public var description: String {
         switch self {
         case .jobNotFound(let label): "launchd has no job '\(label)' in this domain."
         case .ownLabel(let label): "'\(label)' is Tender's own job and can't be adopted."
         case .invalidLabel(let label): "'\(label)' isn't a valid launchd label."
+        case .systemJob(let label): "'\(label)' belongs to macOS and can't be adopted."
         case .noPlist(let label): "'\(label)' has no plist on record, so Tender can't bootstrap it."
         }
     }
@@ -41,6 +43,7 @@ public struct Adoption: Sendable {
             throw AdoptionError.invalidLabel(label)
         }
         guard !label.hasPrefix("\(environment.labelPrefix).") else { throw AdoptionError.ownLabel(label) }
+        guard !label.hasPrefix("com.apple.") else { throw AdoptionError.systemJob(label) }
         guard let job = try await launchd.print(label: label) else { throw AdoptionError.jobNotFound(label) }
         let adopted = AdoptedJob(
             label: label,
@@ -105,6 +108,7 @@ public struct Adoption: Sendable {
                 restarts: job?.restarts ?? 0,
                 cpu: usage?.cpu,
                 rss: usage?.rss,
+                cpuSeconds: usage?.cpuSeconds,
                 adopted: true
             ))
         }

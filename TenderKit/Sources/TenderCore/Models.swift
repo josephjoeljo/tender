@@ -102,13 +102,16 @@ public struct InstanceStatus: Codable, Sendable, Equatable {
     public var cpu: Double?
     /// Resident set size in bytes.
     public var rss: UInt64?
+    /// CPU time of the current process, in seconds.
+    public var cpuSeconds: Double?
     /// A job Tender manages but didn't create. `service` is then its launchd label.
     public var adopted: Bool
 
     public init(service: String, instance: Int, node: NodeID, state: InstanceState,
                 pid: Int32? = nil, lastExitCode: Int32? = nil, uptime: TimeInterval? = nil,
                 restarts: Int = 0, release: String? = nil, cpu: Double? = nil, rss: UInt64? = nil,
-                adopted: Bool = false) {
+                cpuSeconds: Double? = nil, adopted: Bool = false) {
+        self.cpuSeconds = cpuSeconds
         self.service = service
         self.instance = instance
         self.node = node

@@ -47,3 +47,44 @@ Things about how Tender works that may not be what you'd assume.
 - **Production CLI:** the socket is root-only, so `tender` needs sudo against a
   production daemon. The manual production check is in
   [production-install.md](production-install.md).
+
+## Cluster
+
+- **Node names:** a node's ID must match its Tailscale machine name, or the transport refuses
+  it. A name already in use can't be joined until `tender node revoke` frees it.
+- **Commands flow from the head:** a node only takes commands from its head. Workers can't
+  command each other, even with valid certificates.
+- **Write tokens run code:** an API token with `write` scope can start any executable on any
+  node, as any account except root. Treat it like SSH access.
+- **Socket-only:** `tender adopt`, join and API tokens, CA export and cloud credentials work
+  over the local socket only, never with `--remote`.
+- **Certificates expire** after 2 years and aren't renewed automatically yet. The head reissues
+  its own at each start, but a worker needs `tender node revoke` on the head, then `tender leave` and `tender join`.
+- **Upgrades:** Keychain items trust the binary that wrote them, so `tender daemon install
+  --system` moves secrets from the old `tenderd` to the new one. Replacing the binary by hand
+  would lock it out. If an upgrade stops partway, `secrets-handoff.json` stays in the run
+  directory with the secrets in plaintext, and installing again is refused until they're imported.
+- **Half a CA:** a head missing either `ca.crt` or `ca.key` refuses to start rather than creating a new CA.
+
+## Cluster logs
+
+- **Head over its limit:** if the head can't get under 5 GB by deleting old days, it stops
+  accepting lines. They wait in the workers' spools (1 GiB, 7 days), then get dropped oldest first.
+- **Order:** within a node, lines are in order. Across nodes it's approximate, because clocks differ.
+- **Long lines:** cut at 64 KB before shipping.
+
+## Shortcuts and Siri
+
+- **Access:** the actions use the head and token the app is connected to, so a `read` token can
+  get status and search logs, but starting, stopping or restarting needs `write`.
+- **Confirmation:** stop and restart ask first, because they interrupt a running service. Start
+  doesn't.
+- **Log search:** returns 50 lines at most, from up to the past 7 days.
+
+## Menu bar
+
+- **Font:** the node meters use Berkeley Mono if it's installed on that Mac, and SF Mono if not.
+  It isn't bundled, since that takes a licence that allows embedding it.
+- **Names:** cut to 8 characters.
+- **More than 4 nodes:** the labelled meters become one unlabelled dot per node, because macOS
+  silently hides menu bar items that don't fit. The popover says which node is which.

@@ -10,13 +10,25 @@ import TenderProtocol
 distributed actor NodeAgent: NodeAgentProtocol {
     typealias ActorSystem = TenderActorSystem
     private let controller: ProcessController
+    private let headNode: NodeID
 
-    init(controller: ProcessController, actorSystem: TenderActorSystem) {
+    init(controller: ProcessController, headNode: NodeID, actorSystem: TenderActorSystem) {
         self.controller = controller
+        self.headNode = headNode
         self.actorSystem = actorSystem
     }
 
+    /// Every node holds a valid certificate, so a certificate alone must not let one
+    /// worker command another: a compromised worker would then own the cluster.
+    private func requireHead() throws {
+        let caller = TenderActorSystem.currentCaller
+        guard caller == headNode || caller == id.node else {
+            throw NodeCallError(code: "forbidden", message: "Only the head can command this node.", httpStatus: 403)
+        }
+    }
+
     private func translating<T: Sendable>(_ operation: () async throws -> T) async throws -> T {
+        try requireHead()
         do {
             return try await operation()
         } catch let failure as APIFailure {
@@ -44,12 +56,18 @@ distributed actor NodeAgent: NodeAgentProtocol {
     }
 
     distributed func releases(service: String) async throws -> ReleaseList {
-        try await controller.releases.list(service: service)
+        try requireHead()
+        return try await controller.releases.list(service: service)
     }
 
     distributed func rollback(service: String, to sha12: String?) async throws -> ProcessList {
         let controller = self.controller
         return try await translating { try await controller.rollback(service: service, to: sha12) }
+    }
+
+    distributed func deploy(service: String, version: String) async throws -> String {
+        let controller = self.controller
+        return try await translating { try await controller.deploy(service: service, version: version) }
     }
 
     distributed func adopt(_ request: AdoptRequest) async throws -> ProcessList {

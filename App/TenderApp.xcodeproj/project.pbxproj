@@ -12,7 +12,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		7A0000000000000000000005 /* TenderApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TenderApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7A0000000000000000000005 /* Tender.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Tender.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -47,7 +47,7 @@
 		7A0000000000000000000004 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				7A0000000000000000000005 /* TenderApp.app */,
+				7A0000000000000000000005 /* Tender.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -76,7 +76,7 @@
 				7A000000000000000000000E /* TenderCore */,
 			);
 			productName = TenderApp;
-			productReference = 7A0000000000000000000005 /* TenderApp.app */;
+			productReference = 7A0000000000000000000005 /* Tender.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -235,11 +235,13 @@
 		7A0000000000000000000015 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				DEVELOPMENT_TEAM = 5986C49U98;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = 5986C49U98;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -252,7 +254,8 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.olympsis.tender.app;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_MODULE_NAME = TenderApp;
+				PRODUCT_NAME = Tender;
 				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
@@ -260,11 +263,13 @@
 		7A0000000000000000000016 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				DEVELOPMENT_TEAM = 5986C49U98;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = 5986C49U98;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -277,7 +282,8 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.olympsis.tender.app;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_MODULE_NAME = TenderApp;
+				PRODUCT_NAME = Tender;
 				SWIFT_VERSION = 6.0;
 			};
 			name = Release;

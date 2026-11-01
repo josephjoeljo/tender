@@ -134,23 +134,37 @@ extension Tender {
                 // them to the new one. The file is 0600 in a root-only directory.
                 let handoff = environment.runDirectory.appending(path: "secrets-handoff.json").path(percentEncoded: false)
                 let installed = plan.installedDaemon.path(percentEncoded: false)
+                if FileManager.default.fileExists(atPath: handoff) {
+                    throw SystemInstallError.unfinishedUpgrade(daemon: installed, handoff: handoff)
+                }
                 let upgrading = FileManager.default.isExecutableFile(atPath: installed)
+                let previousDaemon = Self.fileNumber(installed)
                 if upgrading {
                     let export = try await ProcessLaunchctlRunner.runTool(executable: installed, arguments: ["secrets-export", "--to", handoff])
                     guard export.exitCode == 0 else {
                         throw SystemInstallError.commandFailed("tenderd secrets-export", export.stderr)
                     }
                 }
-                for command in commands {
-                    let result = try await ProcessLaunchctlRunner.runTool(executable: command.executable, arguments: command.arguments)
-                    guard result.exitCode == 0 else {
-                        throw SystemInstallError.commandFailed(command.description, result.stderr)
+                do {
+                    for command in commands {
+                        let result = try await ProcessLaunchctlRunner.runTool(executable: command.executable, arguments: command.arguments)
+                        guard result.exitCode == 0 else {
+                            throw SystemInstallError.commandFailed(command.description, result.stderr)
+                        }
                     }
+                } catch {
+                    // The same file means the old daemon can still read the Keychain, so
+                    // the copy isn't needed. A replaced file means it may be the only copy.
+                    if upgrading, Self.fileNumber(installed) == previousDaemon {
+                        try? FileManager.default.removeItem(atPath: handoff)
+                    }
+                    throw error
                 }
                 if upgrading {
-                    let restore = try await ProcessLaunchctlRunner.runTool(executable: installed, arguments: ["secrets-import", "--from", handoff])
-                    guard restore.exitCode == 0 else {
-                        throw SystemInstallError.commandFailed("tenderd secrets-import", restore.stderr)
+                    // The file is kept on failure: an import can stop after deleting items.
+                    guard let restore = try? await ProcessLaunchctlRunner.runTool(executable: installed, arguments: ["secrets-import", "--from", handoff]),
+                          restore.exitCode == 0 else {
+                        throw SystemInstallError.unfinishedUpgrade(daemon: installed, handoff: handoff)
                     }
                 }
                 try plan.renderDaemonPlist(role: role).write(to: plist, options: .atomic)
@@ -159,6 +173,10 @@ extension Tender {
                     ofItemAtPath: plist.path(percentEncoded: false))
                 try await Daemon.load(plist: plist, environment: environment)
                 print("Installed \(environment.agentLabel) running \(plan.installedDaemon.path(percentEncoded: false))")
+            }
+
+            private static func fileNumber(_ path: String) -> Int? {
+                (try? FileManager.default.attributesOfItem(atPath: path))?[.systemFileNumber] as? Int
             }
 
             private static func output(_ executable: String, _ arguments: [String]) async throws -> String {

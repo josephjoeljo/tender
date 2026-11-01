@@ -25,6 +25,7 @@ distributed actor TestAgent: NodeAgentProtocol {
     distributed func rollback(service: String, to sha12: String?) async throws -> ProcessList { ProcessList(processes: []) }
     distributed func adopt(_ request: AdoptRequest) async throws -> ProcessList { ProcessList(processes: []) }
     distributed func forgetAdopted(label: String) async throws -> ProcessList { ProcessList(processes: []) }
+    distributed func deploy(service: String, version: String) async throws -> String { version }
 }
 
 distributed actor TestRegistry: HeadRegistryProtocol {
@@ -32,6 +33,7 @@ distributed actor TestRegistry: HeadRegistryProtocol {
     private var beats = 0
     distributed func register(_ node: NodeInfo) async throws {}
     distributed func heartbeat(_ heartbeat: Heartbeat) async throws { beats += 1 }
+    distributed func ingest(_ batch: LogBatch) async throws -> UInt64 { batch.records.last?.seq ?? 0 }
     distributed func count() -> Int { beats }
 }
 

@@ -106,6 +106,11 @@ public struct TenderClient: Sendable {
         try await send(.POST, "/v1/join", body: try JSONEncoder().encode(LocalJoinRequest(head: head, token: token, nodeID: nodeID)))
     }
 
+    /// Makes the local daemon forget its cluster and restart. A worker's socket only.
+    public func leave() async throws -> ProcessList {
+        try await send(.POST, "/v1/leave")
+    }
+
     public func revokeNode(_ id: String) async throws -> NodeList {
         try await send(.POST, "/v1/nodes/\(try escaped(id))/revoke")
     }
@@ -213,6 +218,67 @@ public struct TenderClient: Sendable {
     /// Stops managing an adopted job, leaving the job itself untouched.
     public func forget(label: String, node: String? = nil) async throws -> ProcessList {
         try await send(.DELETE, "/v1/adopt/\(try escaped(label))\(try nodeQuery(node))")
+    }
+
+    private func logQueryItems(_ query: LogQuery) throws -> String {
+        var items: [String] = ["limit=\(query.limit)"]
+        if let service = query.service { items.append("service=\(try escaped(service))") }
+        if let node = query.node { items.append("node=\(try escaped(node))") }
+        if let stream = query.stream { items.append("stream=\(stream.rawValue)") }
+        if let since = query.since { items.append("since=\(since.timeIntervalSince1970)") }
+        if let until = query.until { items.append("until=\(until.timeIntervalSince1970)") }
+        if let text = query.text { items.append("query=\(try escaped(text))") }
+        return items.joined(separator: "&")
+    }
+
+    /// Searches the head's logs. A worker's daemon answers `http_404`.
+    public func searchLogs(_ query: LogQuery) async throws -> LogSearchResult {
+        try await send(.GET, "/v1/logs?\(try logQueryItems(query))")
+    }
+
+    /// New matching lines from every node, from the head, until cancelled.
+    public func followClusterLogs(_ query: LogQuery) -> AsyncThrowingStream<LogEntry, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let (client, request) = try self.request("/v1/logs/follow?\(try self.logQueryItems(query))")
+                    let response = try await client.execute(request, deadline: .distantFuture)
+                    guard response.status == .ok else {
+                        let body = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
+                        throw Self.apiError(status: Int(response.status.code), data: body)
+                    }
+                    var pending = Data()
+                    let separator = Data("\n\n".utf8)
+                    for try await chunk in response.body {
+                        pending.append(contentsOf: chunk.readableBytesView)
+                        while let range = pending.range(of: separator) {
+                            let event = pending[pending.startIndex..<range.lowerBound]
+                            pending = Data(pending[range.upperBound...])
+                            if event.starts(with: Data("data: ".utf8)) {
+                                continuation.yield(try JSONDecoder().decode(LogEntry.self, from: event.dropFirst(6)))
+                            }
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    public func deploy(service: String, version: String, node: String? = nil) async throws -> DeployResponse {
+        try await send(.POST, "/v1/deploy", body: try JSONEncoder().encode(DeployRequest(service: service, version: version, node: node)))
+    }
+
+    public func clusterReleases(service: String) async throws -> ClusterReleases {
+        try await send(.GET, "/v1/releases?service=\(try escaped(service))")
+    }
+
+    /// Saves a service account key on the node this client talks to. Socket only.
+    public func setCredentials(serviceAccountJSON: String) async throws -> CredentialsResponse {
+        try await send(.POST, "/v1/credentials", body: try JSONEncoder().encode(CredentialsRequest(serviceAccountJSON: serviceAccountJSON)))
     }
 
     /// Boots out orphaned launchd jobs.

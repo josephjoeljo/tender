@@ -4,6 +4,48 @@ import TenderClient
 import TenderCore
 
 extension Tender {
+    struct Deploy: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Fetch a release from the configured source and restart on it.",
+            discussion: "Each node downloads the release itself, and verifies its sha256 before installing it."
+        )
+        @Argument(help: "Service name.") var name: String
+        @Option(help: "Release version, as CI published it.") var release: String
+        @Option(help: "Only this node. Defaults to every node running the service.") var node: String?
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            let response: DeployResponse
+            do {
+                response = try await options.makeClient().deploy(service: name, version: release, node: node)
+            } catch let error as TenderClientError {
+                try options.fail(error)
+            }
+            print(options.json ? try options.encode(response) : response.outcomes.map { outcome in
+                "\(outcome.node): " + (outcome.sha12 ?? "failed: \(outcome.error ?? "unknown error")")
+            }.joined(separator: "\n"))
+            if response.outcomes.contains(where: { $0.error != nil }) { throw ExitCode.failure }
+        }
+    }
+
+    struct Credentials: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Manage this node's cloud credentials.", subcommands: [Set.self])
+
+        struct Set: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Save a GCP service account key on this node.",
+                discussion: "The key goes to the local daemon's secret store. You can delete the file afterwards."
+            )
+            @Option(help: "Path to the key's JSON file.") var file: String
+            @OptionGroup var options: CommonOptions
+
+            func run() async throws {
+                let json = try String(contentsOf: URL(filePath: file), encoding: .utf8)
+                try await options.run({ try await $0.setCredentials(serviceAccountJSON: json) }) { "Saved credentials for \($0.clientEmail)" }
+            }
+        }
+    }
+
     struct Token: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Manage join tokens.", subcommands: [Create.self])
 
@@ -31,6 +73,18 @@ extension Tender {
             try await options.run({ try await $0.join(head: head, token: token, nodeID: nodeId) }) { status in
                 "Joined: \(status.nodeID) -> head \(status.headNode)"
             }
+        }
+    }
+
+    struct Leave: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Make this worker forget its cluster, so that it can join again.",
+            discussion: "Services keep running. The daemon restarts, under launchd. Revoke the node on the head as well."
+        )
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            try await options.run({ try await $0.leave() }) { _ in "Left the cluster." }
         }
     }
 
@@ -68,7 +122,7 @@ extension Tender {
             @OptionGroup var options: CommonOptions
 
             func run() async throws {
-                try await options.run({ try await $0.exportCA() }) { $0.certificatePEM + $0.privateKeyPEM }
+                try await options.run({ try await $0.exportCA() }) { $0.certificatePEM + "\n" + $0.privateKeyPEM }
             }
         }
     }
@@ -119,9 +173,13 @@ extension Tender {
         struct Set: AsyncParsableCommand {
             static let configuration = CommandConfiguration(abstract: "Save a head's address and API token.")
             @Option(help: "host or host:port.") var head: String
-            @Option(help: "From `tender api-token create`.") var token: String
+            @Option(help: "From `tender api-token create`. Prefer $TENDER_TOKEN: arguments are visible to other users in `ps`.")
+            var token: String?
 
             func run() async throws {
+                guard let token = token ?? ProcessInfo.processInfo.environment["TENDER_TOKEN"] else {
+                    throw ValidationError("Pass --token or set TENDER_TOKEN.")
+                }
                 let caPEM: String
                 do {
                     caPEM = try await ClientPinning.fetchCA(head: head, credential: token)

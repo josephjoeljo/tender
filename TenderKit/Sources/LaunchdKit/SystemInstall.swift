@@ -123,11 +123,15 @@ public struct SystemInstallPlan: Sendable {
 public enum SystemInstallError: Error, CustomStringConvertible {
     case noFreeID
     case commandFailed(String, String)
+    case unfinishedUpgrade(daemon: String, handoff: String)
 
     public var description: String {
         switch self {
         case .noFreeID: "No free id between 400 and 499 for the \(SystemInstallPlan.serviceUser) account."
         case .commandFailed(let command, let message): "`\(command)` failed: \(message)"
+        case .unfinishedUpgrade(let daemon, let handoff):
+            "An upgrade didn't finish, and \(handoff) may hold the only copy of this node's secrets, including the CA key. "
+                + "Don't delete it. Run `sudo \(daemon) secrets-import --from \(handoff)`, then install again."
         }
     }
 }

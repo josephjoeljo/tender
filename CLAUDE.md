@@ -111,7 +111,7 @@ Full design: `docs/DESIGN.md`.
 
 ## Tech stack
 
-- Swift 6, Swift Package Manager, macOS 14+, Xcode workspace (Xcode 16+)
+- Swift 6, Swift Package Manager, macOS 15+, Xcode workspace (Xcode 16+)
 - Testing: Swift Testing (`import Testing`, `@Test`, `#expect`)
 - SwiftNIO + NIOSSL (mTLS), Hummingbird (public HTTP API)
 - Swift `Distributed` (distributed actors) for head↔worker traffic, via our own
