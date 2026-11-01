@@ -97,7 +97,8 @@ struct ProcessRow: View {
 #if DEBUG
 extension ClusterModel {
     private static func node(_ name: String, up: Bool, processes: Int, crashed: Int = 0) -> NodeSummary {
-        NodeSummary(info: NodeInfo(id: NodeID(name), version: "0.1.0", macOS: "macOS", hardware: "Mac", address: "\(name):7070"),
+        NodeSummary(info: NodeInfo(id: NodeID(name), version: "0.1.0", macOS: "macOS", hardware: "Mac", address: "\(name):7070",
+                                   labels: name == "mac-1" ? [NodeInfo.roleLabel: NodeInfo.headRole] : [:]),
                     up: up, lastHeartbeatAge: up ? 2 : 90, instanceCount: processes, crashedCount: crashed)
     }
 

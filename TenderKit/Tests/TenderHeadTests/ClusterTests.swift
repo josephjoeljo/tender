@@ -820,8 +820,30 @@ private struct FakeSource: ReleaseSource {
     #expect(meters[2] == NodeMeter(label: "gone", fraction: 1, level: .down), "a stale report doesn't matter once it's down")
     #expect(meters[3].level == .healthy)
     #expect(meters[4].level == .healthy, "stopping everything on purpose is healthy")
-    #expect(meters[5].label == "joels-m…")
-    #expect(NodeMeter.shortLabel("exactly8") == "exactly8")
+    #expect(meters[5].label == "joels-macbook-p…")
+    #expect(NodeMeter.shortLabel("exactly-sixteen!") == "exactly-sixteen!")
+}
+
+@Test func theHeadsMeterIsMarked() {
+    func node(_ name: String, labels: [String: String] = [:]) -> NodeSummary {
+        NodeSummary(info: NodeInfo(id: NodeID(name), version: "1", macOS: "x", hardware: "y", labels: labels), up: true,
+                    lastHeartbeatAge: nil, instanceCount: 0, crashedCount: 0)
+    }
+    let head = node("head", labels: [NodeInfo.roleLabel: NodeInfo.headRole])
+    #expect(NodeMeter.meters(nodes: [head, node("worker")], processes: []).map(\.isHead) == [true, false])
+}
+
+@Test func aOneNodeClusterMeterTakesTheConnectionName() {
+    func node(_ name: String) -> NodeSummary {
+        NodeSummary(info: NodeInfo(id: NodeID(name), version: "1", macOS: "x", hardware: "y"), up: true,
+                    lastHeartbeatAge: nil, instanceCount: 0, crashedCount: 0)
+    }
+    let one = [node("joels-mac-mini")]
+    #expect(NodeMeter.meters(nodes: one, processes: [], clusterName: "mini-0")[0].label == "mini-0")
+    #expect(NodeMeter.meters(nodes: one, processes: [], clusterName: "a-very-long-connection")[0].label == "a-very-long-con…")
+    #expect(NodeMeter.meters(nodes: one, processes: [])[0].label == "joels-mac-mini")
+    let two = NodeMeter.meters(nodes: [node("mac-1"), node("mac-2")], processes: [], clusterName: "mini-0")
+    #expect(two.map(\.label) == ["mac-1", "mac-2"])
 }
 
 @Test func contextStorePersistsAndClears() throws {

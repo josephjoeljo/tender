@@ -10,7 +10,8 @@ struct MenuBarLabel: View {
     var appearance: NSAppearance? = nil
 
     var body: some View {
-        let meters = NodeMeter.meters(nodes: model.nodes, processes: model.processes)
+        let meters = NodeMeter.meters(nodes: model.nodes, processes: model.processes,
+                                      clusterName: model.activeConnectionName)
         switch model.health {
         case .healthy where !meters.isEmpty, 
                 .degraded where !meters.isEmpty:
@@ -28,6 +29,9 @@ enum NodeMeterImage {
     private static let height: CGFloat = 22
     private static let capsule = NSSize(width: 26, height: 7.5)
     private static let gap: CGFloat = 8
+    private static let crownSize = NSSize(width: 10, height: 8)
+    private static let crownGap: CGFloat = 2
+    private static let headColor = NSColor.systemYellow
 
     /// Berkeley Mono if it's installed on this Mac, licensed or trial. It's never bundled,
     /// because that takes a licence that allows embedding it. Otherwise, SF Mono.
@@ -54,16 +58,30 @@ enum NodeMeterImage {
     /// resolved at draw time, so that they follow a light or dark menu bar.
     private static func labelled(_ meters: [NodeMeter], appearance: NSAppearance?) -> NSImage {
         let font = font()
-        let widths = meters.map { max(($0.label as NSString).size(withAttributes: [.font: font]).width, capsule.width) }
+        let crownWidth = crownSize.width + crownGap
+        let widths = meters.map {
+            let label = ($0.label as NSString).size(withAttributes: [.font: font]).width
+            return max(label + ($0.isHead ? crownWidth : 0), capsule.width)
+        }
         let width = widths.reduce(0, +) + gap * CGFloat(max(meters.count - 1, 0))
+        let crownSymbol = NSImage(systemSymbolName: "crown.fill", accessibilityDescription: "Head node")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .regular)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [headColor])))
         let image = NSImage(size: NSSize(width: ceil(width), height: height), flipped: false) { _ in
             let draw = {
                 let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor]
                 var x: CGFloat = 0
                 for (meter, slot) in zip(meters, widths) {
                     let size = (meter.label as NSString).size(withAttributes: attributes)
-                    (meter.label as NSString).draw(at: NSPoint(x: x + (slot - size.width) / 2, y: 10.5), withAttributes: attributes)
-                    let frame = NSRect(x: x + (slot - capsule.width) / 2, y: 2, width: capsule.width, height: capsule.height)
+                    let content = size.width + (meter.isHead ? crownWidth : 0)
+                    var textX = x + (slot - content) / 2
+                    if meter.isHead {
+                        crownSymbol?.draw(in: NSRect(x: textX, y: 11.5, width: crownSize.width, height: crownSize.height))
+                        textX += crownWidth
+                    }
+                    (meter.label as NSString).draw(at: NSPoint(x: textX, y: 10.5), withAttributes: attributes)
+                    // The meter is as wide as the name above it.
+                    let frame = NSRect(x: x, y: 2, width: slot, height: capsule.height)
                     NSColor.tertiaryLabelColor.setStroke()
                     let outline = NSBezierPath(roundedRect: frame, xRadius: 2.5, yRadius: 2.5)
                     outline.lineWidth = 0.75
@@ -93,7 +111,13 @@ enum NodeMeterImage {
         let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
             for (index, meter) in meters.enumerated() {
                 color(meter.level).setFill()
-                NSBezierPath(ovalIn: NSRect(x: CGFloat(index) * (size + spacing), y: (height - size) / 2, width: size, height: size)).fill()
+                let dot = NSBezierPath(ovalIn: NSRect(x: CGFloat(index) * (size + spacing), y: (height - size) / 2, width: size, height: size).insetBy(dx: 0.75, dy: 0.75))
+                dot.fill()
+                if meter.isHead {
+                    headColor.setStroke()
+                    dot.lineWidth = 1.5
+                    dot.stroke()
+                }
             }
             return true
         }

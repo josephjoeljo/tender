@@ -39,6 +39,11 @@ public struct NodeInfo: Codable, Sendable, Equatable {
         self.address = address
         self.labels = labels
     }
+
+    public static let roleLabel = "role"
+    public static let headRole = "head"
+
+    public var isHead: Bool { labels[Self.roleLabel] == Self.headRole }
 }
 
 /// A node as the head sees it, for `tender nodes` and the app.

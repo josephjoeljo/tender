@@ -3,7 +3,7 @@ import Foundation
 import TenderClient
 import TenderCore
 
-/// Shortcuts, Siri and Spotlight actions. They use the head the app is connected to, so a
+/// Shortcuts, Siri and Spotlight actions. They use the app's active connection, so a
 /// read-only token can check status and search logs, and starting or stopping needs `write`.
 struct IntentFailure: Error, CustomLocalizedStringResourceConvertible {
     var message: String
@@ -11,11 +11,11 @@ struct IntentFailure: Error, CustomLocalizedStringResourceConvertible {
 }
 
 private func connectedClient() throws -> TenderClient {
-    guard let saved = try ClusterModel.makeStore().load() else {
+    guard let saved = try ClusterModel.makeStore().activeCredentials() else {
         throw IntentFailure(message: "Tender isn't connected to a head. Connect in its settings first.")
     }
-    return TenderClient(head: saved.context.head, caPEM: saved.context.caPEM, token: saved.token,
-                        timeout: .seconds(30))
+    let context = saved.connection.context
+    return TenderClient(head: context.head, caPEM: context.caPEM, token: saved.token, timeout: .seconds(30))
 }
 
 /// Runs a call, turning errors into text that Shortcuts and Siri can show.
