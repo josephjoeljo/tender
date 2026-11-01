@@ -346,11 +346,35 @@ public struct TailscaleCLI: TailscaleRunning {
         return try await Self.run(executable: executable, arguments: ["whois", "--json", ip])
     }
 
-    /// This node's tailnet IPv4 address, if Tailscale is up.
+    /// This node's tailnet IPv4 address, if Tailscale is up. It's read from the network
+    /// interfaces because the app's CLI can't run from a LaunchDaemon: it prints an error
+    /// about starting the GUI instead of an address.
     public static func localIPv4() async -> String? {
-        guard let executable = executable(),
-              let data = try? await run(executable: executable, arguments: ["ip", "-4"]) else { return nil }
-        return String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline).first.map(String.init)
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0 else { return nil }
+        defer { freeifaddrs(interfaces) }
+        var current = interfaces
+        while let interface = current?.pointee {
+            current = interface.ifa_next
+            guard String(cString: interface.ifa_name).hasPrefix("utun"),
+                  let address = interface.ifa_addr, address.pointee.sa_family == sa_family_t(AF_INET)
+            else { continue }
+            var host = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            let bytes = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+            var copy = bytes
+            guard inet_ntop(AF_INET, &copy, &host, socklen_t(INET_ADDRSTRLEN)) != nil else { continue }
+            let text = String(decoding: host.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            if isTailnetIPv4(text) { return text }
+        }
+        return nil
+    }
+
+    /// Tailscale assigns IPv4 addresses from 100.64.0.0/10.
+    static func isTailnetIPv4(_ address: String) -> Bool {
+        var parsed = in_addr()
+        guard inet_pton(AF_INET, address, &parsed) == 1 else { return false }
+        let bytes = withUnsafeBytes(of: &parsed) { Array($0) }
+        return bytes[0] == 100 && bytes[1] & 0xC0 == 64
     }
 
     private static func run(executable: String, arguments: [String]) async throws -> Data {

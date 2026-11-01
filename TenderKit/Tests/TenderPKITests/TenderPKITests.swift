@@ -201,3 +201,13 @@ func keychainSecretStoreRoundTrip() throws {
         try CertificateAuthority(backupPEM: ca.certificatePEM)
     }
 }
+
+@Test func recognizesOnlyTailnetAddresses() {
+    #expect(TailscaleCLI.isTailnetIPv4("100.64.0.1"))
+    #expect(TailscaleCLI.isTailnetIPv4("100.68.3.107"))
+    #expect(TailscaleCLI.isTailnetIPv4("100.127.255.255"))
+    #expect(!TailscaleCLI.isTailnetIPv4("100.63.255.255"))
+    #expect(!TailscaleCLI.isTailnetIPv4("100.128.0.0"))
+    #expect(!TailscaleCLI.isTailnetIPv4("192.168.1.10"))
+    #expect(!TailscaleCLI.isTailnetIPv4("The Tailscale GUI failed to start"))
+}
