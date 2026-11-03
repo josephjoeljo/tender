@@ -171,11 +171,15 @@ Production uses `/opt/tender`, `/Library/LaunchDaemons`, and the `system` domain
 
 ## Milestones
 
-Detailed plans: `docs/plans/milestone-{1..5}.md`.
+Detailed plans: `docs/plans/milestone-{1,1.5,2,3,4,5}.md`.
 
 1. **Single-node agent** — pm2 parity on launchd: start/stop/restart/delete/list,
-   logs, adopt, binaries-folder watching. ← current (scaffold builds in Xcode;
-   plan: `docs/plans/milestone-1.md`)
+   logs, adopt, binaries-folder watching. Done.
+1.5. **Service files + secrets** (lands after 3, before 4) — `tender apply -f
+   services.yaml` with diff/dry-run/prune, `env_file`, `tender export`; per-node
+   secrets (`tender secret set`, `${secret:NAME}`) delivered by a `tenderd exec`
+   wrapper, never in plists; GCP Secret Manager as a later source. ← current
+   (plan: `docs/plans/milestone-1.5.md`)
 2. **Head + join** (binaries placed on workers by hand for now) — spike: `@Resolvable` across modules over loopback on our
    macOS version; then TenderActorSystem, node registration, mTLS, remote commands,
    cluster-wide `tender list`.
