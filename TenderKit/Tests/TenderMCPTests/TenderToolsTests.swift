@@ -48,6 +48,14 @@ final class FakeBackend: ClusterBackend, @unchecked Sendable {
         record("rollback \(service)")
         return processList
     }
+    func secrets() async throws -> SecretList {
+        SecretList(secrets: [
+            SecretInfo(name: "api/MONGO_PASSWORD", scope: .service, node: NodeID("mac-1"),
+                       updatedAt: Date(timeIntervalSince1970: 0), revision: 3, usedBy: ["api"]),
+            SecretInfo(name: "worker/TOKEN", scope: .service, node: NodeID("mac-1"),
+                       updatedAt: Date(timeIntervalSince1970: 0), revision: 1, usedBy: ["worker"]),
+        ], missing: ["mac-2: api: JWT_KEY"])
+    }
 }
 
 let reader = MCPCaller(name: "reader", scope: .read)
@@ -223,4 +231,14 @@ let jsonHeaders = ["Content-Type": "application/json", "Accept": "application/js
 
     let get = await TenderMCPServer.handle(method: "GET", headers: jsonHeaders, body: nil, tools: tools, caller: reader)
     #expect(get.status == 405)
+}
+
+@Test func secretsListNamesAndMissingOnly() async {
+    let tools = TenderTools(backend: FakeBackend())
+    let result = text(await tools.call("list_secrets", arguments: ["service": "api"], caller: reader))
+    #expect(result.contains("api/MONGO_PASSWORD"))
+    #expect(!result.contains("worker/TOKEN"))
+    #expect(result.range(of: "\"missing\"")!.lowerBound < result.range(of: "\"secrets\"")!.lowerBound)
+    #expect(result.contains("JWT_KEY"))
+    #expect(!result.contains("\"value\""))
 }

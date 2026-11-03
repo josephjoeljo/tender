@@ -54,7 +54,7 @@ public final class TenderTools: Sendable {
     // MARK: Catalog
 
     static let readTools: Set<String> = [
-        "list_nodes", "list_processes", "describe_process", "search_logs", "get_metrics_summary", "list_releases",
+        "list_nodes", "list_processes", "describe_process", "search_logs", "get_metrics_summary", "list_releases", "list_secrets",
     ]
     static let writeTools: Set<String> = [
         "start_process", "stop_process", "restart_process", "deploy_release", "rollback_release",
@@ -103,6 +103,10 @@ public final class TenderTools: Sendable {
         Tool(name: "list_releases",
              description: "Releases of a service on each node, newest first (at most 10 per node), with the one each node runs marked as current.",
              inputSchema: schema(["service": string("Service name.")], required: ["service"]),
+             annotations: .init(readOnlyHint: true, openWorldHint: false)),
+        Tool(name: "list_secrets",
+             description: "Service secrets on each node: name (`<service>/NAME` or `shared/NAME`), node, last change, revision and the services using it. Values are never returned, by this or any tool. `missing` lists references (`${secret:NAME}` in a service's env or args) that no secret satisfies; such instances exit with code 78 until it is set with `tender secret set`.",
+             inputSchema: schema(["service": string("Only secrets of this service, and shared ones it uses.")]),
              annotations: .init(readOnlyHint: true, openWorldHint: false)),
         Tool(name: "start_process",
              description: "Starts a stopped service, on one node or every node that has it. Idempotent. Needs a write token. With dry_run, returns what would happen and changes nothing.",
@@ -182,6 +186,7 @@ public final class TenderTools: Sendable {
         case "search_logs": return try await searchLogs(arguments)
         case "get_metrics_summary": return try await metricsSummary()
         case "list_releases": return try await listReleases(try arguments.required("service"))
+        case "list_secrets": return try await listSecrets(arguments.string("service"))
         default: return try await write(name, arguments)
         }
     }
@@ -282,6 +287,19 @@ public final class TenderTools: Sendable {
         let releases = try await backend.releases(service: service)
         guard !releases.nodes.isEmpty else { throw ToolError("No releases of '\(service)' on any node.") }
         return try Self.render(ReleasesOutput(service: service, nodes: releases.nodes.map(ReleasesRow.init)))
+    }
+
+    func listSecrets(_ service: String?) async throws -> String {
+        let list = try await backend.secrets()
+        var secrets = list.secrets
+        var missing = list.missing
+        if let service {
+            secrets = secrets.filter { $0.name.hasPrefix("\(service)/") || $0.usedBy.contains(service) }
+            missing = missing.filter { $0.contains("\(service):") }
+        }
+        return try Self.render(SecretsOutput(
+            missing: missing, unreachableNodes: list.unreachableNodes,
+            secrets: secrets.prefix(Self.maxListedProcesses).map(SecretRow.init)))
     }
 
     func write(_ name: String, _ arguments: Arguments) async throws -> String {
@@ -629,4 +647,26 @@ struct PlanOutput: Encodable {
     var plan: String
     var unreachableNodes: [String]
     var instances: [ProcessRow]
+}
+
+struct SecretRow: Encodable {
+    var name: String
+    var node: String
+    var updatedAt: Date
+    var revision: Int
+    var usedBy: [String]
+
+    init(_ info: SecretInfo) {
+        name = info.name
+        node = info.node.rawValue
+        updatedAt = info.updatedAt
+        revision = info.revision
+        usedBy = info.usedBy
+    }
+}
+
+struct SecretsOutput: Encodable {
+    var missing: [String]
+    var unreachableNodes: [String]
+    var secrets: [SecretRow]
 }

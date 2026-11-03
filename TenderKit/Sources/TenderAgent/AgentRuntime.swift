@@ -51,7 +51,10 @@ public struct AgentRuntime: Sendable {
     private let cluster: ClusterOptions
     private let hooks: ClusterHooks?
     private let releaseSource: (any ReleaseSource)?
+    private let execPath: String?
 
+    /// `execPath` is the `tenderd` that services with secrets start through. It defaults
+    /// to the installed copy in production, and to this executable in dev mode.
     public init(
         environment: TenderEnvironment,
         secrets: (any SecretStore)? = nil,
@@ -59,6 +62,7 @@ public struct AgentRuntime: Sendable {
         hooks: ClusterHooks? = nil,
         launchd: (any LaunchdControlling)? = nil,
         releaseSource: (any ReleaseSource)? = nil,
+        execPath: String? = nil,
         sweepInterval: Duration = .seconds(10),
         shutdownSignals: [UnixSignal] = [.sigterm, .sigint],
         logger: Logger = Logger(label: "tenderd")
@@ -68,6 +72,9 @@ public struct AgentRuntime: Sendable {
         self.cluster = cluster
         self.hooks = hooks
         self.releaseSource = releaseSource
+        self.execPath = execPath ?? (environment.mode == .production
+            ? SystemInstallPlan(environment: environment).installedDaemon.path(percentEncoded: false)
+            : Bundle.main.executablePath)
         self.launchd = launchd ?? Launchctl(domain: .forEnvironment(environment))
         self.sweepInterval = sweepInterval
         self.shutdownSignals = shutdownSignals
@@ -85,7 +92,9 @@ public struct AgentRuntime: Sendable {
         defer { close(lock) }
 
         let store = try StateStore(environment: environment)
-        let reconciler = Reconciler(environment: environment, store: store, launchd: launchd)
+        let vault = SecretVault(secrets: secrets, store: store)
+        let reconciler = Reconciler(environment: environment, store: store, launchd: launchd,
+                                    vault: vault, execPath: execPath)
         let releases = ReleaseManager(environment: environment, store: store, reconciler: reconciler)
         let identities = ClusterIdentityStore(environment: environment, secrets: secrets)
         let controller = ProcessController(environment: environment, store: store, reconciler: reconciler,
@@ -93,7 +102,8 @@ public struct AgentRuntime: Sendable {
                                            adoption: Adoption(environment: environment, store: store, launchd: launchd),
                                            identities: identities,
                                            cloud: CloudServices(environment: environment, secrets: secrets),
-                                           releaseSourceOverride: releaseSource)
+                                           releaseSourceOverride: releaseSource,
+                                           vault: vault)
         let socketPath = environment.socketPath.path(percentEncoded: false)
         let logger = self.logger
 

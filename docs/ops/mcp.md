@@ -21,7 +21,8 @@ sudo tender api-token create claude-ops --scope write
 ```
 
 - **read**: `list_nodes`, `list_processes`, `describe_process`, `search_logs`,
-  `get_metrics_summary`, `list_releases`. Write tools aren't even listed.
+  `get_metrics_summary`, `list_releases`, `list_secrets` (names only; no tool ever
+  returns a secret's value). Write tools aren't even listed.
 - **write**: also `start_process`, `stop_process`, `restart_process`,
   `deploy_release`, `rollback_release`. At most 20 write calls per minute per token.
   Every write tool takes `dry_run: true`, which reports what would happen and changes

@@ -786,6 +786,48 @@ private struct FakeSource: ReleaseSource {
     }
 }
 
+@Test func secretsGoThroughTheHeadToTheNodeThatRunsTheService() async throws {
+    try await withCluster { head, worker async throws in
+        var spec = sleeper
+        spec.node = NodeID("worker")
+        spec.environment = ["PASS": "${secret:PASS}"]
+        _ = try await head.client.start(spec)
+        let placed = try await eventually { () -> Bool? in
+            try await head.client.nodes().nodes.first { $0.info.id == NodeID("worker") }?.instanceCount == 1 ? true : nil
+        }
+        #expect(placed == true)
+
+        // Without a node, a service's secret goes where the service runs.
+        let set = try await head.client.setSecret("api/PASS", value: Data("s3cret".utf8))
+        #expect(set.secrets.map(\.node) == [NodeID("worker")])
+        #expect(try await worker.client.secrets().secrets.map(\.name) == ["api/PASS"])
+        #expect(try await head.client.secrets().secrets.map(\.usedBy) == [["api"]])
+
+        do {
+            _ = try await head.client.setSecret("shared/KEY", value: Data("k".utf8))
+            Issue.record("a shared secret needs a node")
+        } catch let error as TenderClientError {
+            #expect(error.code == "node_required")
+        }
+        let everywhere = try await head.client.setSecret("shared/KEY", value: Data("k".utf8), allNodes: true)
+        #expect(Set(everywhere.secrets.filter { $0.name == "shared/KEY" }.map(\.node)) == [NodeID("head"), NodeID("worker")])
+        _ = try await head.client.deleteSecret("api/PASS", node: "worker")
+        #expect(try await worker.client.secrets().secrets.map(\.name) == ["shared/KEY"])
+
+        let reader = try await head.client.createAPIToken(name: "r", scope: .read)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let remote = TenderClient(head: address, caPEM: try await ClientPinning.fetchCA(head: address, credential: reader.token),
+                                  token: reader.token)
+        #expect(try await remote.secrets().secrets.count == 2)
+        do {
+            _ = try await remote.setSecret("api/PASS", value: Data("x".utf8), node: "worker")
+            Issue.record("a read token must not set secrets")
+        } catch let error as TenderClientError {
+            #expect(error.code == "forbidden")
+        }
+    }
+}
+
 // MARK: Health
 
 @Test func healthSummarizesTheCluster() {

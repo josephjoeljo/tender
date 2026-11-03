@@ -14,6 +14,8 @@ public protocol ClusterBackend: Sendable {
     func restart(service: String, node: String?) async throws -> ProcessList
     func deploy(_ request: DeployRequest) async throws -> DeployResponse
     func rollback(service: String, to sha12: String?, node: String?) async throws -> ProcessList
+    /// Names, nodes and revisions. No backend ever returns a secret's value.
+    func secrets() async throws -> SecretList
 }
 
 /// For `tender mcp`: every call goes to the head (or the local daemon) through its
@@ -42,4 +44,5 @@ public struct ClientBackend: ClusterBackend {
     public func rollback(service: String, to sha12: String?, node: String?) async throws -> ProcessList {
         try await client.rollback(service: service, to: sha12, node: node)
     }
+    public func secrets() async throws -> SecretList { try await client.secrets() }
 }

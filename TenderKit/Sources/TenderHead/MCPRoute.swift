@@ -29,6 +29,7 @@ struct HeadBackend: ClusterBackend {
     func rollback(service: String, to sha12: String?, node: String?) async throws -> ProcessList {
         try await head.rollback(service: service, to: sha12, node: node)
     }
+    func secrets() async throws -> SecretList { await head.clusterSecrets() }
 }
 
 extension HeadServices {

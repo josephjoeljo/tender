@@ -27,10 +27,12 @@ public enum ReconcileAction: Sendable, Equatable {
 
 enum ReconcileApplyError: Error, CustomStringConvertible {
     case unknownUser(String)
+    case noExecWrapper(String)
 
     var description: String {
         switch self {
         case .unknownUser(let user): "The account '\(user)' doesn't exist. Did `tender daemon install --system` run?"
+        case .noExecWrapper(let service): "'\(service)' references secrets, but this daemon has no `tenderd exec` to start it with."
         }
     }
 }
@@ -76,6 +78,9 @@ public actor Reconciler {
     private let launchd: any LaunchdControlling
     private let throttleInterval: Int?
     private let logger: Logger
+    private let vault: SecretVault?
+    /// `tenderd` itself, which services that reference secrets start through.
+    private let execPath: String?
     private let sampler = UsageSampler()
     private var tail: Task<Void, Never>?
 
@@ -83,12 +88,16 @@ public actor Reconciler {
         environment: TenderEnvironment,
         store: StateStore,
         launchd: any LaunchdControlling,
+        vault: SecretVault? = nil,
+        execPath: String? = nil,
         throttleInterval: Int? = nil,
         logger: Logger = Logger(label: "tender.reconciler")
     ) {
         self.environment = environment
         self.store = store
         self.launchd = launchd
+        self.vault = vault
+        self.execPath = execPath
         self.throttleInterval = throttleInterval
         self.logger = logger
     }
@@ -136,10 +145,21 @@ public actor Reconciler {
         case .release(let sha12):
             executable = environment.releaseBinary(service: spec.name, sha12: sha12).path(percentEncoded: false)
         }
+        var programArguments = [executable] + spec.arguments
+        var variables = spec.environment
+        // The plist holds only templates. TENDER_SECRETS_REV changes whenever a referenced
+        // secret does, so the plist differs and the job is replaced, which restarts it.
+        if spec.usesSecretTemplates {
+            guard let execPath, let vault else { throw ReconcileApplyError.noExecWrapper(spec.name) }
+            programArguments = [execPath, "exec", "--service", spec.name, "--instance", String(instance),
+                                "--secrets", environment.serviceSecretsFile(service: spec.name).path(percentEncoded: false),
+                                "--"] + programArguments
+            variables["TENDER_SECRETS_REV"] = try vault.revisionTag(for: spec)
+        }
         return try PlistRenderer().render(
             label: environment.serviceLabel(service: spec.name, instance: instance),
-            programArguments: [executable] + spec.arguments,
-            environment: spec.environment,
+            programArguments: programArguments,
+            environment: variables,
             workingDirectory: spec.workingDirectory,
             stdoutPath: environment.stdoutLog(service: spec.name, instance: instance).path(percentEncoded: false),
             stderrPath: environment.stderrLog(service: spec.name, instance: instance).path(percentEncoded: false),
@@ -260,8 +280,23 @@ public actor Reconciler {
         let records = try store.instances()
 
         var report = ReconcileReport()
+        var broken = Set<String>()
+        if let vault {
+            let materializer = SecretMaterializer(environment: environment, vault: vault)
+            let secretive = services.values.filter { $0.spec.usesSecretTemplates }
+            for service in secretive {
+                do {
+                    try materializer.materialize(service.spec)
+                } catch {
+                    broken.insert(service.spec.name)
+                    report.failures.append(ReconcileFailure(label: environment.serviceLabel(service: service.spec.name, instance: 0),
+                                                            message: "can't write its secrets: \(error)"))
+                }
+            }
+            materializer.removeStale(keeping: Set(secretive.map(\.spec.name)))
+        }
         var desired: [Desired] = []
-        for record in records {
+        for record in records where !broken.contains(record.service) {
             do {
                 let plist = try services[record.service].map { try renderPlist(spec: $0.spec, instance: record.instance) }
                 desired.append(Desired(record: record, plist: record.desired == .running ? plist : nil))
