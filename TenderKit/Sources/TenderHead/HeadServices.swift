@@ -453,8 +453,8 @@ public final class HeadServices: Sendable {
         router.put("/v1/secrets/:scope/:name") { [self] request, context in
             await respond {
                 let set = try await decode(SecretSetRequest.self, from: request)
-                let scope = try context.parameters.require("scope")
-                let path = "\(scope)/\(try context.parameters.require("name"))"
+                let scope = try context.parameters.requireDecoded("scope")
+                let path = "\(scope)/\(try context.parameters.requireDecoded("name"))"
                 let query = request.uri.queryParameters
                 let nodes = try await secretTargets(scope: scope, node: query.get("node"), all: query.get("all") == "true")
                 for node in nodes {
@@ -465,8 +465,8 @@ public final class HeadServices: Sendable {
         }
         router.delete("/v1/secrets/:scope/:name") { [self] request, context in
             await respond {
-                let scope = try context.parameters.require("scope")
-                let path = "\(scope)/\(try context.parameters.require("name"))"
+                let scope = try context.parameters.requireDecoded("scope")
+                let path = "\(scope)/\(try context.parameters.requireDecoded("name"))"
                 let query = request.uri.queryParameters
                 let nodes = try await secretTargets(scope: scope, node: query.get("node"), all: query.get("all") == "true")
                 for node in nodes {
@@ -491,9 +491,9 @@ public final class HeadServices: Sendable {
         }
         router.post("/v1/processes/:name/:action") { [self] request, context in
             await respond {
-                let name = try context.parameters.require("name")
+                let name = try context.parameters.requireDecoded("name")
                 let node = request.uri.queryParameters.get("node")
-                switch try context.parameters.require("action") {
+                switch try context.parameters.requireDecoded("action") {
                 case "start": return try await command({ .startExisting(service: $0) }, service: name, node: node)
                 case "stop": return try await command({ .stop(service: $0) }, service: name, node: node)
                 case "restart": return try await command({ .restart(service: $0) }, service: name, node: node)
@@ -504,27 +504,27 @@ public final class HeadServices: Sendable {
         }
         router.delete("/v1/processes/:name") { [self] request, context in
             await respond {
-                try await command({ .delete(service: $0) }, service: try context.parameters.require("name"),
+                try await command({ .delete(service: $0) }, service: try context.parameters.requireDecoded("name"),
                                   node: request.uri.queryParameters.get("node"))
             }
         }
         router.get("/v1/releases/:service") { [self] request, context in
             await respond {
                 let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
-                let service = try context.parameters.require("service")
+                let service = try context.parameters.requireDecoded("service")
                 return try await translatingTransport(target) { try await agent(on: target).releases(service: service) }
             }
         }
         router.post("/v1/releases/:service/rollback") { [self] request, context in
             await respond {
-                let service = try context.parameters.require("service")
+                let service = try context.parameters.requireDecoded("service")
                 let rollback = try await decodeOptional(RollbackRequest.self, from: request) ?? RollbackRequest()
                 return try await self.rollback(service: service, to: rollback.to, node: request.uri.queryParameters.get("node"))
             }
         }
         router.delete("/v1/adopt/:label") { [self] request, context in
             await respond {
-                let label = try context.parameters.require("label")
+                let label = try context.parameters.requireDecoded("label")
                 let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
                 _ = try await translatingTransport(target) { try await agent(on: target).forgetAdopted(label: label) }
                 return await clusterStatus()
@@ -625,7 +625,7 @@ public final class HeadServices: Sendable {
         }
         router.post("/v1/nodes/:id/revoke") { [self] _, context in
             await respond {
-                try await revoke(node: NodeID(try context.parameters.require("id")))
+                try await revoke(node: NodeID(try context.parameters.requireDecoded("id")))
                 return NodeList(nodes: await state.summaries())
             }
         }
@@ -642,7 +642,7 @@ public final class HeadServices: Sendable {
         }
         router.delete("/v1/api-tokens/:name") { [self] _, context in
             await respond {
-                try store.removeAPIToken(name: try context.parameters.require("name"))
+                try store.removeAPIToken(name: try context.parameters.requireDecoded("name"))
                 return APITokenList(tokens: try store.apiTokens())
             }
         }

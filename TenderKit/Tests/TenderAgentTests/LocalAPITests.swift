@@ -23,10 +23,11 @@ actor MemoryLaunchd: LaunchdControlling {
 }
 
 /// Runs a daemon on a temp socket for the duration of `body`.
-private func withDaemon(_ body: (TenderClient, TenderEnvironment) async throws -> Void) async throws {
+private func withDaemon(launchd: MemoryLaunchd = MemoryLaunchd(),
+                        _ body: (TenderClient, TenderEnvironment) async throws -> Void) async throws {
     let env = try makeTestEnvironment()
     defer { try? FileManager.default.removeItem(at: env.root) }
-    let runtime = AgentRuntime(environment: env, launchd: MemoryLaunchd(), shutdownSignals: [])
+    let runtime = AgentRuntime(environment: env, launchd: launchd, shutdownSignals: [])
     let daemon = Task { try await runtime.run() }
     defer { daemon.cancel() }
 
@@ -88,6 +89,19 @@ private func apiErrorCode(_ call: () async throws -> ProcessList) async -> Strin
         return nil
     } catch {
         return (error as? TenderClientError)?.code
+    }
+}
+
+/// Homebrew labels contain `@`, which the client percent-encodes in the path.
+@Test func adoptedLabelsWithAtSignsWorkOverTheSocket() async throws {
+    let launchd = MemoryLaunchd()
+    let label = "homebrew.mxcl.postgresql@18"
+    try await launchd.bootstrap(plistURL: URL(filePath: "/tmp/\(label).plist"))
+    try await withDaemon(launchd: launchd) { client, _ async throws in
+        #expect(try await client.adopt(label: label).processes.map(\.service) == [label])
+        #expect(await apiErrorCode { try await client.delete(service: label) } == "adopted_job")
+        #expect(try await client.stop(service: label).processes.map(\.state) == [.stopped])
+        #expect(try await client.forget(label: label).processes.isEmpty)
     }
 }
 

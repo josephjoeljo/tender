@@ -31,8 +31,10 @@ Things about how Tender works that may not be what you'd assume.
 - **Stop doesn't survive login:** `tender stop` on an adopted job in
   `~/Library/LaunchAgents` lasts only until the next login. launchd reloads its plist,
   and Tender never edits it.
-- **Delete is refused:** use `tender adopt --forget <label>`, which stops managing the
+- **Delete is refused:** use `tender abandon <label>`, which stops managing the
   job and leaves it as it is.
+- **Labels with `@`:** Homebrew labels such as `homebrew.mxcl.postgresql@18` work in
+  every command; the API decodes percent-encoded path parameters.
 - **Logs:** Tender reads an adopted job's logs but never rotates them.
 
 ## Secrets
