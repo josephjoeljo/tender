@@ -81,6 +81,14 @@ public struct TenderEnvironment: Sendable {
         logDirectory(service: service).appending(path: "\(instance).err.log")
     }
 
+    /// Resolved secrets for `tenderd exec`, outside `run/` because the service's own
+    /// user has to read them and `run/` is root's alone.
+    public var serviceSecretsRoot: URL { root.appending(path: "env") }
+
+    public func serviceSecretsFile(service: String) -> URL {
+        serviceSecretsRoot.appending(path: "\(service)/secrets.json")
+    }
+
     public func releaseBinary(service: String, sha12: String) -> URL {
         releasesDirectory.appending(path: "\(service)/\(sha12)/\(service)")
     }
