@@ -11,8 +11,7 @@ import PackageDescription
 // TenderApp is a separate Xcode project (App/) on top of this package. It imports only TenderClient and TenderCore.
 //
 // Hummingbird and AsyncHTTPClient carry the local HTTP/JSON API (Unix socket).
-// Other networking deps (swift-nio-ssl, MCP swift-sdk, swift-prometheus) are
-// added in milestone 2. Head<->worker traffic uses Swift
+// swift-nio-ssl carries mTLS, and the MCP swift-sdk the MCP server (TenderMCP). Head<->worker traffic uses Swift
 // distributed actors over our own TenderActorSystem (no grpc-swift).
 
 let package = Package(
@@ -36,6 +35,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.5.0"),
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1"),
+        .package(url: "https://github.com/apple/swift-http-types.git", from: "1.0.0"),
     ],
     targets: [
         // MARK: 0 — Foundation
@@ -95,13 +96,17 @@ let package = Package(
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOHTTP1", package: "swift-nio"),
         ]),
-        .target(name: "TenderMCP", dependencies: ["TenderCore", "TenderClient"]),
+        .target(name: "TenderMCP", dependencies: [
+            "TenderCore", "TenderClient",
+            .product(name: "MCP", package: "swift-sdk"),
+        ]),
         .target(name: "TenderHead", dependencies: [
             "TenderCore", "TenderProtocol", "TenderActorSystem", "TenderAgent", "TenderLogStore", "TenderPKI",
             "TenderScheduler", "TenderMetrics", "TenderMCP",
             .product(name: "GRDB", package: "GRDB.swift"),
             .product(name: "Hummingbird", package: "hummingbird"),
             .product(name: "HummingbirdTLS", package: "hummingbird"),
+            .product(name: "HTTPTypes", package: "swift-http-types"),
             .product(name: "Crypto", package: "swift-crypto"),
             .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             .product(name: "NIOSSL", package: "swift-nio-ssl"),
@@ -116,7 +121,7 @@ let package = Package(
             .product(name: "Logging", package: "swift-log"),
         ]),
         .executableTarget(name: "tender", dependencies: [
-            "TenderCore", "TenderClient", "LaunchdKit",
+            "TenderCore", "TenderClient", "TenderMCP", "LaunchdKit",
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
         ]),
 
@@ -127,6 +132,11 @@ let package = Package(
         .testTarget(name: "TenderHeadTests", dependencies: [
             "TenderHead", "TenderAgent", "TenderClient", "TenderCore", "TenderPKI", "TenderActorSystem", "TenderProtocol", "LaunchdKit", "TenderLogStore",
             .product(name: "Crypto", package: "swift-crypto"),
+            .product(name: "AsyncHTTPClient", package: "async-http-client"),
+        ]),
+        .testTarget(name: "TenderMCPTests", dependencies: [
+            "TenderMCP", "TenderCore",
+            .product(name: "MCP", package: "swift-sdk"),
         ]),
         .testTarget(name: "TenderLogStoreTests", dependencies: ["TenderLogStore", "TenderCore"]),
         .testTarget(name: "TenderMetricsTests", dependencies: ["TenderMetrics", "TenderCore"]),

@@ -11,6 +11,7 @@ import TenderActorSystem
 import TenderAgent
 import TenderCore
 import TenderLogStore
+import TenderMCP
 import TenderMetrics
 import TenderPKI
 import TenderProtocol
@@ -60,6 +61,8 @@ public final class HeadServices: Sendable {
     public let logs: LogStore
     public let audit: AuditLog
     private let deploys = DeployCounter()
+    /// One instance, so that the write rate limit holds across requests.
+    let mcpTools = NIOLockedValueBox<TenderTools?>(nil)
     private let environment: TenderEnvironment
     private let secrets: any SecretStore
     private let authority: CertificateAuthority
@@ -213,25 +216,32 @@ public final class HeadServices: Sendable {
     }
 
     /// Which nodes a by-name command means: the one asked for, or everywhere the service runs.
-    private func targets(service: String, node: String?) async -> [NodeID] {
+    func targets(service: String, node: String?) async -> [NodeID] {
         if let node { return [NodeID(node)] }
         let running = await state.nodes(running: service)
         return running.isEmpty ? [options.nodeID] : running
     }
 
-    private func command(_ build: (String) -> AgentCommand, service: String, node: String?) async throws -> ProcessList {
+    func command(_ build: (String) -> AgentCommand, service: String, node: String?) async throws -> ProcessList {
         for target in await targets(service: service, node: node) {
             _ = try await translatingTransport(target) { try await agent(on: target).apply(build(service)) }
         }
         return await clusterStatus()
     }
 
-    private func translatingTransport<T: Sendable>(_ node: NodeID, _ call: () async throws -> T) async throws -> T {
+    func translatingTransport<T: Sendable>(_ node: NodeID, _ call: () async throws -> T) async throws -> T {
         do {
             return try await call()
         } catch let error as TransportError {
             throw NodeCallError(code: "node_unreachable", message: error.description, httpStatus: 503)
         }
+    }
+
+    func rollback(service: String, to sha12: String?, node: String?) async throws -> ProcessList {
+        for target in await targets(service: service, node: node) {
+            _ = try await translatingTransport(target) { try await agent(on: target).rollback(service: service, to: sha12) }
+        }
+        return await clusterStatus()
     }
 
     /// Each node fetches and verifies on its own, in parallel. One node failing doesn't
@@ -442,10 +452,7 @@ public final class HeadServices: Sendable {
             await respond {
                 let service = try context.parameters.require("service")
                 let rollback = try await decodeOptional(RollbackRequest.self, from: request) ?? RollbackRequest()
-                for target in await targets(service: service, node: request.uri.queryParameters.get("node")) {
-                    _ = try await translatingTransport(target) { try await agent(on: target).rollback(service: service, to: rollback.to) }
-                }
-                return await clusterStatus()
+                return try await self.rollback(service: service, to: rollback.to, node: request.uri.queryParameters.get("node"))
             }
         }
         router.delete("/v1/adopt/:label") { [self] request, context in
@@ -595,6 +602,7 @@ public final class HeadServices: Sendable {
             await respond { try await handleJoin(try await decode(JoinRequest.self, from: request)) }
         }
         installClusterRoutes(on: router)
+        installMCPRoute(on: router)
         return router
     }
 
@@ -634,7 +642,8 @@ struct BearerAuthMiddleware: RouterMiddleware {
         guard let token = try? store.apiToken(secret: presented) else {
             return errorResponse(NodeCallError(code: "unauthorized", message: "Unknown token.", httpStatus: 401))
         }
-        if request.method != .get, token.scope != .write {
+        // MCP is always POST; its tools check the scope one by one.
+        if request.method != .get, token.scope != .write, request.uri.path != TenderMCPRoute.path {
             return errorResponse(NodeCallError(code: "forbidden", message: "This token is read-only.", httpStatus: 403))
         }
         return try await next(request, context)

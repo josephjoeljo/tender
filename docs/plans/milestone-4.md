@@ -61,6 +61,15 @@ Out of scope: health checks, discovery, rolling deploys.
 - Agents flooding context with logs → strict limits, summaries, errors-first.
 - Destructive actions by agents → `write` scope opt-in, audit, rate limits.
 
-## Open questions
+## Decisions
 
-- Should write tools support a dry-run mode that returns the planned action?
+- Write tools take `dry_run`: it returns the planned action from the current
+  process list, changes nothing, and isn't rate limited.
+- The HTTP endpoint is stateless streamable HTTP (one JSON response per POST, no
+  sessions, GET → 405), with a fresh MCP server per request so that JSON-RPC ids
+  from different clients can't collide.
+- `tender mcp` runs the tools locally over `TenderClient` instead of forwarding MCP
+  frames: the head then checks the bridge's token and audits each forwarded call
+  like any CLI call.
+- MCP requests are audited per tool call (read tools too), not per HTTP request.
+- Per-node secrets from milestone 1.5 (§4–6) ship in this milestone.

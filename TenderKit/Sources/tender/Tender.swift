@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import TenderClient
 import TenderCore
+import TenderMCP
 
 @main
 struct Tender: AsyncParsableCommand {
@@ -9,7 +10,7 @@ struct Tender: AsyncParsableCommand {
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
         subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Gc.self, Version.self, Daemon.self,
-                      Deploy.self, Credentials.self, Token.self, Join.self, Leave.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
+                      Deploy.self, Credentials.self, Token.self, Join.self, Leave.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self, Mcp.self]
     )
 }
 
@@ -344,6 +345,27 @@ extension Tender {
             } else {
                 try await options.execute { try await $0.adopt(label: label, logPath: logPath, node: node) }
             }
+        }
+    }
+
+    /// stdout carries the MCP messages, so this command prints nothing else there.
+    struct Mcp: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "mcp",
+            abstract: "Serve Tender's MCP tools over stdio, for Claude Desktop, Claude Code and other local agents.",
+            discussion: """
+                Calls go to the same daemon or head as the other commands (see `tender context`), so the \
+                token's scope and the head's audit log apply. With a read-only token, pass --read-only so \
+                that agents aren't offered tools that will be refused.
+                """
+        )
+        @Flag(help: "Offer only the read tools.") var readOnly = false
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            let tools = TenderTools(backend: ClientBackend(client: try options.makeClient()))
+            try await TenderMCPServer.runStdio(
+                tools: tools, caller: MCPCaller(name: "tender-mcp", scope: readOnly ? .read : .write))
         }
     }
 

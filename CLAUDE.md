@@ -174,8 +174,7 @@ Production uses `/opt/tender`, `/Library/LaunchDaemons`, and the `system` domain
 Detailed plans: `docs/plans/milestone-{1..5}.md`.
 
 1. **Single-node agent** — pm2 parity on launchd: start/stop/restart/delete/list,
-   logs, adopt, binaries-folder watching. ← current (scaffold builds in Xcode;
-   plan: `docs/plans/milestone-1.md`)
+   logs, adopt, binaries-folder watching. Done.
 2. **Head + join** (binaries placed on workers by hand for now) — spike: `@Resolvable` across modules over loopback on our
    macOS version; then TenderActorSystem, node registration, mTLS, remote commands,
    cluster-wide `tender list`.
@@ -187,8 +186,11 @@ Detailed plans: `docs/plans/milestone-{1..5}.md`.
    Plus the TenderApp dashboard: nodes, processes, logs (search + follow), releases.
    Plus Prometheus `/metrics` on the head.
 4. **MCP server** — read tools (`list_nodes`, `list_processes`,
-   `describe_process`, `search_logs`) + mutating tools (`start/stop/restart_process`),
-   per-token scopes, audit log.
+   `describe_process`, `search_logs`, `get_metrics_summary`, `list_releases`) +
+   mutating tools (`start/stop/restart_process`, `deploy/rollback_release`, all with
+   `dry_run`), per-token scopes, per-tool audit, write rate limit; streamable HTTP at
+   `/mcp` on the head + `tender mcp` stdio bridge (docs/ops/mcp.md). Plus per-node
+   secrets (milestone 1.5 §4–6).
 5. **Later** — health checks → service discovery (registry + DNS) → rolling
    deploys (per-instance labels/ports, maxSurge/maxUnavailable) → load balancer.
 

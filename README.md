@@ -188,6 +188,16 @@ If a dev daemon is also running on the laptop, the CLI talks to that instead. Ad
 
 For the menu bar app, enter the same two values in Settings.
 
+### Let agents use it (MCP)
+
+The head serves MCP tools for listing nodes and processes, searching logs, and starting, stopping, restarting, deploying and rolling back. With a context saved as above, add it to Claude Code:
+
+```sh
+claude mcp add tender -- tender mcp --remote
+```
+
+Give each agent its own API token: its name is who the audit log shows, and a `read` token only gets the read tools. Claude Desktop setup, direct HTTP, and the response limits are in [`docs/ops/mcp.md`](docs/ops/mcp.md).
+
 ## Test
 
 Run all the tests from the command line:
@@ -213,4 +223,5 @@ docs/                design, plans, and operations guides
 - [`docs/behaviors.md`](docs/behaviors.md): behaviors worth remembering
 - [`docs/ops/cluster.md`](docs/ops/cluster.md): running a cluster
 - [`docs/ops/releases-and-logs.md`](docs/ops/releases-and-logs.md): releases, log offload, and metrics
+- [`docs/ops/mcp.md`](docs/ops/mcp.md): MCP tools for agents
 - [`docs/production-install.md`](docs/production-install.md): checking a production install
