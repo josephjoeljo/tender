@@ -35,6 +35,28 @@ Things about how Tender works that may not be what you'd assume.
   job and leaves it as it is.
 - **Logs:** Tender reads an adopted job's logs but never rotates them.
 
+## Secrets
+
+- **The plist never holds a value:** a service whose environment or arguments contain
+  `${secret:…}` (or `$${`) starts through `tenderd exec`, which fills the values in and
+  then becomes the program, keeping the same PID. Services without references keep a
+  plain plist.
+- **Where the values are at launch:** `tenderd` writes each such service's resolved
+  secrets to `env/<service>/secrets.json` under Tender's root (`/opt/tender/env/` in
+  production): `0400`, owned by the service's user, in a `0700` directory it owns. It's
+  outside `run/` because that directory is root's alone. It's what lets a service
+  restart while `tenderd` is down.
+- **Exit code 78:** a referenced secret that isn't set makes `tenderd exec` exit with
+  78 (`EX_CONFIG`) and name the secret on stderr. launchd keeps retrying, throttled.
+  `tender secret list` lists unset references under `missing`.
+- **Changing a secret restarts its users:** the plist carries `TENDER_SECRETS_REV`, one
+  revision number per reference. Setting or deleting a secret changes it, and the
+  reconciler replaces those jobs. Revisions never repeat, even after a delete.
+- **Upgrades:** service secrets are in the same Keychain as the node's keys, so
+  `tender daemon install --system` carries them across with `secrets-export`.
+- **A service named `shared`** can't have secrets of its own: `shared/NAME` always
+  means the shared scope.
+
 ## Orphans
 
 - Jobs with Tender's service prefix that aren't in the desired state are only reported

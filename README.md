@@ -102,6 +102,25 @@ To debug the daemon instead of installing it, add these launch arguments to the 
 
 `tender start` also takes `--instances`, `--env KEY=VALUE`, `--cwd`, `--user`, and `--node`. Services start in `/` unless you set `--cwd`. Run `tender help <command>` for the rest.
 
+### Secrets
+
+Keep passwords and keys out of `--env` values: those end up in the job's plist. Store a secret on the node instead, and reference it:
+
+```sh
+tender secret set api/MONGO_PASSWORD          # prompts; or pipe it in, or --from-file
+tender start api --env 'MONGO_URL=mongodb://app:${secret:MONGO_PASSWORD}@db/olympsis' -- ./api
+```
+
+`${secret:NAME}` is the service's own secret and `${secret:shared/NAME}` one any service can use. They work in `--env` values and in arguments, and `$${` stands for a literal `${`. Through a head, `tender secret set api/NAME` goes to every node running `api`; a shared secret needs `--node <n>` or `--all-nodes`.
+
+| Command | What it does |
+|---|---|
+| `tender secret set <service>/<NAME>` | Store a secret and restart the services that use it |
+| `tender secret list` | List secrets by name, node and the services using them. Values are never shown |
+| `tender secret delete <service>/<NAME>` | Delete a secret. Services still using it exit with code 78 |
+
+Values stay on the node: in the System Keychain in production, and in 0600 files in dev mode. The head passes them on and keeps nothing. A Mac that dies takes its secrets with it, so keep your own copy, for example a script that pipes each one into `tender secret set`.
+
 ### Ship a new binary
 
 Tender watches a folder for each service: `/opt/tender/bin/<service>/` in production and `~/Library/Application Support/Tender/bin/<service>/` in dev mode. Drop a new binary there, and Tender copies it to a new release. It uses `<service>/<service>` if that file exists, and otherwise the newest file in the folder.
