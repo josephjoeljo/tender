@@ -40,6 +40,10 @@ Things about how Tender works that may not be what you'd assume.
   returns environments as stored, which can include literal credentials.
 - **Removing `log_path`** from an adopted job re-adopts it with the job's own log paths,
   which needs the job to be loaded.
+- **Setting `log_path` takes the local socket:** like `tender adopt --log-path`, it makes
+  the daemon (root) read that file. Through the head with `--remote`, a file may keep an
+  adopted job's current `log_path` (so an export applies) but not set a new one: that's a
+  403. Run `tender apply` on the job's node instead.
 - **5c keys:** `health`, `rollout`, `replicas` and `placement` are rejected with "not
   supported yet" rather than ignored.
 

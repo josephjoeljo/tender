@@ -586,7 +586,11 @@ public final class HeadServices: Sendable {
             await respond { await clusterSpecs(node: request.uri.queryParameters.get("node")) }
         }
         router.post("/v1/apply") { [self] request, _ in
-            await respond { try await apply(try await decode(ApplyRequest.self, from: request, limit: 16 << 20)) }
+            await respond {
+                let body = try await decode(ApplyRequest.self, from: request, limit: 16 << 20)
+                if remote { try await refuseNewLogPaths(in: body) }
+                return try await apply(body)
+            }
         }
         router.get("/v1/nodes") { [self] _, _ in
             await respond { NodeList(nodes: await state.summaries()) }
@@ -713,6 +717,24 @@ public final class HeadServices: Sendable {
                 try await writer.finish(nil)
             }
         )
+    }
+
+    /// An adopted job's `log_path` makes the root daemon read a file of the caller's choosing,
+    /// which is why `/v1/adopt` is socket only. Remotely, a file may keep the paths a job
+    /// already has, so an export still applies, but not set new ones.
+    private func refuseNewLogPaths(in request: ApplyRequest) async throws {
+        let wanted = request.items.compactMap { item -> (label: String, node: NodeID, path: String)? in
+            guard case .adopted(let job) = item, let path = job.logPath else { return nil }
+            return (job.label, job.node ?? options.nodeID, path)
+        }
+        guard !wanted.isEmpty else { return }
+        let current = await clusterSpecs(node: nil)
+        for job in wanted {
+            let existing = current.nodes.first { $0.node == job.node }?.adopted.first { $0.label == job.label }
+            guard existing?.logPath == job.path else {
+                throw NodeCallError(code: "forbidden", message: "Adopted '\(job.label)': log_path can only be set over the local socket. Run `tender apply` on \(job.node) itself, or leave log_path out.", httpStatus: 403)
+            }
+        }
     }
 
     /// Administration stays on the socket: file permissions are its authentication.

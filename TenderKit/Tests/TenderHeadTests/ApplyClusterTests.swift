@@ -119,6 +119,28 @@ private func actions(_ response: ApplyResponse) -> [String] {
     }
 }
 
+/// A `log_path` makes the root daemon read that file, like `tender adopt --log-path`,
+/// which is socket only. A remote file may keep a job's path but not set a new one.
+@Test func aRemoteApplyCantPointAnAdoptedJobAtANewLogFile() async throws {
+    try await withCluster { head, worker async throws in
+        try await worker.launchd.bootstrap(plistURL: URL(filePath: "/tmp/homebrew.mxcl.postgresql@18.plist"))
+        let writer = try await head.client.createAPIToken(name: "writer", scope: .write)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let remote = TenderClient(head: address, caPEM: try await ClientPinning.fetchCA(head: address, credential: writer.token),
+                                  token: writer.token)
+        let adopted = "kind: Adopted\nlabel: homebrew.mxcl.postgresql@18\nnode: worker\nlog_path: /etc/master.passwd\n"
+        do {
+            _ = try await remote.apply(try request(adopted))
+            Issue.record("a remote token chose a file for the daemon to read")
+        } catch let error as TenderClientError {
+            #expect(error.code == "forbidden")
+        }
+        #expect(try await head.client.apply(try request(adopted)).succeeded)
+        let again = try await remote.apply(try request(adopted))
+        #expect(actions(again) == ["unchanged homebrew.mxcl.postgresql@18@worker"])
+    }
+}
+
 /// The router drops empty path segments, so every spelling of `/v1/specs` reaches the
 /// handler and has to meet the same check.
 @Test func readingSpecsRemotelyTakesAWriteTokenHoweverThePathIsSpelled() async throws {
