@@ -26,6 +26,9 @@ distributed actor TestAgent: NodeAgentProtocol {
     distributed func adopt(_ request: AdoptRequest) async throws -> ProcessList { ProcessList(processes: []) }
     distributed func forgetAdopted(label: String) async throws -> ProcessList { ProcessList(processes: []) }
     distributed func deploy(service: String, version: String) async throws -> String { version }
+    distributed func setSecret(_ name: String, value: Data) async throws {}
+    distributed func deleteSecret(_ name: String) async throws {}
+    distributed func listSecrets() async throws -> SecretList { SecretList(secrets: []) }
 }
 
 distributed actor TestRegistry: HeadRegistryProtocol {

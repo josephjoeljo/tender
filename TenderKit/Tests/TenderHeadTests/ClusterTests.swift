@@ -612,6 +612,40 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     }
 }
 
+/// Adoption is socket-only, so the job is adopted on the worker itself. Abandoning
+/// it through the head without `--node` must reach the worker, not the head's own node.
+@Test func abandonThroughTheHeadReachesTheNodeThatAdoptedIt() async throws {
+    try await withCluster { head, worker async throws in
+        let label = "homebrew.mxcl.postgresql@18"
+        try await worker.launchd.bootstrap(plistURL: URL(filePath: "/tmp/\(label).plist"))
+        _ = try await worker.client.adopt(label: label)
+        // The head finds the node from heartbeats, not from a live list.
+        let reported = try await eventually { () -> Bool? in
+            try await head.client.nodes().nodes.first { $0.info.id == NodeID("worker") }?.instanceCount == 1 ? true : nil
+        }
+        #expect(reported == true)
+
+        let list = try await head.client.forget(label: label)
+        #expect(!list.processes.contains { $0.service == label })
+        #expect(try await worker.client.list().processes.isEmpty)
+        #expect(await worker.launchd.loaded == [label], "abandon must leave the job running")
+    }
+}
+
+@Test func abandoningAnUnknownLabelIsNotAdopted() async throws {
+    try await withCluster { head, _ async throws in
+        for node in [nil, "worker"] {
+            do {
+                _ = try await head.client.forget(label: "no.such.job", node: node)
+                Issue.record("expected not_adopted")
+            } catch let error as TenderClientError {
+                #expect(error.code == "not_adopted")
+                #expect(error.description.contains("no.such.job"))
+            }
+        }
+    }
+}
+
 @Test func systemJobsCantBeAdopted() async throws {
     let env = try makeEnvironment()
     defer { try? FileManager.default.removeItem(at: env.root) }
@@ -782,6 +816,48 @@ private struct FakeSource: ReleaseSource {
             Issue.record("credentials must not be settable remotely")
         } catch let error as TenderClientError {
             #expect(error.code == "http_404")
+        }
+    }
+}
+
+@Test func secretsGoThroughTheHeadToTheNodeThatRunsTheService() async throws {
+    try await withCluster { head, worker async throws in
+        var spec = sleeper
+        spec.node = NodeID("worker")
+        spec.environment = ["PASS": "${secret:PASS}"]
+        _ = try await head.client.start(spec)
+        let placed = try await eventually { () -> Bool? in
+            try await head.client.nodes().nodes.first { $0.info.id == NodeID("worker") }?.instanceCount == 1 ? true : nil
+        }
+        #expect(placed == true)
+
+        // Without a node, a service's secret goes where the service runs.
+        let set = try await head.client.setSecret("api/PASS", value: Data("s3cret".utf8))
+        #expect(set.secrets.map(\.node) == [NodeID("worker")])
+        #expect(try await worker.client.secrets().secrets.map(\.name) == ["api/PASS"])
+        #expect(try await head.client.secrets().secrets.map(\.usedBy) == [["api"]])
+
+        do {
+            _ = try await head.client.setSecret("shared/KEY", value: Data("k".utf8))
+            Issue.record("a shared secret needs a node")
+        } catch let error as TenderClientError {
+            #expect(error.code == "node_required")
+        }
+        let everywhere = try await head.client.setSecret("shared/KEY", value: Data("k".utf8), allNodes: true)
+        #expect(Set(everywhere.secrets.filter { $0.name == "shared/KEY" }.map(\.node)) == [NodeID("head"), NodeID("worker")])
+        _ = try await head.client.deleteSecret("api/PASS", node: "worker")
+        #expect(try await worker.client.secrets().secrets.map(\.name) == ["shared/KEY"])
+
+        let reader = try await head.client.createAPIToken(name: "r", scope: .read)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let remote = TenderClient(head: address, caPEM: try await ClientPinning.fetchCA(head: address, credential: reader.token),
+                                  token: reader.token)
+        #expect(try await remote.secrets().secrets.count == 2)
+        do {
+            _ = try await remote.setSecret("api/PASS", value: Data("x".utf8), node: "worker")
+            Issue.record("a read token must not set secrets")
+        } catch let error as TenderClientError {
+            #expect(error.code == "forbidden")
         }
     }
 }

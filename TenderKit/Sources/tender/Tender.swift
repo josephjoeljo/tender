@@ -8,7 +8,7 @@ struct Tender: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
-        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Gc.self, Version.self, Daemon.self,
+        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Abandon.self, Secret.self, Gc.self, Version.self, Daemon.self,
                       Deploy.self, Credentials.self, Token.self, Join.self, Leave.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
     )
 }
@@ -174,7 +174,10 @@ extension Tender {
     }
 
     struct Delete: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Stop a service and remove its definition.")
+        static let configuration = CommandConfiguration(
+            abstract: "Stop a service and remove its definition.",
+            discussion: "Its secrets (<service>/NAME) stay, for a later start under the same name. Remove them with `tender secret delete`."
+        )
         @Argument(help: "Service name.") var name: String
         @Option(help: "Only on this node. Defaults to every node running it.") var node: String?
         @OptionGroup var options: CommonOptions
@@ -326,11 +329,11 @@ extension Tender {
     struct Adopt: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Manage an existing launchd job without rewriting its plist.",
-            discussion: "Control it with `tender stop|start|restart <label>` and read it with `tender logs <label>`."
+            discussion: "Control it with `tender stop|start|restart <label>`, read it with `tender logs <label>`, and stop managing it with `tender abandon <label>`."
         )
         @Argument(help: "launchd label, for example homebrew.mxcl.mongodb-community.") var label: String
         @Option(help: "Log file to use instead of the job's StandardOutPath and StandardErrorPath.") var logPath: String?
-        @Flag(help: "Stop managing the job. The job itself isn't touched.") var forget = false
+        @Flag(help: .hidden) var forget = false
         @Option(help: "Node the job runs on. Defaults to the node you're talking to.") var node: String?
         @OptionGroup var options: CommonOptions
 
@@ -344,6 +347,22 @@ extension Tender {
             } else {
                 try await options.execute { try await $0.adopt(label: label, logPath: logPath, node: node) }
             }
+        }
+    }
+
+    /// The opposite of `adopt`. Kept apart from `delete`, which removes a service
+    /// Tender created: an adopted job belongs to someone else and is left running.
+    struct Abandon: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Stop managing an adopted launchd job.",
+            discussion: "The job, its plist and its logs are left exactly as they are. Adopt it again any time."
+        )
+        @Argument(help: "launchd label of the adopted job.") var label: String
+        @Option(help: "Only on this node. Defaults to every node that adopted it.") var node: String?
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            try await options.execute { try await $0.forget(label: label, node: node) }
         }
     }
 

@@ -61,6 +61,12 @@ public protocol NodeAgentProtocol: DistributedActor where ActorSystem: Distribut
     distributed func forgetAdopted(label: String) async throws -> ProcessList
     /// Fetches a release from this node's source, verifies it, and returns its sha12.
     distributed func deploy(service: String, version: String) async throws -> String
+    /// `name` is `<service>/<NAME>` or `shared/<NAME>`. The value is stored on this node
+    /// only; the head relays it and keeps nothing.
+    distributed func setSecret(_ name: String, value: Data) async throws
+    distributed func deleteSecret(_ name: String) async throws
+    /// Names, revisions and users. Never values.
+    distributed func listSecrets() async throws -> SecretList
 }
 
 /// What a worker tells the head.

@@ -61,6 +61,11 @@ Out of scope: health checks, discovery, rolling deploys.
 - Agents flooding context with logs → strict limits, summaries, errors-first.
 - Destructive actions by agents → `write` scope opt-in, audit, rate limits.
 
-## Open questions
+## Decisions
 
-- Should write tools support a dry-run mode that returns the planned action?
+- Shelved (November 2026). Agents run the `tender` CLI through a Claude Code skill
+  instead: no extra dependency, and API token scopes are still enforced by the
+  head. Revisit when an agent without a shell (Claude Desktop, a hosted agent)
+  needs to operate the cluster, or when limits must be enforced server-side
+  rather than asked for in the skill.
+- Per-node secrets from milestone 1.5 (§4–6) ship in this milestone instead.

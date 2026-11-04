@@ -21,6 +21,13 @@ public struct InstanceRecord: Sendable, Equatable {
     public var desired: DesiredState
 }
 
+public struct SecretRecord: Sendable, Equatable {
+    public var item: String
+    public var revision: Int
+    public var updatedAt: Date
+    public var deleted: Bool
+}
+
 /// Desired state of this node, in `state.db` (WAL). Source of truth for the node.
 public struct StateStore: Sendable {
     let pool: DatabasePool
@@ -79,6 +86,18 @@ public struct StateStore: Sendable {
                     service TEXT PRIMARY KEY,
                     size INTEGER NOT NULL,
                     modified REAL NOT NULL
+                );
+                """)
+        }
+        // Names and revisions only: values live in the node's SecretStore. A deleted
+        // secret keeps its row as a tombstone, so that revisions never repeat.
+        migrator.registerMigration("v3-secrets") { db in
+            try db.execute(sql: """
+                CREATE TABLE secrets (
+                    item TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL,
+                    updated_at REAL NOT NULL,
+                    deleted INTEGER NOT NULL DEFAULT 0
                 );
                 """)
         }
@@ -231,9 +250,12 @@ public struct StateStore: Sendable {
         }
     }
 
-    public func removeAdopted(label: String) throws {
+    /// Returns whether there was a record to remove.
+    @discardableResult
+    public func removeAdopted(label: String) throws -> Bool {
         try pool.write { db in
             try db.execute(sql: "DELETE FROM adopted_jobs WHERE label = ?", arguments: [label])
+            return db.changesCount > 0
         }
     }
 
@@ -247,6 +269,31 @@ public struct StateStore: Sendable {
         try pool.read { db in
             try Row.fetchOne(db, sql: "SELECT * FROM adopted_jobs WHERE label = ?", arguments: [label])
                 .map(Self.adoptedJob)
+        }
+    }
+
+    /// Records a change to a secret and returns its new revision, which is higher than
+    /// any revision any secret on this node ever had.
+    @discardableResult
+    public func recordSecretChange(item: String, deleted: Bool = false) throws -> Int {
+        try pool.write { db in
+            let revision = (try Int.fetchOne(db, sql: "SELECT MAX(revision) FROM secrets") ?? 0) + 1
+            try db.execute(sql: """
+                INSERT INTO secrets (item, revision, updated_at, deleted) VALUES (?, ?, ?, ?)
+                ON CONFLICT (item) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at,
+                    deleted = excluded.deleted
+                """, arguments: [item, revision, Date().timeIntervalSince1970, deleted])
+            return revision
+        }
+    }
+
+    /// Every secret ever set here, deleted ones included.
+    public func secretRecords() throws -> [SecretRecord] {
+        try pool.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM secrets ORDER BY item").map { row in
+                SecretRecord(item: row["item"], revision: row["revision"],
+                             updatedAt: Date(timeIntervalSince1970: row["updated_at"]), deleted: row["deleted"])
+            }
         }
     }
 

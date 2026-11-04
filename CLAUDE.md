@@ -175,10 +175,9 @@ Detailed plans: `docs/plans/milestone-{1,1.5,2,3,4,5}.md`.
 
 1. **Single-node agent** — pm2 parity on launchd: start/stop/restart/delete/list,
    logs, adopt, binaries-folder watching. Done.
-1.5. **Service files + secrets** (lands after 3, before 4) — `tender apply -f
-   services.yaml` with diff/dry-run/prune, `env_file`, `tender export`; per-node
-   secrets (`tender secret set`, `${secret:NAME}`) delivered by a `tenderd exec`
-   wrapper, never in plists; GCP Secret Manager as a later source. ← current
+1.5. **Service files + secrets** — `tender apply -f services.yaml` with
+   diff/dry-run/prune, `env_file`, `tender export`; GCP Secret Manager as a later
+   secrets source. Per-node secrets (§4–6) shipped with milestone 4. ← current
    (plan: `docs/plans/milestone-1.5.md`)
 2. **Head + join** (binaries placed on workers by hand for now) — spike: `@Resolvable` across modules over loopback on our
    macOS version; then TenderActorSystem, node registration, mTLS, remote commands,
@@ -190,9 +189,11 @@ Detailed plans: `docs/plans/milestone-{1,1.5,2,3,4,5}.md`.
    fetching from GCP Artifact Registry / GCS / S3.
    Plus the TenderApp dashboard: nodes, processes, logs (search + follow), releases.
    Plus Prometheus `/metrics` on the head.
-4. **MCP server** — read tools (`list_nodes`, `list_processes`,
-   `describe_process`, `search_logs`) + mutating tools (`start/stop/restart_process`),
-   per-token scopes, audit log.
+4. **Per-node secrets + agent skill** — milestone 1.5 §4–6 (`tender secret`,
+   `${secret:NAME}`, `tenderd exec`). The MCP server is shelved: agents use the
+   `tender` CLI through a Claude Code skill (`~/.claude/skills/tender`), with API
+   token scopes enforced by the head. The MCP plan stays in
+   `docs/plans/milestone-4.md` for when a shell-less agent needs it.
 5. **Later** — health checks → service discovery (registry + DNS) → rolling
    deploys (per-instance labels/ports, maxSurge/maxUnavailable) → load balancer.
 

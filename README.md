@@ -95,12 +95,34 @@ To debug the daemon instead of installing it, add these launch arguments to the 
 | `tender list` | List managed processes |
 | `tender logs <name> -f` | Follow a service's logs |
 | `tender adopt <label>` | Manage an existing launchd job, such as Homebrew's `mongod` |
+| `tender abandon <label>` | Stop managing an adopted job; the job keeps running untouched |
 | `tender releases <name>` | List a service's releases |
 | `tender rollback <name>` | Go back to an earlier release |
 | `tender deploy <name> --release <version>` | Fetch a release and restart on it. Needs a [release source](docs/ops/releases-and-logs.md) |
 | `tender nodes` | List the cluster's nodes |
 
 `tender start` also takes `--instances`, `--env KEY=VALUE`, `--cwd`, `--user`, and `--node`. Services start in `/` unless you set `--cwd`. Run `tender help <command>` for the rest.
+
+### Secrets
+
+Keep passwords and keys out of `--env` values: those end up in the job's plist. Store a secret on the node instead, and reference it:
+
+```sh
+tender secret set api/MONGO_PASSWORD          # prompts; or pipe it in, or --from-file
+tender start api --env 'MONGO_URL=mongodb://app:${secret:MONGO_PASSWORD}@db/olympsis' -- ./api
+```
+
+`${secret:NAME}` is the service's own secret and `${secret:shared/NAME}` one any service can use. They work in `--env` values and in arguments, and `$${` stands for a literal `${`. Through a head, `tender secret set api/NAME` goes to every node running `api`; a shared secret needs `--node <n>` or `--all-nodes`.
+
+| Command | What it does |
+|---|---|
+| `tender secret set <service>/<NAME>` | Store a secret and restart the services that use it |
+| `tender secret list` | List secrets by name, node and the services using them. Values are never shown |
+| `tender secret delete <service>/<NAME>` | Delete a secret. Services still using it exit with code 78 |
+
+Values stay on the node: in the System Keychain in production, and in 0600 files in dev mode. The head passes them on and keeps nothing. A Mac that dies takes its secrets with it, so keep your own copy, for example a script that pipes each one into `tender secret set`.
+
+Secrets are isolated by user, not by service. At launch a service reads them from a file owned by its user, so services sharing a user (by default all of them, as `_tender`) can read each other's secrets and environments: start each service that holds secrets with its own `--user`. A `write`-scoped API token can start a process that prints any secret, so treat write tokens as secrets too. `tender delete <service>` keeps the service's `<service>/*` secrets; remove them with `tender secret delete`.
 
 ### Ship a new binary
 

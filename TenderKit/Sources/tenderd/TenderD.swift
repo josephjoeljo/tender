@@ -10,7 +10,7 @@ struct TenderD: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tenderd",
         abstract: "Tender daemon: runs as the head node or a worker.",
-        subcommands: [Run.self, SecretsExport.self, SecretsImport.self, CAImport.self],
+        subcommands: [Run.self, Exec.self, SecretsExport.self, SecretsImport.self, CAImport.self],
         defaultSubcommand: Run.self
     )
 }
@@ -94,6 +94,24 @@ struct Run: AsyncParsableCommand {
     }
 }
 
+/// What a service that references secrets runs as: launchd starts this, and it becomes
+/// the program. It runs as the service's user and reads the service's file, which any
+/// service with the same user could read too: isolation is per user, not per service.
+struct Exec: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Start a program with its secrets filled in. Written into plists by tenderd.",
+        shouldDisplay: false
+    )
+    @Option(help: "Service name, for error messages.") var service: String
+    @Option(help: "Instance number, for error messages.") var instance = 0
+    @Option(help: "The service's secrets file.") var secrets: String
+    @Argument(parsing: .postTerminator, help: "Program and arguments, after `--`.") var command: [String] = []
+
+    func run() throws {
+        SecretExec.run(service: "\(service).\(instance)", secretsFile: URL(filePath: secrets), command: command)
+    }
+}
+
 /// Keychain items trust the binary that created them, so `tender daemon install
 /// --system` has the old binary export them, and the new one import them.
 struct SecretsExport: AsyncParsableCommand {
@@ -102,9 +120,12 @@ struct SecretsExport: AsyncParsableCommand {
     @OptionGroup var environmentOptions: EnvironmentOptions
 
     func run() async throws {
-        let store = environmentOptions.environment.makeSecretStore()
+        let environment = environmentOptions.environment
+        let store = environment.makeSecretStore()
         var values: [String: Data] = [:]
-        for name in ClusterSecrets.all {
+        // Services' secrets too: they live in the same Keychain, under the same binary.
+        let services = try SecretVault(secrets: store, store: StateStore(environment: environment)).live()
+        for name in ClusterSecrets.all + services.map(\.name.itemName) {
             if let value = try store.read(name) { values[name] = value }
         }
         guard FileManager.default.createFile(atPath: to, contents: nil, attributes: [.posixPermissions: 0o600]) else {

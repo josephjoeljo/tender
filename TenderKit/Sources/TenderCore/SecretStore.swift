@@ -106,7 +106,10 @@ public struct KeychainSecretStore: SecretStore {
 
     @available(macOS, deprecated: 10.10)
     public func write(_ name: String, _ value: Data) throws {
-        try delete(name)
+        // In place, so that a failure leaves the old value rather than none.
+        let updated = SecItemUpdate(try baseQuery(name) as CFDictionary, [kSecValueData as String: value] as CFDictionary)
+        if updated == errSecSuccess { return }
+        guard updated == errSecItemNotFound else { throw SecretStoreError.keychain(operation: "write", status: updated) }
         let attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

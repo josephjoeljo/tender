@@ -22,6 +22,61 @@ struct ProcessController: Sendable {
     var identities: ClusterIdentityStore? = nil
     var cloud: CloudServices? = nil
     var releaseSourceOverride: (any ReleaseSource)? = nil
+    var vault: SecretVault? = nil
+
+    // MARK: Secrets
+
+    private func requireVault() throws -> SecretVault {
+        guard let vault else {
+            throw APIFailure(status: .notImplemented, code: "no_secrets", message: "This daemon has no secret store.")
+        }
+        return vault
+    }
+
+    private func secretName(_ path: String) throws -> SecretName {
+        guard let name = SecretName(path: path) else {
+            throw APIFailure(status: .badRequest, code: "invalid_secret_name",
+                             message: "'\(path)' isn't <service>/<NAME> or shared/<NAME>. NAME uses letters, digits and '_'.")
+        }
+        return name
+    }
+
+    /// Restarts every service that references it, through the plist's revision.
+    func setSecret(_ path: String, value: Data) async throws -> SecretList {
+        do {
+            try requireVault().set(try secretName(path), value: value)
+        } catch let error as SecretVaultError {
+            throw APIFailure(status: .badRequest, code: "invalid_secret_value", message: error.description)
+        }
+        try await reconciler.reconcile()
+        return try listSecrets()
+    }
+
+    /// Idempotent. Services that reference it restart and then exit with 78 until it's set again.
+    func deleteSecret(_ path: String) async throws -> SecretList {
+        try requireVault().delete(try secretName(path))
+        try await reconciler.reconcile()
+        return try listSecrets()
+    }
+
+    func listSecrets() throws -> SecretList {
+        let vault = try requireVault()
+        let node = try identities?.config()?.nodeID ?? NodeID(defaultNodeID())
+        let specs = try store.services().map(\.spec).filter(\.usesSecretTemplates)
+        var users: [String: [String]] = [:]
+        var missing: [String] = []
+        for spec in specs {
+            for ref in (try? spec.secretRefs()) ?? [] {
+                users[ref.secretName(service: spec.name).description, default: []].append(spec.name)
+            }
+            missing += try vault.missing(for: spec).map { "\(spec.name): \($0)" }
+        }
+        let secrets = try vault.live().map { item in
+            SecretInfo(name: item.name.description, scope: item.name.scope, node: node, updatedAt: item.record.updatedAt,
+                       revision: item.record.revision, usedBy: users[item.name.description] ?? [])
+        }
+        return SecretList(secrets: secrets, missing: missing)
+    }
 
     func list() async throws -> ProcessList {
         var list = try await reconciler.status()
@@ -61,9 +116,14 @@ struct ProcessController: Sendable {
         return try await list()
     }
 
-    /// Idempotent. Leaves the launchd job exactly as it is.
+    /// Leaves the launchd job exactly as it is. A label that isn't adopted is a 404,
+    /// so that a typo or the wrong `--node` doesn't look like it worked.
     func forget(label: String) async throws -> ProcessList {
-        try adoption.forget(label: label)
+        do {
+            try adoption.forget(label: label)
+        } catch let error as AdoptionError {
+            throw APIFailure(status: .notFound, code: "not_adopted", message: error.description)
+        }
         return try await list()
     }
 
@@ -103,7 +163,7 @@ struct ProcessController: Sendable {
     func delete(service: String) async throws -> ProcessList {
         if try store.adopted(label: service) != nil {
             throw APIFailure(status: .conflict, code: "adopted_job",
-                             message: "'\(service)' is adopted. Use `tender adopt --forget` to stop managing it.")
+                             message: "'\(service)' is adopted. Use `tender abandon \(service)` to stop managing it.")
         }
         try store.deleteService(service)
         return try await finish(try await reconciler.reconcile(), service: service)
@@ -239,9 +299,22 @@ struct ProcessController: Sendable {
             throw APIFailure(status: .badRequest, code: "invalid_name",
                              message: "Service names may only use letters, digits, '-' and '_', up to 64 characters.")
         }
+        // `shared/NAME` names a shared secret, so this service's own secrets couldn't be named.
+        guard spec.name != "shared" else {
+            throw APIFailure(status: .badRequest, code: "invalid_name",
+                             message: "'shared' is reserved for shared secrets; pick another service name.")
+        }
         guard (1...64).contains(spec.instances) else {
             throw APIFailure(status: .badRequest, code: "invalid_instances",
                              message: "instances must be between 1 and 64.")
+        }
+        do {
+            _ = try spec.secretRefs()
+        } catch let error as SecretTemplateError {
+            throw APIFailure(status: .badRequest, code: "invalid_secret_ref", message: error.description)
+        }
+        if spec.usesSecretTemplates, vault == nil {
+            throw APIFailure(status: .notImplemented, code: "no_secrets", message: "This daemon has no secret store.")
         }
         // By uid, since any account name can be an alias for uid 0.
         if spec.user == "root" || getpwnam(spec.user)?.pointee.pw_uid == 0 {
@@ -275,7 +348,7 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
         do {
             return try logsResponse(
                 request: request,
-                name: try context.parameters.require("name"),
+                name: try context.parameters.requireDecoded("name"),
                 controller: controller
             )
         } catch let failure as APIFailure {
@@ -354,8 +427,8 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
     }
     router.post("/v1/processes/:name/:action") { _, context in
         await respond {
-            let name = try context.parameters.require("name")
-            switch try context.parameters.require("action") {
+            let name = try context.parameters.requireDecoded("name")
+            switch try context.parameters.requireDecoded("action") {
             case "start": return try await controller.start(service: name)
             case "stop": return try await controller.stop(service: name)
             case "restart": return try await controller.restart(service: name)
@@ -365,15 +438,34 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
         }
     }
     router.delete("/v1/processes/:name") { _, context in
-        await respond { try await controller.delete(service: try context.parameters.require("name")) }
+        await respond { try await controller.delete(service: try context.parameters.requireDecoded("name")) }
     }
 
     router.post("/v1/gc") { _, _ in
         await respond { try await controller.collectGarbage() }
     }
 
+    // Values go in, never out: no route returns one.
+    router.get("/v1/secrets") { _, _ in
+        await respond { try controller.listSecrets() }
+    }
+    router.put("/v1/secrets/:scope/:name") { request, context in
+        await respond {
+            var request = request
+            let body = try await request.collectBody(upTo: 1 << 20)
+            let set = try decodeBody(SecretSetRequest.self, Data(body.readableBytesView))
+            let path = "\(try context.parameters.requireDecoded("scope"))/\(try context.parameters.requireDecoded("name"))"
+            return try await controller.setSecret(path, value: set.value)
+        }
+    }
+    router.delete("/v1/secrets/:scope/:name") { _, context in
+        await respond {
+            try await controller.deleteSecret("\(try context.parameters.requireDecoded("scope"))/\(try context.parameters.requireDecoded("name"))")
+        }
+    }
+
     router.get("/v1/releases/:service") { _, context in
-        await respond { try await controller.releases.list(service: try context.parameters.require("service")) }
+        await respond { try await controller.releases.list(service: try context.parameters.requireDecoded("service")) }
     }
     router.post("/v1/releases/:service/rollback") { request, context in
         await respond {
@@ -382,7 +474,7 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
             let rollback = body.readableBytes == 0
                 ? RollbackRequest()
                 : try decodeBody(RollbackRequest.self, Data(body.readableBytesView))
-            return try await controller.rollback(service: try context.parameters.require("service"), to: rollback.to)
+            return try await controller.rollback(service: try context.parameters.requireDecoded("service"), to: rollback.to)
         }
     }
 
@@ -394,7 +486,7 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
         }
     }
     router.delete("/v1/adopt/:label") { _, context in
-        await respond { try await controller.forget(label: try context.parameters.require("label")) }
+        await respond { try await controller.forget(label: try context.parameters.requireDecoded("label")) }
     }
 
     return router
