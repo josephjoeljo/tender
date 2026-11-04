@@ -102,6 +102,8 @@ public struct GoogleCredentials: Sendable {
 /// Exchanges a key for access tokens and caches them until shortly before they expire.
 public actor GoogleTokenProvider {
     private let credentials: GoogleCredentials
+    /// The service account, for error messages that say whom to grant a role.
+    public nonisolated var account: String { credentials.clientEmail }
     private let fetcher: any HTTPFetching
     private var cached: [String: (token: String, expires: Date)] = [:]
 
@@ -159,12 +161,21 @@ public struct CloudConfig: Codable, Sendable, Equatable {
         }
     }
 
+    /// GCP Secret Manager, for `${secret:gcp:…}` references.
+    public struct Secrets: Codable, Sendable, Equatable {
+        /// The project of references that name none, as in `${secret:gcp:NAME}`.
+        public var project: String?
+        public init(project: String? = nil) { self.project = project }
+    }
+
     public var offload: Offload?
     public var releases: Releases?
+    public var secrets: Secrets?
 
-    public init(offload: Offload? = nil, releases: Releases? = nil) {
+    public init(offload: Offload? = nil, releases: Releases? = nil, secrets: Secrets? = nil) {
         self.offload = offload
         self.releases = releases
+        self.secrets = secrets
     }
 
     public static func load(environment: TenderEnvironment) -> CloudConfig {
@@ -303,6 +314,102 @@ public struct ArtifactRegistryReleaseSource: ReleaseSource {
     }
 }
 
+/// CRC32C (Castagnoli), the checksum Secret Manager sends with each payload.
+enum CRC32C {
+    private static let table: [UInt32] = (0..<256).map { index in
+        var value = UInt32(index)
+        for _ in 0..<8 { value = value & 1 == 1 ? (value >> 1) ^ 0x82F6_3B78 : value >> 1 }
+        return value
+    }
+
+    static func checksum(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in data { crc = table[Int((crc ^ UInt32(byte)) & 0xFF)] ^ (crc >> 8) }
+        return crc ^ 0xFFFF_FFFF
+    }
+}
+
+/// Why a GCP secret couldn't be fetched. Names the secret, never its value: response
+/// bodies are left out, because an access response is the value.
+public enum SecretFetchError: Error, Equatable, CustomStringConvertible {
+    public static let role = "roles/secretmanager.secretAccessor"
+
+    case noProject(String)
+    case notConfigured(String)
+    case denied(GCPSecretVersion, account: String)
+    case notFound(GCPSecretVersion)
+    case checksumMismatch(GCPSecretVersion)
+    case invalidResponse(GCPSecretVersion, String)
+    case http(GCPSecretVersion, status: Int)
+    case unreachable(GCPSecretVersion, String)
+
+    public var description: String {
+        switch self {
+        case .noProject(let ref):
+            "gcp:\(ref) names no project and this node has no default one. Set secrets.project in cloud.json, or write gcp:projects/<project>/secrets/\(ref)."
+        case .notConfigured(let detail): detail
+        case .denied(let secret, let account):
+            "Google Cloud denied access to \(secret). Grant \(Self.role) on that secret to \(account), and check that the Secret Manager API is enabled."
+        case .notFound(let secret):
+            "\(secret) doesn't exist in GCP Secret Manager, or the node's service account can't see it (it needs \(Self.role))."
+        case .checksumMismatch(let secret): "\(secret) arrived corrupted: its CRC32C doesn't match. Nothing was stored."
+        case .invalidResponse(let secret, let reason): "Unexpected response for \(secret): \(reason). Nothing was stored."
+        case .http(let secret, let status): "Google Cloud returned HTTP \(status) for \(secret)."
+        case .unreachable(let secret, let detail): "Can't reach GCP Secret Manager for \(secret): \(detail)"
+        }
+    }
+}
+
+/// Reads secret versions from GCP Secret Manager. Access is up to IAM: the node's service
+/// account needs `roles/secretmanager.secretAccessor` on each secret it reads.
+public struct GCPSecretSource: Sendable {
+    static let scope = "https://www.googleapis.com/auth/cloud-platform"
+    let tokens: GoogleTokenProvider
+    let fetcher: any HTTPFetching
+
+    public init(tokens: GoogleTokenProvider, fetcher: any HTTPFetching) {
+        self.tokens = tokens
+        self.fetcher = fetcher
+    }
+
+    /// The value and the version it is, which for `latest` is the number it stands for.
+    public func access(_ secret: GCPSecretVersion) async throws -> (value: Data, version: String) {
+        let path = "projects/\(escapedComponent(secret.project))/secrets/\(escapedComponent(secret.secret))/versions/\(escapedComponent(secret.version))"
+        var request = URLRequest(url: URL(string: "https://secretmanager.googleapis.com/v1/\(path):access")!)
+        // A sweep waits on this, so an outage must fail fast and fall back to the cache.
+        request.timeoutInterval = 10
+        let data: Data
+        let status: Int
+        do {
+            request.setValue("Bearer \(try await tokens.token(scope: Self.scope))", forHTTPHeaderField: "Authorization")
+            (data, status) = try await fetcher.data(for: request)
+        } catch let error as CloudError {
+            throw SecretFetchError.unreachable(secret, error.description)
+        } catch {
+            throw SecretFetchError.unreachable(secret, error.localizedDescription)
+        }
+        switch status {
+        case 200: break
+        case 401, 403: throw SecretFetchError.denied(secret, account: tokens.account)
+        case 404: throw SecretFetchError.notFound(secret)
+        default: throw SecretFetchError.http(secret, status: status)
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = object["payload"] as? [String: Any], let encoded = payload["data"] as? String,
+              let value = Data(base64Encoded: encoded) else {
+            throw SecretFetchError.invalidResponse(secret, "no payload")
+        }
+        // An int64, which JSON carries as a string.
+        let expected = (payload["dataCrc32c"] as? String).flatMap { UInt32($0) } ?? (payload["dataCrc32c"] as? NSNumber)?.uint32Value
+        guard let expected else { throw SecretFetchError.invalidResponse(secret, "no dataCrc32c") }
+        guard CRC32C.checksum(value) == expected else { throw SecretFetchError.checksumMismatch(secret) }
+        let name = object["name"] as? String ?? ""
+        let version = name.split(separator: "/").last.map(String.init) ?? secret.version
+        guard GCPSecretRef.isValidVersion(version) else { throw SecretFetchError.invalidResponse(secret, "no version number") }
+        return (value, version)
+    }
+}
+
 /// Uploads closed log files and audit logs. Implemented by GCS, and by a fake in tests.
 public protocol BlobUploader: Sendable {
     func upload(file: URL, as name: String) async throws
@@ -367,6 +474,19 @@ public struct CloudServices: Sendable {
             return ArtifactRegistryReleaseSource(project: project, location: location, repository: repository,
                                                  tokens: try tokens(), fetcher: fetcher)
         }
+    }
+
+    public func secretSource() throws -> GCPSecretSource {
+        do {
+            return GCPSecretSource(tokens: try tokens(), fetcher: fetcher)
+        } catch let error as CloudError {
+            throw SecretFetchError.notConfigured(error.description)
+        }
+    }
+
+    /// The project of `gcp:` references that name none.
+    public func defaultSecretsProject() -> String? {
+        CloudConfig.load(environment: environment).secrets?.project
     }
 
     /// Nil when offload isn't configured, which is a normal way to run.

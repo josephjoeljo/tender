@@ -35,6 +35,8 @@ extension ProcessController {
 
         var results: [ApplyItemResult] = []
         var reconcile = false
+        // Specs replaced or pruned, as they were: their secret files go once the reconcile is done.
+        var replaced: [(old: ServiceSpec, new: ServiceSpec?)] = []
         for change in diff.changes where change.action != .unchanged {
             var result = ApplyItemResult(action: change.action, kind: change.kind, name: change.name, node: node)
             let item = request.items.first { $0.kind == change.kind && $0.name == change.name }
@@ -43,11 +45,14 @@ extension ProcessController {
                 case (.create, .service(var spec)?), (.update, .service(var spec)?):
                     spec.program = try pinned(spec, current: current)
                     try validate(spec)
+                    try await fetchGCPSecrets(for: spec, force: true)
+                    if let old = try store.service(spec.name)?.spec { replaced.append((old, spec)) }
                     try store.upsert(spec)
                     reconcile = true
                 case (.create, .adopted(let job)?), (.update, .adopted(let job)?):
                     _ = try await adopt(job.request)
                 case (.prune, _) where change.kind == .service:
+                    if let old = try store.service(change.name)?.spec { replaced.append((old, nil)) }
                     try store.deleteService(change.name)
                     reconcile = true
                 case (.prune, _):
@@ -71,6 +76,7 @@ extension ProcessController {
                     results[index].error = "\(failure.label): \(failure.message)"
                 }
             }
+            for (old, new) in replaced { removeSecretFiles(of: old, keeping: new) }
         }
         return ApplyResponse(diff: diff, results: results, dryRun: false)
     }

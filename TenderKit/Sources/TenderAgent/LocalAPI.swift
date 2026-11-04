@@ -23,6 +23,7 @@ struct ProcessController: Sendable {
     var cloud: CloudServices? = nil
     var releaseSourceOverride: (any ReleaseSource)? = nil
     var vault: SecretVault? = nil
+    var gcp: GCPSecretSync? = nil
 
     // MARK: Secrets
 
@@ -49,25 +50,25 @@ struct ProcessController: Sendable {
             throw APIFailure(status: .badRequest, code: "invalid_secret_value", message: error.description)
         }
         try await reconciler.reconcile()
-        return try listSecrets()
+        return try await listSecrets()
     }
 
     /// Idempotent. Services that reference it restart and then exit with 78 until it's set again.
     func deleteSecret(_ path: String) async throws -> SecretList {
         try requireVault().delete(try secretName(path))
         try await reconciler.reconcile()
-        return try listSecrets()
+        return try await listSecrets()
     }
 
-    func listSecrets() throws -> SecretList {
+    func listSecrets() async throws -> SecretList {
         let vault = try requireVault()
         let node = try identities?.config()?.nodeID ?? NodeID(defaultNodeID())
         let specs = try store.services().map(\.spec).filter(\.usesSecretTemplates)
         var users: [String: [String]] = [:]
         var missing: [String] = []
         for spec in specs {
-            for ref in (try? spec.secretRefs()) ?? [] {
-                users[ref.secretName(service: spec.name).description, default: []].append(spec.name)
+            for name in ((try? spec.secretRefs()) ?? []).compactMap({ $0.secretName(service: spec.name) }) {
+                users[name.description, default: []].append(spec.name)
             }
             missing += try vault.missing(for: spec).map { "\(spec.name): \($0)" }
         }
@@ -75,7 +76,38 @@ struct ProcessController: Sendable {
             SecretInfo(name: item.name.description, scope: item.name.scope, node: node, updatedAt: item.record.updatedAt,
                        revision: item.record.revision, usedBy: users[item.name.description] ?? [])
         }
-        return SecretList(secrets: secrets, missing: missing)
+        return SecretList(secrets: secrets, missing: missing, gcp: await gcp?.infos(for: specs, node: node) ?? [])
+    }
+
+    /// Fetches `spec`'s GCP secrets before its instances need them. One that was never
+    /// fetched fails the start, naming the secret and the role it needs; one that was
+    /// cached starts from the cache, and `tender secret list` shows it as stale.
+    func fetchGCPSecrets(for spec: ServiceSpec, force: Bool) async throws {
+        guard let gcp, let vault else { return }
+        let versions = gcp.versions(in: spec).compactMap(\.version)
+        guard !versions.isEmpty else { return }
+        let failures = await gcp.refresh([spec], force: force)
+        for version in versions where try vault.cached(version) == nil {
+            let known = await gcp.failure(version)
+            guard let failure = failures[version] ?? known else { continue }
+            let hint = failure.description.contains(SecretFetchError.role)
+                ? "" : " The node's service account needs \(SecretFetchError.role) on it."
+            throw APIFailure(status: .badGateway, code: "secret_fetch_failed",
+                             message: "Can't start '\(spec.name)': \(version) has never been fetched on this node. \(failure)\(hint)")
+        }
+    }
+
+    /// Removes the secret files `old` had and `new` doesn't, once the instances that used
+    /// them are gone or restarted. The ones still in `new` are rewritten at each start.
+    func removeSecretFiles(of old: ServiceSpec?, keeping new: ServiceSpec?) {
+        guard let old, let owner = SecretFileCleaner.owner(of: old, environment: environment) else { return }
+        // A file another account now owns was rewritten by the new instances, and stays.
+        // So does one another service writes too.
+        let others = ((try? store.services()) ?? []).filter { $0.spec.name != old.name }.flatMap(\.spec.secretFiles.keys)
+        let kept = Set(others + (new.map { Array($0.secretFiles.keys) } ?? []))
+        for path in old.secretFiles.keys where !kept.contains(path) {
+            SecretFileCleaner.remove(path, owner: owner)
+        }
     }
 
     func list() async throws -> ProcessList {
@@ -130,8 +162,12 @@ struct ProcessController: Sendable {
     /// Idempotent: starting an unchanged running service does nothing.
     func start(_ spec: ServiceSpec) async throws -> ProcessList {
         try validate(spec)
+        try await fetchGCPSecrets(for: spec, force: true)
+        let old = try store.service(spec.name)?.spec
         try store.upsert(spec)
-        return try await finish(try await reconciler.reconcile(), service: spec.name)
+        let list = try await finish(try await reconciler.reconcile(), service: spec.name)
+        removeSecretFiles(of: old, keeping: spec)
+        return list
     }
 
     /// Starts an existing service, or creates one from the service's newest
@@ -141,6 +177,7 @@ struct ProcessController: Sendable {
         if try store.service(service) == nil, let newest = try store.releases(service: service).first {
             return try await start(ServiceSpec(name: service, program: .release(sha12: newest.sha12)))
         }
+        if let spec = try store.service(service)?.spec { try await fetchGCPSecrets(for: spec, force: false) }
         try requireExisting(service, try store.setDesired(.running, service: service))
         return try await finish(try await reconciler.reconcile(), service: service)
     }
@@ -165,8 +202,11 @@ struct ProcessController: Sendable {
             throw APIFailure(status: .conflict, code: "adopted_job",
                              message: "'\(service)' is adopted. Use `tender abandon \(service)` to stop managing it.")
         }
+        let old = try store.service(service)?.spec
         try store.deleteService(service)
-        return try await finish(try await reconciler.reconcile(), service: service)
+        let list = try await finish(try await reconciler.reconcile(), service: service)
+        removeSecretFiles(of: old, keeping: nil)
+        return list
     }
 
     func rollback(service: String, to sha12: String?) async throws -> ProcessList {
@@ -308,14 +348,24 @@ struct ProcessController: Sendable {
             throw APIFailure(status: .badRequest, code: "invalid_instances",
                              message: "instances must be between 1 and 64.")
         }
+        let refs: [SecretRef]
         do {
-            _ = try spec.secretRefs()
+            refs = try spec.secretRefs()
         } catch let error as SecretTemplateError {
             throw APIFailure(status: .badRequest, code: "invalid_secret_ref", message: error.description)
         }
         if spec.usesSecretTemplates, vault == nil {
             throw APIFailure(status: .notImplemented, code: "no_secrets", message: "This daemon has no secret store.")
         }
+        for ref in refs where ref.gcp != nil {
+            guard gcp != nil else {
+                throw APIFailure(status: .notImplemented, code: "no_secrets", message: "This daemon can't fetch GCP secrets.")
+            }
+            if let gcpRef = ref.gcp, vault?.itemName(ref, service: spec.name) == nil {
+                throw APIFailure(status: .badRequest, code: "invalid_secret_ref", message: SecretFetchError.noProject(gcpRef.description).description)
+            }
+        }
+        try validateSecretFiles(spec)
         // By uid, since any account name can be an alias for uid 0.
         if spec.user == "root" || getpwnam(spec.user)?.pointee.pw_uid == 0 {
             throw APIFailure(status: .badRequest, code: "invalid_user", message: "Managed processes never run as root.")
@@ -338,6 +388,35 @@ struct ProcessController: Sendable {
         guard FileManager.default.isExecutableFile(atPath: path) else {
             throw APIFailure(status: .badRequest, code: "invalid_executable",
                              message: "'\(path)' does not exist or is not executable.")
+        }
+    }
+}
+
+extension ProcessController {
+    /// `tenderd exec` writes these as the service's user, which is what keeps them safe;
+    /// this only catches mistakes early, with a clear message: a path that isn't absolute
+    /// and normal, or one inside Tender's own directories, where a file could pass for
+    /// Tender's (a plist, a release, a secrets file).
+    func validateSecretFiles(_ spec: ServiceSpec) throws {
+        guard spec.secretFiles.count <= ServiceSpec.maxSecretFiles else {
+            throw APIFailure(status: .badRequest, code: "invalid_secret_file",
+                             message: "A service can have at most \(ServiceSpec.maxSecretFiles) secret files.")
+        }
+        let own = [environment.root, environment.logsDirectory, environment.plistDirectory, environment.configDirectory]
+            .flatMap { [$0.standardizedFileURL.path(percentEncoded: false), $0.resolvingSymlinksInPath().path(percentEncoded: false)] }
+            .map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
+        for path in spec.secretFiles.keys.sorted() {
+            guard ServiceSpec.isValidSecretFilePath(path) else {
+                throw APIFailure(status: .badRequest, code: "invalid_secret_file",
+                                 message: "'\(path)' isn't an absolute path without '.', '..' or empty components.")
+            }
+            let resolved = URL(filePath: path).resolvingSymlinksInPath().path(percentEncoded: false)
+            for candidate in [path, resolved] {
+                if let directory = own.first(where: { candidate == $0 || candidate.hasPrefix($0 + "/") }) {
+                    throw APIFailure(status: .badRequest, code: "invalid_secret_file",
+                                     message: "'\(path)' is inside Tender's own directory \(directory). Put secret files with the service.")
+                }
+            }
         }
     }
 }
@@ -462,7 +541,7 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
 
     // Values go in, never out: no route returns one.
     router.get("/v1/secrets") { _, _ in
-        await respond { try controller.listSecrets() }
+        await respond { try await controller.listSecrets() }
     }
     router.put("/v1/secrets/:scope/:name") { request, context in
         await respond {

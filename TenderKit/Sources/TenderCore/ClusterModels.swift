@@ -4,7 +4,8 @@ extension TenderVersion {
     /// Exact match required at handshake. Add new `distributed func`s rather than
     /// changing shipped ones, and bump this when a node can't serve an older peer.
     /// 3: secrets (`setSecret`, `deleteSecret`, `listSecrets`).
-    /// 4: service files (`specs`, `applyManifest`).
+    /// 4: service files (`specs`, `applyManifest`) and GCP secrets
+    /// (`Heartbeat.secretFetchErrors`, `SecretList.gcp`).
     public static let protocolVersion = 4
 }
 
@@ -60,9 +61,12 @@ public struct NodeSummary: Codable, Sendable, Equatable {
     public var clockSkew: TimeInterval?
     public var spoolBacklog: Int
     public var spoolDropped: Int
+    /// Failed GCP Secret Manager fetches since the node's daemon started.
+    public var secretFetchErrors: Int
 
     public init(info: NodeInfo, up: Bool, lastHeartbeatAge: TimeInterval?, instanceCount: Int, crashedCount: Int,
-                clockSkew: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0) {
+                clockSkew: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0, secretFetchErrors: Int = 0) {
+        self.secretFetchErrors = secretFetchErrors
         self.clockSkew = clockSkew
         self.spoolBacklog = spoolBacklog
         self.spoolDropped = spoolDropped

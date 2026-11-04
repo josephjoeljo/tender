@@ -253,12 +253,14 @@ public final class HeadServices: Sendable {
                 if let list {
                     combined.secrets += list.secrets
                     combined.missing += list.missing.map { "\(node): \($0)" }
+                    combined.gcp += list.gcp
                 } else if !combined.unreachableNodes.contains(node.rawValue) {
                     combined.unreachableNodes.append(node.rawValue)
                 }
             }
         }
         combined.secrets.sort { ($0.name, $0.node.rawValue) < ($1.name, $1.node.rawValue) }
+        combined.gcp.sort { ($0.name, $0.node.rawValue) < ($1.name, $1.node.rawValue) }
         combined.missing.sort()
         combined.unreachableNodes.sort()
         return combined

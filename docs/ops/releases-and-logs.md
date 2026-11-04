@@ -33,6 +33,7 @@ Delete the file afterwards. Give each role the least it needs:
 | Every node | GCS releases | `roles/storage.objectViewer` on the releases bucket |
 | Every node | Artifact Registry releases | `roles/artifactregistry.reader` on the repository |
 | Head | Log offload | `roles/storage.objectCreator` on the logs bucket |
+| Each node using it | A `${secret:gcp:…}` reference | `roles/secretmanager.secretAccessor` on that secret ([details](gcp-secrets.md)) |
 
 Don't give workers write access to the logs bucket. `objectCreator` can't overwrite or read.
 

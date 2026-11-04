@@ -70,22 +70,159 @@ public struct SecretName: Hashable, Codable, Sendable, CustomStringConvertible {
     }
 }
 
-/// `${secret:NAME}` or `${secret:shared/NAME}` inside an environment value or argument.
+/// `${secret:NAME}` or `${secret:shared/NAME}` inside an environment value or argument,
+/// or `${secret:gcp:…}` for a secret in GCP Secret Manager.
 public struct SecretRef: Hashable, Codable, Sendable, CustomStringConvertible {
     public var shared: Bool
+    /// The secret's name, or a GCP reference's secret ID.
     public var name: String
+    public var gcp: GCPSecretRef?
 
     public init(name: String, shared: Bool = false) {
         self.name = name
         self.shared = shared
     }
 
-    /// What goes between `${secret:` and `}`.
-    public var description: String { shared ? "shared/\(name)" : name }
-
-    public func secretName(service: String) -> SecretName {
-        shared ? SecretName(shared: name) : SecretName(service: service, name: name)
+    public init(gcp: GCPSecretRef) {
+        name = gcp.secret
+        shared = false
+        self.gcp = gcp
     }
+
+    /// Parses what goes between `${secret:` and `}`, which is also what `secret_files` holds.
+    public init?(parsing body: String) {
+        if body.hasPrefix("gcp:") {
+            guard let gcp = GCPSecretRef(parsing: String(body.dropFirst("gcp:".count))) else { return nil }
+            self.init(gcp: gcp)
+            return
+        }
+        if body.hasPrefix("shared/") {
+            self.init(name: String(body.dropFirst("shared/".count)), shared: true)
+        } else {
+            self.init(name: body)
+        }
+        guard SecretName.isValidName(name) else { return nil }
+    }
+
+    /// What goes between `${secret:` and `}`, and the key of its value in `secrets.json`.
+    public var description: String {
+        if let gcp { return "gcp:\(gcp)" }
+        return shared ? "shared/\(name)" : name
+    }
+
+    /// The node-local secret it names. Nil for a GCP reference.
+    public func secretName(service: String) -> SecretName? {
+        guard gcp == nil else { return nil }
+        return shared ? SecretName(shared: name) : SecretName(service: service, name: name)
+    }
+
+    /// The key of its value in the node's `SecretStore`. Nil for a GCP reference without a
+    /// project on a node without a default one.
+    public func itemName(service: String, defaultProject: String?) -> String? {
+        if let gcp { return gcp.resolved(defaultProject: defaultProject)?.itemName }
+        return secretName(service: service)?.itemName
+    }
+}
+
+/// `gcp:NAME`, `gcp:NAME@4`, `gcp:projects/P/secrets/S` or `gcp:projects/P/secrets/S@4`.
+/// Without a version it means `latest`, which the node re-checks; a number is pinned.
+public struct GCPSecretRef: Hashable, Codable, Sendable, CustomStringConvertible {
+    /// Nil for the node's default project, `secrets.project` in `cloud.json`.
+    public var project: String?
+    public var secret: String
+    /// Nil for `latest`.
+    public var version: String?
+
+    public init(project: String? = nil, secret: String, version: String? = nil) {
+        self.project = project
+        self.secret = secret
+        self.version = version
+    }
+
+    public init?(parsing text: String) {
+        var path = Substring(text)
+        var version: String?
+        if let at = path.lastIndex(of: "@") {
+            let raw = String(path[path.index(after: at)...])
+            path = path[..<at]
+            guard raw == "latest" || Self.isValidVersion(raw) else { return nil }
+            version = raw == "latest" ? nil : raw
+        }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        if parts.count == 4, parts[0] == "projects", parts[2] == "secrets", Self.isValidProject(parts[1]) {
+            self.init(project: parts[1], secret: parts[3], version: version)
+        } else if parts.count == 1 {
+            self.init(secret: parts[0], version: version)
+        } else {
+            return nil
+        }
+        guard Self.isValidSecret(secret) else { return nil }
+    }
+
+    /// As written, except that `@latest` is left out.
+    public var description: String {
+        (project.map { "projects/\($0)/secrets/" } ?? "") + secret + (version.map { "@\($0)" } ?? "")
+    }
+
+    public func resolved(defaultProject: String?) -> GCPSecretVersion? {
+        guard let project = project ?? defaultProject, Self.isValidProject(project) else { return nil }
+        return GCPSecretVersion(project: project, secret: secret, version: version ?? "latest")
+    }
+
+    /// Project IDs, or project numbers: lowercase letters, digits and `-`.
+    public static func isValidProject(_ project: String) -> Bool {
+        guard (1...30).contains(project.count), project.first != "-", project.last != "-" else { return false }
+        return project.unicodeScalars.allSatisfy {
+            switch $0 {
+            case "a"..."z", "0"..."9", "-": true
+            default: false
+            }
+        }
+    }
+
+    public static func isValidSecret(_ secret: String) -> Bool {
+        guard (1...255).contains(secret.count) else { return false }
+        return secret.unicodeScalars.allSatisfy {
+            switch $0 {
+            case "a"..."z", "A"..."Z", "0"..."9", "_", "-": true
+            default: false
+            }
+        }
+    }
+
+    public static func isValidVersion(_ version: String) -> Bool {
+        (1...18).contains(version.count) && version.first != "0" && version.unicodeScalars.allSatisfy { ("0"..."9").contains($0) }
+    }
+}
+
+/// A GCP reference with its project filled in: what a node fetches and caches.
+public struct GCPSecretVersion: Hashable, Sendable, CustomStringConvertible {
+    public var project: String
+    public var secret: String
+    /// `latest` or a version number.
+    public var version: String
+
+    public init(project: String, secret: String, version: String) {
+        self.project = project
+        self.secret = secret
+        self.version = version
+    }
+
+    public var isLatest: Bool { version == "latest" }
+
+    /// Its cache key in the node's `SecretStore`. Project IDs, secret IDs and versions have
+    /// no dots, so these can't collide with each other or with `SecretName.itemName`.
+    public var itemName: String { "gcp.\(project).\(secret).\(version)" }
+
+    public init?(itemName: String) {
+        let parts = itemName.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 4, parts[0] == "gcp", GCPSecretRef.isValidProject(parts[1]), GCPSecretRef.isValidSecret(parts[2]),
+              parts[3] == "latest" || GCPSecretRef.isValidVersion(parts[3]) else { return nil }
+        self.init(project: parts[1], secret: parts[2], version: parts[3])
+    }
+
+    /// `projects/P/secrets/S@V`.
+    public var description: String { "projects/\(project)/secrets/\(secret)@\(version)" }
 }
 
 public enum SecretTemplateError: Error, Equatable, CustomStringConvertible {
@@ -94,8 +231,12 @@ public enum SecretTemplateError: Error, Equatable, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .malformed(let text): "'\(text)' isn't a valid secret reference. Use ${secret:NAME} or ${secret:shared/NAME}."
-        case .missing(let ref): "The secret \(ref) isn't set on this node."
+        case .malformed(let text):
+            "'\(text)' isn't a valid secret reference. Use ${secret:NAME}, ${secret:shared/NAME}, ${secret:gcp:NAME[@VERSION]} or ${secret:gcp:projects/P/secrets/S[@VERSION]}."
+        case .missing(let ref) where ref.gcp != nil:
+            "The secret \(ref) hasn't been fetched from GCP Secret Manager on this node. `tender secret list` says why."
+        case .missing(let ref):
+            "The secret \(ref) isn't set on this node."
         }
     }
 }
@@ -132,15 +273,7 @@ public enum SecretTemplate {
             } else if rest.hasPrefix(opener) {
                 guard let close = rest.firstIndex(of: "}") else { throw SecretTemplateError.malformed(String(rest)) }
                 let body = String(rest[rest.index(rest.startIndex, offsetBy: opener.count)..<close])
-                let ref: SecretRef
-                if body.hasPrefix("shared/") {
-                    ref = SecretRef(name: String(body.dropFirst("shared/".count)), shared: true)
-                } else {
-                    ref = SecretRef(name: body)
-                }
-                guard SecretName.isValidName(ref.name) else {
-                    throw SecretTemplateError.malformed(String(rest[...close]))
-                }
+                guard let ref = SecretRef(parsing: body) else { throw SecretTemplateError.malformed(String(rest[...close])) }
                 guard let value = try lookup(ref) else { throw SecretTemplateError.missing(ref) }
                 output += value
                 rest = rest[rest.index(after: close)...]
@@ -156,17 +289,38 @@ public enum SecretTemplate {
 extension ServiceSpec {
     /// True if the process must start through `tenderd exec`.
     public var usesSecretTemplates: Bool {
-        environment.values.contains(where: SecretTemplate.needsProcessing)
+        !secretFiles.isEmpty
+            || environment.values.contains(where: SecretTemplate.needsProcessing)
             || arguments.contains(where: SecretTemplate.needsProcessing)
     }
 
-    /// Every distinct reference in the environment and arguments, sorted.
+    /// Every distinct reference in the environment, arguments and secret files, sorted.
     public func secretRefs() throws -> [SecretRef] {
         var refs = Set<SecretRef>()
         for text in environment.values.sorted() + arguments {
             refs.formUnion(try SecretTemplate.references(in: text))
         }
+        refs.formUnion(try parsedSecretFiles().map(\.ref))
         return refs.sorted { $0.description < $1.description }
+    }
+
+    /// `secretFiles` with each reference parsed, sorted by path.
+    public func parsedSecretFiles() throws -> [(path: String, ref: SecretRef)] {
+        try secretFiles.sorted { $0.key < $1.key }.map { path, text in
+            guard let ref = SecretRef(parsing: text) else { throw SecretTemplateError.malformed(text) }
+            return (path, ref)
+        }
+    }
+
+    public static let maxSecretFiles = 32
+
+    /// An absolute path with nothing to normalize away: no `.`, `..` or empty components,
+    /// and no trailing `/`. Whether it's somewhere Tender may write is the node's call.
+    public static func isValidSecretFilePath(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), path.count > 1, path.utf8.count <= 1024, !path.hasSuffix("/") else { return false }
+        return path.dropFirst().split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
+            !$0.isEmpty && $0 != "." && $0 != ".." && !$0.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7f }
+        }
     }
 }
 
@@ -192,16 +346,66 @@ public struct SecretInfo: Codable, Sendable, Equatable {
     }
 }
 
+/// A GCP Secret Manager reference as a node sees it. Never carries the value.
+public struct GCPSecretInfo: Codable, Sendable, Equatable {
+    /// `projects/P/secrets/S@latest` or `…@4`.
+    public var name: String
+    public var node: NodeID
+    /// The version the cached value is, once this daemon has fetched it.
+    public var version: String?
+    /// Whether the node holds a value, which instances start from.
+    public var cached: Bool
+    /// When the cached value last changed.
+    public var updatedAt: Date?
+    /// The last successful fetch since the daemon started.
+    public var checkedAt: Date?
+    /// Goes up every time the cached value changes.
+    public var revision: Int
+    public var usedBy: [String]
+    /// Why the last fetch failed. Never includes the value.
+    public var fetchError: String?
+    /// Cached, but the last attempt to refresh it failed: instances start from the cache.
+    public var stale: Bool
+
+    public init(name: String, node: NodeID, version: String? = nil, cached: Bool, updatedAt: Date? = nil,
+                checkedAt: Date? = nil, revision: Int = 0, usedBy: [String] = [], fetchError: String? = nil) {
+        self.name = name
+        self.node = node
+        self.version = version
+        self.cached = cached
+        self.updatedAt = updatedAt
+        self.checkedAt = checkedAt
+        self.revision = revision
+        self.usedBy = usedBy
+        self.fetchError = fetchError
+        stale = cached && fetchError != nil
+    }
+}
+
 public struct SecretList: Codable, Sendable, Equatable {
     public var secrets: [SecretInfo]
     /// References that no secret on the node satisfies, as `service: NAME`.
     public var missing: [String]
     public var unreachableNodes: [String]
+    /// GCP Secret Manager references in use on the node.
+    public var gcp: [GCPSecretInfo]
 
-    public init(secrets: [SecretInfo], missing: [String] = [], unreachableNodes: [String] = []) {
+    public init(secrets: [SecretInfo], missing: [String] = [], unreachableNodes: [String] = [], gcp: [GCPSecretInfo] = []) {
         self.secrets = secrets
         self.missing = missing
         self.unreachableNodes = unreachableNodes
+        self.gcp = gcp
+    }
+
+    /// Lists from before GCP references still decode.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            secrets: try container.decode([SecretInfo].self, forKey: .secrets),
+            missing: try container.decode([String].self, forKey: .missing),
+            unreachableNodes: try container.decode([String].self, forKey: .unreachableNodes),
+            gcp: try container.decodeIfPresent([GCPSecretInfo].self, forKey: .gcp) ?? []
+        )
     }
 }
 

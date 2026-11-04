@@ -129,7 +129,7 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 - `scripts/` example: restore a node's secrets from a local file (the user's
   backup script), piping each value to `tender secret set`. Done: `scripts/restore-secrets.sh`.
 
-### 7. GCP Secret Manager source (step G, may slip)
+### 7. GCP Secret Manager source (step G) — done
 - Ref syntax: `${secret:gcp:NAME}`, `${secret:gcp:NAME@4}`,
   `${secret:gcp:projects/P/secrets/S}`; default project in `CloudConfig.secrets`.
 - `GCPSecretSource` in `GoogleCloud.swift` reuses `GoogleTokenProvider` (scope
@@ -212,3 +212,15 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
   replaced and started. `--prune` also abandons adopted jobs the file doesn't list.
 - Diffs never show environment values, only that a variable was added, removed or
   changed. The audit record of an apply gets a `detail`: file sha256, counts and names.
+- `secret_files` are written by `tenderd exec` as the service's user (temp file with
+  `O_CREAT|O_EXCL|O_NOFOLLOW`, `0400`, rename over the target), not by root as §5 first
+  said, so no root write ever lands in a directory the service controls. Root only
+  removes stale ones, with an `openat`/`O_NOFOLLOW` walk. `tender start --secret-file`.
+- GCP values are cached in the vault under `gcp.<project>.<secret>.<version>` items, so
+  revisions, delivery and `secrets-export` treat them like local secrets. Fetch status
+  (version, last check, error) is in memory and resets with the daemon.
+- A GCP reference never fetched fails the start (the spec isn't stored) rather than
+  leaving instances exiting 78; one already cached starts from the cache.
+- `tender_secret_fetch_errors_total` travels in heartbeats, so it exists only on joined
+  nodes; a standalone node shows errors in `tender secret list`. Protocol version 4.
+- The app doesn't show GCP references yet.

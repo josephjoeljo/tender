@@ -551,7 +551,7 @@ func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async throws {
     }
 }
 
-@Test func skewAndSpoolStatsReachTheSummary() async throws {
+@Test func skewSpoolAndSecretFetchStatsReachTheSummary() async throws {
     let store = try makeEnvironment()
     defer { try? FileManager.default.removeItem(at: store.root) }
     let summaryState = RegistryState(store: nil)
@@ -559,12 +559,13 @@ func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async throws {
     try await summaryState.register(info)
     let now = Date()
     _ = await summaryState.heartbeat(Heartbeat(node: NodeID("n"), nodeClock: now.addingTimeInterval(-5), processes: [],
-                                               previousRoundTrip: 2, spoolBacklog: 3, spoolDropped: 4),
+                                               previousRoundTrip: 2, spoolBacklog: 3, spoolDropped: 4, secretFetchErrors: 6),
                                      registeredThisRun: true, now: now)
     let summary = try #require(await summaryState.summaries(now: now).first)
     #expect(abs((summary.clockSkew ?? 0) - 4) < 0.001)
     #expect(summary.spoolBacklog == 3)
     #expect(summary.spoolDropped == 4)
+    #expect(summary.secretFetchErrors == 6)
 }
 
 // MARK: Security
