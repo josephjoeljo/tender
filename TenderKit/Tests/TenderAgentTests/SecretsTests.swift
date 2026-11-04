@@ -98,7 +98,7 @@ private func plist(_ data: Data) throws -> [String: Any] {
     let mode = try FileManager.default.attributesOfItem(atPath: file.path(percentEncoded: false))[.posixPermissions] as? Int
     #expect(mode == 0o400)
     let directory = file.deletingLastPathComponent().path(percentEncoded: false)
-    #expect(try FileManager.default.attributesOfItem(atPath: directory)[.posixPermissions] as? Int == 0o700)
+    #expect(try FileManager.default.attributesOfItem(atPath: directory)[.posixPermissions] as? Int == 0o711)
 
     try vault.set(SecretName(service: "api", name: "MONGO_PASSWORD"), value: Data(password.utf8))
     let report = try await reconciler.reconcile()
@@ -108,6 +108,55 @@ private func plist(_ data: Data) throws -> [String: Any] {
     try store.deleteService("api")
     try await reconciler.reconcile()
     #expect(!FileManager.default.fileExists(atPath: directory))
+}
+
+@Test func aFIFOOrSymlinkInPlaceOfTheSecretsFileIsReplacedNotRead() async throws {
+    let env = try makeTestEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let (vault, store) = try makeVault(env)
+    let reconciler = Reconciler(environment: env, store: store, launchd: MemoryLaunchd(), vault: vault, execPath: fakeTenderd)
+    try store.upsert(api)
+    try vault.set(SecretName(service: "api", name: "MONGO_PASSWORD"), value: Data(password.utf8))
+    #expect(try await reconciler.reconcile().failures.isEmpty)
+
+    let file = env.serviceSecretsFile(service: "api")
+    let path = file.path(percentEncoded: false)
+    for plant in [{ mkfifo(path, 0o600) }, { symlink("/dev/zero", path) }] {
+        try FileManager.default.removeItem(at: file)
+        #expect(plant() == 0)
+        #expect(try await reconciler.reconcile().failures.isEmpty)
+        let type = try FileManager.default.attributesOfItem(atPath: path)[.type] as? FileAttributeType
+        #expect(type == .typeRegular)
+        #expect(try SecretExec.loadSecrets(file: file) == ["MONGO_PASSWORD": password])
+    }
+}
+
+@Test func aServiceWhoseSecretsCantBeWrittenStillStops() async throws {
+    let env = try makeTestEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let (vault, store) = try makeVault(env)
+    let launchd = MemoryLaunchd()
+    let reconciler = Reconciler(environment: env, store: store, launchd: launchd, vault: vault, execPath: fakeTenderd)
+    try store.upsert(api)
+    #expect(try await reconciler.reconcile().failures.isEmpty)
+    let label = env.serviceLabel(service: "api", instance: 0)
+    #expect(await launchd.loaded.contains(label))
+
+    // A non-empty directory where the file goes, so the rename over it fails.
+    let file = env.serviceSecretsFile(service: "api")
+    try FileManager.default.removeItem(at: file)
+    try FileManager.default.createDirectory(at: file.appending(path: "x"), withIntermediateDirectories: true)
+    let running = try await reconciler.reconcile()
+    #expect(running.failures.count == 1)
+    #expect(running.applied.isEmpty)
+    #expect(await launchd.loaded.contains(label))
+
+    #expect(try store.setDesired(.stopped, service: "api"))
+    let stopped = try await reconciler.reconcile()
+    #expect(stopped.failures.count == 1)
+    #expect(stopped.applied.contains(.bootout(label: label)))
+    #expect(await !launchd.loaded.contains(label))
+    #expect(!FileManager.default.fileExists(atPath: env.plistPath(label: label).path(percentEncoded: false)))
 }
 
 @Test func execResolvesTemplatesAndNamesMissingSecrets() throws {
@@ -178,6 +227,14 @@ private func withSecretsDaemon(_ body: (TenderClient, TenderEnvironment) async t
             Issue.record("expected an empty value to be refused")
         } catch let error as TenderClientError {
             #expect(error.code == "invalid_secret_value")
+        }
+        var reserved = api
+        reserved.name = "shared"
+        do {
+            _ = try await client.start(reserved)
+            Issue.record("expected the name shared to be refused")
+        } catch let error as TenderClientError {
+            #expect(error.code == "invalid_name")
         }
         var malformed = api
         malformed.name = "bad"

@@ -5,8 +5,8 @@ public enum SecretScope: String, Codable, Sendable {
     case service, shared
 }
 
-/// A stored secret: `api/MONGO_PASSWORD` or `shared/JWT_KEY`. A service named
-/// `shared` can't have service-scoped secrets, since its path would mean the shared scope.
+/// A stored secret: `api/MONGO_PASSWORD` or `shared/JWT_KEY`. No service may be named
+/// `shared`, since its secrets' paths would mean the shared scope.
 public struct SecretName: Hashable, Codable, Sendable, CustomStringConvertible {
     public var scope: SecretScope
     /// Nil for the shared scope.

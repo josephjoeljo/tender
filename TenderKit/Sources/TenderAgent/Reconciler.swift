@@ -296,7 +296,9 @@ public actor Reconciler {
             materializer.removeStale(keeping: Set(secretive.map(\.spec.name)))
         }
         var desired: [Desired] = []
-        for record in records where !broken.contains(record.service) {
+        // A service whose secrets file couldn't be written keeps its running jobs as they
+        // are, but `stop` and `delete` still take effect: they need no secrets.
+        for record in records where !(record.desired == .running && broken.contains(record.service)) {
             do {
                 let plist = try services[record.service].map { try renderPlist(spec: $0.spec, instance: record.instance) }
                 desired.append(Desired(record: record, plist: record.desired == .running ? plist : nil))

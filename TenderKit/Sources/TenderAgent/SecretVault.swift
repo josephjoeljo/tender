@@ -19,6 +19,9 @@ public struct SecretVault: Sendable {
 
     let secrets: any SecretStore
     let store: StateStore
+    /// The store and `state.db` change in two steps, so a concurrent set and delete could
+    /// otherwise leave a record saying live with no value behind it. Copies share it.
+    private let lock = NSLock()
 
     public init(secrets: any SecretStore, store: StateStore) {
         self.secrets = secrets
@@ -33,17 +36,21 @@ public struct SecretVault: Sendable {
         guard let text = String(data: value, encoding: .utf8), !text.contains("\0") else {
             throw SecretVaultError.invalidValue("A secret must be UTF-8 text without NUL bytes.")
         }
-        try secrets.write(name.itemName, value)
-        try store.recordSecretChange(item: name.itemName)
+        try lock.withLock {
+            try secrets.write(name.itemName, value)
+            try store.recordSecretChange(item: name.itemName)
+        }
     }
 
     /// Returns false if there was nothing to delete.
     @discardableResult
     public func delete(_ name: SecretName) throws -> Bool {
-        guard try records()[name.itemName]?.deleted == false else { return false }
-        try secrets.delete(name.itemName)
-        try store.recordSecretChange(item: name.itemName, deleted: true)
-        return true
+        try lock.withLock {
+            guard try records()[name.itemName]?.deleted == false else { return false }
+            try secrets.delete(name.itemName)
+            try store.recordSecretChange(item: name.itemName, deleted: true)
+            return true
+        }
     }
 
     func value(_ name: SecretName) throws -> String? {
@@ -79,8 +86,9 @@ public struct SecretVault: Sendable {
 }
 
 /// Writes the resolved secrets a service's instances read at launch, as
-/// `env/<service>/secrets.json`: 0400, owned by the service's user, in a 0700 directory
-/// it owns. Missing secrets are left out, and `tenderd exec` names them when it exits.
+/// `env/<service>/secrets.json`: 0400, owned by the service's user, in a 0711 directory
+/// root owns, so the service can read its file but never swap in another. Missing secrets
+/// are left out, and `tenderd exec` names them when it exits.
 struct SecretMaterializer: Sendable {
     let environment: TenderEnvironment
     let vault: SecretVault
@@ -99,8 +107,8 @@ struct SecretMaterializer: Sendable {
         let files = FileManager.default
         try files.createDirectory(at: directory, withIntermediateDirectories: true)
         let owner = try self.owner(spec)
-        try own(directory, mode: 0o700, owner: owner)
-        if (try? Data(contentsOf: file)) == content { return }
+        try own(directory, mode: 0o711, owner: owner.map { _ in (uid: 0, gid: 0) })
+        if holds(file, content, owner: owner) { return }
 
         // Private before any secret bytes reach it, and swapped in whole, so that an
         // instance starting meanwhile reads either the old file or the new one.
@@ -116,6 +124,22 @@ struct SecretMaterializer: Sendable {
             unlink(temporary)
             throw error
         }
+    }
+
+    /// Whether `file` is already exactly `content`, owned as it should be. Opened without
+    /// following a symlink or waiting on a FIFO, and read no further than `content` is long,
+    /// so nothing put at that path can hang or exhaust the daemon: it counts as different
+    /// and is replaced.
+    private func holds(_ file: URL, _ content: Data, owner: (uid: uid_t, gid: gid_t)?) -> Bool {
+        let descriptor = open(file.path(percentEncoded: false), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_mode & 0o7777 == 0o400,
+              info.st_size == content.count, owner.map({ info.st_uid == $0.uid }) ?? true else { return false }
+        var existing = Data(count: content.count)
+        let count = existing.withUnsafeMutableBytes { read(descriptor, $0.baseAddress, $0.count) }
+        return count == content.count && existing == content
     }
 
     /// Removes the files of services that no longer use secrets.
@@ -178,8 +202,8 @@ public enum SecretExec {
         let argv = resolved.arguments.map { strdup($0) } + [nil]
         let envp = resolved.environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
         execve(program, argv, envp)
-        let reason = String(cString: strerror(errno))
-        fail(service, "can't run \(program): \(reason)", code: errno == ENOENT ? 127 : 126)
+        let error = errno
+        fail(service, "can't run \(program): \(String(cString: strerror(error)))", code: error == ENOENT ? 127 : 126)
     }
 
     private static func fail(_ service: String, _ message: String, code: Int32) -> Never {

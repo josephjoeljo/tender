@@ -294,6 +294,11 @@ struct ProcessController: Sendable {
             throw APIFailure(status: .badRequest, code: "invalid_name",
                              message: "Service names may only use letters, digits, '-' and '_', up to 64 characters.")
         }
+        // `shared/NAME` names a shared secret, so this service's own secrets couldn't be named.
+        guard spec.name != "shared" else {
+            throw APIFailure(status: .badRequest, code: "invalid_name",
+                             message: "'shared' is reserved for shared secrets; pick another service name.")
+        }
         guard (1...64).contains(spec.instances) else {
             throw APIFailure(status: .badRequest, code: "invalid_instances",
                              message: "instances must be between 1 and 64.")
