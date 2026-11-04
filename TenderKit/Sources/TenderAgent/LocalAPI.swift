@@ -12,6 +12,21 @@ struct APIFailure: Error {
     var message: String
 }
 
+/// Runs operations one at a time, in the order they came, like the reconciler does.
+final actor OneAtATime {
+    private var tail: Task<Void, Never>?
+
+    func run<T: Sendable>(_ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        let previous = tail
+        let task = Task {
+            await previous?.value
+            return try await operation()
+        }
+        tail = Task { _ = await task.result }
+        return try await task.value
+    }
+}
+
 /// The operations behind the `/v1/processes` endpoints.
 struct ProcessController: Sendable {
     let environment: TenderEnvironment
@@ -24,6 +39,8 @@ struct ProcessController: Sendable {
     var releaseSourceOverride: (any ReleaseSource)? = nil
     var vault: SecretVault? = nil
     var gcp: GCPSecretSync? = nil
+    /// Shared by every copy, so that applies run one at a time.
+    let applies = OneAtATime()
 
     // MARK: Secrets
 

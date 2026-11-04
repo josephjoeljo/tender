@@ -155,6 +155,16 @@ private func actions(_ response: ApplyResponse) -> [String] {
     }
 }
 
+@Test func concurrentAppliesSeeEachOthersChanges() async throws {
+    try await withDaemon { client, _ async throws in
+        let yaml = "kind: Service\nname: api\nexec: /bin/sleep\nargs: [\"1000\"]\n"
+        async let first = apply(client, yaml)
+        async let second = apply(client, yaml)
+        let both = try await [first, second].map(actions)
+        #expect(both.sorted { $0.joined() < $1.joined() } == [["create api"], ["unchanged api"]])
+    }
+}
+
 @Test func binaryUsesTheNodesReleaseAndKeepsItAcrossApplies() async throws {
     try await withDaemon { client, env async throws in
         let yaml = "kind: Service\nname: api\nbinary: api\nargs: [\"1000\"]\n"

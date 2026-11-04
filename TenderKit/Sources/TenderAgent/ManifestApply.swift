@@ -14,8 +14,13 @@ extension ProcessController {
     }
 
     /// Unchanged items aren't touched at all, so applying the same file again restarts
-    /// nothing, and leaves a service someone stopped stopped.
+    /// nothing, and leaves a service someone stopped stopped. Applies run one at a time,
+    /// so that each diff is computed against what the one before it left.
     func applyManifest(_ request: ApplyRequest) async throws -> ApplyResponse {
+        try await applies.run { try await self.applyManifestNow(request) }
+    }
+
+    private func applyManifestNow(_ request: ApplyRequest) async throws -> ApplyResponse {
         let node = try localNode()
         do {
             try Manifest(items: request.items).validate(defaultNode: node)
