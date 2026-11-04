@@ -16,8 +16,8 @@ Full design: `docs/DESIGN.md`.
   (FSEvents, libproc, Keychain, Network.framework where useful).
 - **Workers are autonomous.** If the head is down, workers keep running their
   last-known workloads. The head is required for changes, not for uptime.
-- **Agent-first.** Everything the CLI can do, the MCP server can do. Output to
-  agents must be bounded (limits, time windows, errors first).
+- **Agent-first.** Agents drive Tender through the CLI (`--json`, bounded
+  output: limits, time windows, errors first), guided by the `tender` skill.
 
 ## Naming conventions
 
@@ -38,7 +38,7 @@ Full design: `docs/DESIGN.md`.
 ## Architecture (phase 1)
 
 - **Head node**: public API server (HTTP/JSON), node registry, command routing,
-  durable log store (SQLite), MCP server, Prometheus `/metrics`. The head also
+  durable log store (SQLite), audit log, Prometheus `/metrics`. The head also
   runs a worker agent, so a single Mac is a valid one-node cluster.
 - **Worker node**: keeps a long-lived mTLS connection to the head carrying
   distributed actor calls in both directions, and also listens on its tailnet IP
@@ -91,7 +91,7 @@ Full design: `docs/DESIGN.md`.
 - **Internal vs public traffic**: head↔worker traffic uses Swift distributed
   actors over our own `TenderActorSystem` (custom transport on the worker-dialed
   mTLS connection). Everything public stays plain HTTP/JSON: `TenderClient` API
-  (CLI, app), MCP, `/metrics`. Rules for distributed actors:
+  (CLI, app), `/metrics`. Rules for distributed actors:
   - The contract lives in `TenderProtocol` as `@Resolvable` distributed protocols
     (`NodeAgentProtocol`, `HeadRegistryProtocol`) constrained to
     `DistributedActorSystem<any Codable>`; no transport dependency. Concrete
@@ -119,7 +119,6 @@ Full design: `docs/DESIGN.md`.
 - swift-argument-parser (CLI), swift-service-lifecycle (daemons), swift-log
 - GRDB (SQLite, WAL, FTS5)
 - swift-prometheus
-- MCP Swift SDK (streamable HTTP transport)
 
 ## Repository layout
 
@@ -145,8 +144,7 @@ TenderKit/                ← Swift package: every module + tenderd + tender CLI
     TenderPKI/            internal CA, CSR signing, join tokens
     TenderScheduler/      placement (phase 1: explicit --node)
     TenderMetrics/        Prometheus registry
-    TenderClient/         typed client for the head API (CLI, MCP, app all use this)
-    TenderMCP/            MCP tools (hosted by head; `tender mcp` = stdio bridge)
+    TenderClient/         typed client for the head API (CLI and app use this)
     TenderHead/           composes head services
     # 3 Executables — thin: parse args, wire, run
     tenderd/              daemon, --role head|worker, --dev

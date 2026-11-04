@@ -5,14 +5,13 @@ import PackageDescription
 //   0 Foundation  → TenderCore, TenderProtocol
 //   1 Platform    → LaunchdKit, ProcessMetrics, FileWatch, LogTail   (no networking)
 //   2 Features    → TenderActorSystem, TenderAgent, TenderLogStore, TenderPKI, TenderScheduler,
-//                   TenderMetrics, TenderMCP, TenderClient, TenderHead
+//                   TenderMetrics, TenderClient, TenderHead
 //   3 Executables → tenderd, tender
 //
 // TenderApp is a separate Xcode project (App/) on top of this package. It imports only TenderClient and TenderCore.
 //
 // Hummingbird and AsyncHTTPClient carry the local HTTP/JSON API (Unix socket).
-// Other networking deps (swift-nio-ssl, MCP swift-sdk, swift-prometheus) are
-// added in milestone 2. Head<->worker traffic uses Swift
+// swift-nio-ssl carries mTLS. Head<->worker traffic uses Swift
 // distributed actors over our own TenderActorSystem (no grpc-swift).
 
 let package = Package(
@@ -95,10 +94,9 @@ let package = Package(
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOHTTP1", package: "swift-nio"),
         ]),
-        .target(name: "TenderMCP", dependencies: ["TenderCore", "TenderClient"]),
         .target(name: "TenderHead", dependencies: [
             "TenderCore", "TenderProtocol", "TenderActorSystem", "TenderAgent", "TenderLogStore", "TenderPKI",
-            "TenderScheduler", "TenderMetrics", "TenderMCP",
+            "TenderScheduler", "TenderMetrics",
             .product(name: "GRDB", package: "GRDB.swift"),
             .product(name: "Hummingbird", package: "hummingbird"),
             .product(name: "HummingbirdTLS", package: "hummingbird"),
