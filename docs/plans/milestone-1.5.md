@@ -63,7 +63,7 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 
 ## Work breakdown
 
-### 1. Models — `TenderCore`
+### 1. Models — `TenderCore` (done)
 - `ServiceSpec`: + `secretRefs: [SecretRef]`, `secretFiles: [String: SecretRef]`
   (derived from the env/args templates; the template itself is stored, never the
   resolved value).
@@ -72,14 +72,14 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 - `Manifest` = `[ManifestItem]` (`service(ServiceSpec)`, `adopted(AdoptRequest)`),
   Codable, plus validation (names, nodes exist, refs parse).
 
-### 2. YAML parsing + diff — `TenderClient/Manifest`
+### 2. YAML parsing + diff — `TenderClient/Manifest` (done)
 - Yams for parsing (new dependency, `TenderClient` only — the app and agent
   never parse YAML).
 - `env_file` read and merged on the CLI side; the node only sees the final spec.
 - `ManifestDiff`: create / update (field-level) / unchanged / prune, computed
   against `GET /v1/processes` so the same code serves the CLI, app and MCP.
 
-### 3. Apply + export — API and CLI
+### 3. Apply + export — API and CLI (done)
 - `POST /v1/apply { items, prune, dryRun } -> ManifestDiff + results` on the
   local socket and the head. The head fans out per node with the existing
   `NodeAgentProtocol.apply(_:)`; per-node failures are reported, not rolled back.
@@ -127,7 +127,7 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 - App: secrets section lists names, nodes and users; no values, no editing in
   this milestone.
 - `scripts/` example: restore a node's secrets from a local file (the user's
-  backup script), piping each value to `tender secret set`.
+  backup script), piping each value to `tender secret set`. Done: `scripts/restore-secrets.sh`.
 
 ### 7. GCP Secret Manager source (step G, may slip)
 - Ref syntax: `${secret:gcp:NAME}`, `${secret:gcp:NAME@4}`,
@@ -144,7 +144,7 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
   `tender_secret_fetch_errors_total`); never fetched → instance does not start,
   error names the secret and the missing IAM role.
 
-### 8. Tests
+### 8. Tests (service-file parts done)
 - YAML parse/validate fixtures (good, unknown keys, 5c-only keys, bad refs).
 - Diff: create/update/unchanged/prune; apply idempotence; export round-trip.
 - Interpolation and escaping; `env_file` precedence.
@@ -197,3 +197,18 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 - `max_memory_restart` / `cron_restart`: later, with health checks (milestone 5).
 - `secret_files` values are refs as written inside `${secret:…}`; the spec stores
   the ref, never the value.
+- `ManifestDiff` lives in `TenderCore`, not `TenderClient`: each node diffs its part of
+  the file against its own `StateStore`, and the head only splits and merges. YAML stays
+  in `TenderClient` (Yams).
+- The diff needs full specs, which `GET /v1/processes` doesn't carry, so there's
+  `GET /v1/specs` (socket and head; a remote token needs `write` scope, since specs can
+  hold literal `env_file` values). The head fans out with two add-only distributed funcs,
+  `specs()` and `applyManifest(_:)`, rather than `apply(.start(spec))`, so that each node
+  pins `binary:` to its own release. Protocol version 4.
+- `binary: <name>` must equal the service's name (releases are per service). It means
+  "the release this node runs, else its newest", so a rollback survives re-applying;
+  export writes `binary:` without a sha.
+- Unchanged items aren't touched, so a stopped service stays stopped; a changed one is
+  replaced and started. `--prune` also abandons adopted jobs the file doesn't list.
+- Diffs never show environment values, only that a variable was added, removed or
+  changed. The audit record of an apply gets a `detail`: file sha256, counts and names.

@@ -196,3 +196,11 @@ func laterKeysAreNotSupportedYet(key: String) {
         """)
     #expect(ManifestDiffRenderer.render(ManifestDiff(changes: [diff.changes[2]])) == "Nothing to change (1 unchanged).")
 }
+
+@Test func theDocumentedExampleParses() throws {
+    let example = URL(filePath: #filePath).deletingLastPathComponent()
+        .appending(path: "../../../docs/examples/services.yaml").standardizedFileURL
+    let manifest = try ServiceFile.load(example).manifest
+    #expect(manifest.items.map(\.name) == ["api", "worker", "homebrew.mxcl.mongodb-community", "homebrew.mxcl.postgresql@18"])
+    #expect(manifest.items.map(\.kind) == [.service, .service, .adopted, .adopted])
+}

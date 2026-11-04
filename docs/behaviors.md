@@ -16,6 +16,30 @@ Things about how Tender works that may not be what you'd assume.
 - **Unknown names:** `stop` and `restart` return an error, since it's probably a typo.
   `delete` succeeds, since the service is already gone.
 
+## Service files
+
+- **Unchanged means untouched:** `tender apply` leaves a service whose spec didn't change
+  completely alone: no restart, and a service someone stopped stays stopped. A service whose
+  spec changed is replaced and started, even if it was stopped.
+- **`binary:` keeps the node's release:** it means "whichever release this node runs", so a
+  rollback survives the next apply. A new service gets the node's newest release, and fails
+  with `no release` if `bin/<service>/` never had a binary. `binary` must be the service's own
+  name, because releases are kept per service.
+- **`env_file` is read by the CLI:** its values are merged into the spec, so the node never
+  sees the file, and `tender export` prints them inline under `env:`, as literal values. Keep
+  credentials in `${secret:…}` references, which stay references everywhere.
+- **The diff hides environment values:** it says a variable was added, removed or changed.
+  The audit log records the file's hash and the diff's counts and names, never values.
+- **`--prune` abandons adopted jobs** the file doesn't list, leaving them running, and
+  deletes services the file doesn't list. Through a head it covers every node that's up; a
+  node that's down is reported and not pruned.
+- **Reading specs remotely takes a `write` token:** `GET /v1/specs` (`tender export`)
+  returns environments as stored, which can include literal credentials.
+- **Removing `log_path`** from an adopted job re-adopts it with the job's own log paths,
+  which needs the job to be loaded.
+- **5c keys:** `health`, `rollout`, `replicas` and `placement` are rejected with "not
+  supported yet" rather than ignored.
+
 ## Releases
 
 - **Rollback:** it holds even with a newer binary still in `bin/`. Only a change to that
@@ -92,8 +116,9 @@ Things about how Tender works that may not be what you'd assume.
 - **Write tokens can read secrets:** values never leave a node through the API, but a
   `write` token can start a process that prints any secret on that node, and logs are
   readable with `read` scope. Guard `write` tokens as you would the secrets themselves.
-- **Protocol version 3:** secrets changed the head↔worker protocol. Upgrade a worker before
-  it rejoins a version 3 head; a mismatched node is refused at the handshake.
+- **Protocol version 4:** service files (`specs`, `applyManifest`) changed the head↔worker
+  protocol, as secrets did for version 3. Upgrade every node together; a mismatched node is
+  refused at the handshake.
 - **Socket-only:** `tender adopt`, join and API tokens, CA export and cloud credentials work
   over the local socket only, never with `--remote`.
 - **Certificates expire** after 2 years and aren't renewed automatically yet. The head reissues

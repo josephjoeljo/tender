@@ -1,0 +1,50 @@
+# The Olympsis backend on two Macs: the Go API and its worker on mac-1, and the
+# databases Homebrew already runs, adopted where they are.
+#
+#   tender apply -f docs/examples/services.yaml --dry-run
+#
+# Secrets are set once per node, never written here:
+#
+#   tender secret set api/MONGO_PASSWORD
+#   tender secret set worker/MONGO_PASSWORD
+#   tender secret set shared/POSTGRES_PASSWORD --all-nodes
+#   tender secret set shared/GCP_KEY --node mac-1 --from-file key.json
+#
+# Binaries go in bin/api/ and bin/worker/ on mac-1; `binary:` runs the newest release
+# there and keeps it, rollbacks included, until the next binary arrives.
+kind: Service
+name: api
+binary: api
+args: ["--port", "8080"]
+cwd: /opt/olympsis/api
+instances: 2
+node: mac-1
+# env_file: ./api.env              # per-environment values, relative to this file
+env:
+  LOG_LEVEL: info
+  MONGO_URL: "mongodb://app:${secret:MONGO_PASSWORD}@mac-2:27017/olympsis"
+  POSTGRES_URL: "postgres://olympsis:${secret:shared/POSTGRES_PASSWORD}@mac-2:5432/olympsis"
+  GOOGLE_APPLICATION_CREDENTIALS: /opt/olympsis/api/gcp.json
+secret_files:
+  /opt/olympsis/api/gcp.json: shared/GCP_KEY
+---
+kind: Service
+name: worker
+binary: worker
+cwd: /opt/olympsis/worker
+node: mac-1
+env:
+  LOG_LEVEL: info
+  MONGO_URL: "mongodb://worker:${secret:MONGO_PASSWORD}@mac-2:27017/olympsis"
+  POSTGRES_URL: "postgres://olympsis:${secret:shared/POSTGRES_PASSWORD}@mac-2:5432/olympsis"
+---
+# Stateful services stay where they are: Tender controls and reads them, but never
+# rewrites their plists.
+kind: Adopted
+label: homebrew.mxcl.mongodb-community
+node: mac-2
+log_path: /opt/homebrew/var/log/mongodb/mongo.log
+---
+kind: Adopted
+label: homebrew.mxcl.postgresql@18
+node: mac-2
