@@ -425,6 +425,39 @@ private let gcpSpec = ServiceSpec(
     #expect(try fixture.vault.cachedGCPItems().isEmpty)
 }
 
+/// `tender apply` fetches before it stores, like a start: a reference never fetched fails
+/// its item, and the spec isn't stored, so no instance is left exiting 78.
+@Test func applyingASecretNeverFetchedFailsTheItemAndStoresNothing() async throws {
+    let fixture = try GCPFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.env.root) }
+    let launchd = MemoryLaunchd()
+    let reconciler = Reconciler(environment: fixture.env, store: fixture.store, launchd: launchd,
+                                vault: fixture.vault, gcp: fixture.sync, execPath: "/opt/tender/libexec/tenderd")
+    let controller = ProcessController(
+        environment: fixture.env, store: fixture.store, reconciler: reconciler,
+        releases: ReleaseManager(environment: fixture.env, store: fixture.store, reconciler: reconciler),
+        adoption: Adoption(environment: fixture.env, store: fixture.store, launchd: launchd),
+        vault: fixture.vault, gcp: fixture.sync)
+    let spec = ServiceSpec(name: "api", program: .executable("/bin/sleep"), environment: ["P": "${secret:gcp:MONGO_PASSWORD}"])
+    let request = ApplyRequest(items: [.service(spec)])
+    fixture.fetcher.responses = [tokenResponse, ("secretmanager", Data(#"{"error":{"message":"hunter2"}}"#.utf8), 403)]
+
+    let failed = try await controller.applyManifest(request)
+    #expect(failed.diff.changes.map(\.action) == [.create])
+    let error = try #require(failed.results.first?.error)
+    #expect(error.contains("has never been fetched"))
+    #expect(error.contains("projects/olympsis-prod/secrets/MONGO_PASSWORD@latest"))
+    #expect(error.contains("roles/secretmanager.secretAccessor"))
+    #expect(!error.contains("hunter2"))
+    #expect(try fixture.store.services().isEmpty)
+    #expect(await launchd.loaded.isEmpty)
+
+    fixture.fetcher.responses = [tokenResponse, secretRoute("s3cr3t-value", version: 1)]
+    let applied = try await controller.applyManifest(request)
+    #expect(applied.succeeded, "\(applied)")
+    #expect(try fixture.store.services().map(\.spec.name) == ["api"])
+}
+
 @Test func withoutCredentialsEveryReferenceFailsWithTheSetupStep() async throws {
     let env = try makeTestEnvironment()
     defer { try? FileManager.default.removeItem(at: env.root) }

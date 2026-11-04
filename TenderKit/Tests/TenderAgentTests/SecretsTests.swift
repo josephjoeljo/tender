@@ -388,6 +388,35 @@ private func makeFilesDirectory() throws -> URL {
     }
 }
 
+/// What `tender apply` replaces or prunes loses the secret files it no longer has.
+@Test func applyRemovesTheSecretFilesOfReplacedAndPrunedSpecs() async throws {
+    try await withSecretsDaemon { client, _ async throws in
+        let directory = try makeFilesDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let keep = directory.appending(path: "keep.json").path(percentEncoded: false)
+        let drop = directory.appending(path: "drop.json").path(percentEncoded: false)
+        var spec = ServiceSpec(name: "files", program: .executable("/bin/sleep"), arguments: ["1000"],
+                               secretFiles: [keep: "KEY", drop: "shared/OTHER"])
+        let other = ServiceSpec(name: "other", program: .executable("/bin/sleep"), arguments: ["2000"])
+        #expect(try await client.apply(ApplyRequest(items: [.service(spec), .service(other)])).succeeded)
+        // What `tenderd exec` would have written; MemoryLaunchd runs nothing.
+        try SecretExec.writeFiles([(keep, SecretRef(name: "KEY")), (drop, SecretRef(name: "OTHER", shared: true))],
+                                  secrets: ["KEY": "k", "shared/OTHER": "o"])
+
+        spec.secretFiles = [keep: "KEY"]
+        let replaced = try await client.apply(ApplyRequest(items: [.service(spec), .service(other)]))
+        #expect(replaced.succeeded, "\(replaced)")
+        #expect(replaced.diff.changes.map(\.action) == [.update, .unchanged])
+        #expect(FileManager.default.fileExists(atPath: keep))
+        #expect(!FileManager.default.fileExists(atPath: drop))
+
+        let pruned = try await client.apply(ApplyRequest(items: [.service(other)], prune: true))
+        #expect(pruned.succeeded, "\(pruned)")
+        #expect(pruned.diff.changes.map(\.action) == [.unchanged, .prune])
+        #expect(!FileManager.default.fileExists(atPath: keep))
+    }
+}
+
 @Test func gcpReferencesNeedAProjectAndAFirstFetch() async throws {
     try await withSecretsDaemon { client, env async throws in
         var spec = ServiceSpec(name: "gcp", program: .executable("/bin/sleep"), arguments: ["1000"],
