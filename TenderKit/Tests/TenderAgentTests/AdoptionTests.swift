@@ -27,9 +27,16 @@ import TenderCore
     let reopened = try StateStore(environment: env)
     #expect(try reopened.adoptedJobs() == [job])
     #expect(try reopened.adopted(label: "x.y") == job)
-    try reopened.removeAdopted(label: "x.y")
-    try reopened.removeAdopted(label: "x.y")
+    #expect(try reopened.removeAdopted(label: "x.y"))
+    #expect(try !reopened.removeAdopted(label: "x.y"))
     #expect(try reopened.adoptedJobs().isEmpty)
+}
+
+@Test func forgettingAnUnknownLabelFails() throws {
+    let env = try makeTestEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let adoption = Adoption(environment: env, store: try StateStore(environment: env), launchd: MemoryLaunchd())
+    #expect(throws: AdoptionError.notAdopted("no.such.job")) { try adoption.forget(label: "no.such.job") }
 }
 
 /// A job created outside Tender, in real launchd, driven through the whole API.
@@ -105,7 +112,12 @@ import TenderCore
     }
 
     _ = try await client.forget(label: jobLabel)
-    _ = try await client.forget(label: jobLabel)
+    do {
+        _ = try await client.forget(label: jobLabel)
+        Issue.record("forgetting twice must say the job isn't adopted")
+    } catch let error as TenderClientError {
+        #expect(error.code == "not_adopted")
+    }
     #expect(try await status() == nil)
     #expect(try await launchctl.print(label: jobLabel) != nil, "forget must leave the job running")
     #expect(try Data(contentsOf: plist) == original, "the plist must never be rewritten")

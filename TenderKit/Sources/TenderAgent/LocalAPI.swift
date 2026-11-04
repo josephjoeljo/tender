@@ -61,9 +61,14 @@ struct ProcessController: Sendable {
         return try await list()
     }
 
-    /// Idempotent. Leaves the launchd job exactly as it is.
+    /// Leaves the launchd job exactly as it is. A label that isn't adopted is a 404,
+    /// so that a typo or the wrong `--node` doesn't look like it worked.
     func forget(label: String) async throws -> ProcessList {
-        try adoption.forget(label: label)
+        do {
+            try adoption.forget(label: label)
+        } catch let error as AdoptionError {
+            throw APIFailure(status: .notFound, code: "not_adopted", message: error.description)
+        }
         return try await list()
     }
 
@@ -103,7 +108,7 @@ struct ProcessController: Sendable {
     func delete(service: String) async throws -> ProcessList {
         if try store.adopted(label: service) != nil {
             throw APIFailure(status: .conflict, code: "adopted_job",
-                             message: "'\(service)' is adopted. Use `tender adopt --forget` to stop managing it.")
+                             message: "'\(service)' is adopted. Use `tender abandon \(service)` to stop managing it.")
         }
         try store.deleteService(service)
         return try await finish(try await reconciler.reconcile(), service: service)
@@ -275,7 +280,7 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
         do {
             return try logsResponse(
                 request: request,
-                name: try context.parameters.require("name"),
+                name: try context.parameters.requireDecoded("name"),
                 controller: controller
             )
         } catch let failure as APIFailure {
@@ -354,8 +359,8 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
     }
     router.post("/v1/processes/:name/:action") { _, context in
         await respond {
-            let name = try context.parameters.require("name")
-            switch try context.parameters.require("action") {
+            let name = try context.parameters.requireDecoded("name")
+            switch try context.parameters.requireDecoded("action") {
             case "start": return try await controller.start(service: name)
             case "stop": return try await controller.stop(service: name)
             case "restart": return try await controller.restart(service: name)
@@ -365,7 +370,7 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
         }
     }
     router.delete("/v1/processes/:name") { _, context in
-        await respond { try await controller.delete(service: try context.parameters.require("name")) }
+        await respond { try await controller.delete(service: try context.parameters.requireDecoded("name")) }
     }
 
     router.post("/v1/gc") { _, _ in
@@ -373,7 +378,7 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
     }
 
     router.get("/v1/releases/:service") { _, context in
-        await respond { try await controller.releases.list(service: try context.parameters.require("service")) }
+        await respond { try await controller.releases.list(service: try context.parameters.requireDecoded("service")) }
     }
     router.post("/v1/releases/:service/rollback") { request, context in
         await respond {
@@ -382,7 +387,7 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
             let rollback = body.readableBytes == 0
                 ? RollbackRequest()
                 : try decodeBody(RollbackRequest.self, Data(body.readableBytesView))
-            return try await controller.rollback(service: try context.parameters.require("service"), to: rollback.to)
+            return try await controller.rollback(service: try context.parameters.requireDecoded("service"), to: rollback.to)
         }
     }
 
@@ -394,7 +399,7 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
         }
     }
     router.delete("/v1/adopt/:label") { _, context in
-        await respond { try await controller.forget(label: try context.parameters.require("label")) }
+        await respond { try await controller.forget(label: try context.parameters.requireDecoded("label")) }
     }
 
     return router

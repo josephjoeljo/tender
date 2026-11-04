@@ -95,6 +95,7 @@ To debug the daemon instead of installing it, add these launch arguments to the 
 | `tender list` | List managed processes |
 | `tender logs <name> -f` | Follow a service's logs |
 | `tender adopt <label>` | Manage an existing launchd job, such as Homebrew's `mongod` |
+| `tender abandon <label>` | Stop managing an adopted job; the job keeps running untouched |
 | `tender releases <name>` | List a service's releases |
 | `tender rollback <name>` | Go back to an earlier release |
 | `tender deploy <name> --release <version>` | Fetch a release and restart on it. Needs a [release source](docs/ops/releases-and-logs.md) |
