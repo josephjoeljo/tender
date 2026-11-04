@@ -116,9 +116,14 @@ struct ProcessController: Sendable {
         return try await list()
     }
 
-    /// Idempotent. Leaves the launchd job exactly as it is.
+    /// Leaves the launchd job exactly as it is. A label that isn't adopted is a 404,
+    /// so that a typo or the wrong `--node` doesn't look like it worked.
     func forget(label: String) async throws -> ProcessList {
-        try adoption.forget(label: label)
+        do {
+            try adoption.forget(label: label)
+        } catch let error as AdoptionError {
+            throw APIFailure(status: .notFound, code: "not_adopted", message: error.description)
+        }
         return try await list()
     }
 

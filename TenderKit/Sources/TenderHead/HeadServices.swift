@@ -522,8 +522,11 @@ public final class HeadServices: Sendable {
         router.delete("/v1/adopt/:label") { [self] request, context in
             await respond {
                 let label = try context.parameters.requireDecoded("label")
-                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
-                _ = try await translatingTransport(target) { try await agent(on: target).forgetAdopted(label: label) }
+                // Adopted jobs report the label as their service, so this finds the
+                // node it was adopted on. With none, the head's own node says not_adopted.
+                for target in await targets(service: label, node: request.uri.queryParameters.get("node")) {
+                    _ = try await translatingTransport(target) { try await agent(on: target).forgetAdopted(label: label) }
+                }
                 return await clusterStatus()
             }
         }

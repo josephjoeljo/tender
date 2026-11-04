@@ -358,7 +358,7 @@ extension Tender {
             discussion: "The job, its plist and its logs are left exactly as they are. Adopt it again any time."
         )
         @Argument(help: "launchd label of the adopted job.") var label: String
-        @Option(help: "Node the job runs on. Defaults to the node you're talking to.") var node: String?
+        @Option(help: "Only on this node. Defaults to every node that adopted it.") var node: String?
         @OptionGroup var options: CommonOptions
 
         func run() async throws {
