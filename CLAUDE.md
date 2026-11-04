@@ -171,10 +171,14 @@ Production uses `/opt/tender`, `/Library/LaunchDaemons`, and the `system` domain
 
 ## Milestones
 
-Detailed plans: `docs/plans/milestone-{1..5}.md`.
+Detailed plans: `docs/plans/milestone-{1,1.5,2,3,4,5}.md`.
 
 1. **Single-node agent** — pm2 parity on launchd: start/stop/restart/delete/list,
    logs, adopt, binaries-folder watching. Done.
+1.5. **Service files + secrets** — `tender apply -f services.yaml` with
+   diff/dry-run/prune, `env_file`, `tender export`; GCP Secret Manager as a later
+   secrets source. Per-node secrets (§4–6) shipped with milestone 4. ← current
+   (plan: `docs/plans/milestone-1.5.md`)
 2. **Head + join** (binaries placed on workers by hand for now) — spike: `@Resolvable` across modules over loopback on our
    macOS version; then TenderActorSystem, node registration, mTLS, remote commands,
    cluster-wide `tender list`.

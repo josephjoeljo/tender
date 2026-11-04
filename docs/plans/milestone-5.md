@@ -16,7 +16,9 @@ Order reflects dependencies.
 - Port allocation per instance.
 
 ## 5c. Declarative manifests
-- `tender apply -f services.yaml` (format in DESIGN.md §11); diff and dry-run.
+- `tender apply -f`, diff, dry-run and the base format ship in milestone 1.5.
+  5c adds `health`, `rollout`, `replicas`, `placement.labels` and `${svc:…}`
+  (format in DESIGN.md §11).
 
 ## 5d. Rolling deploys
 - Surge instances on extra stable slot labels + allocated ports; start new →
