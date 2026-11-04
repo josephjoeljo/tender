@@ -187,8 +187,13 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 - GCP Secret Manager is an additional source behind the same refs, not a
   replacement.
 
-## Open questions
+## Decided while building
 
-- pm2 `env_<profile>` blocks (`--env production`): needed, or one file per
-  environment?
-- `max_memory_restart` / `cron_restart` parity: in this milestone or later?
+- Per-node secrets (§4–6) shipped with milestone 4; this milestone adds service
+  files, `secret_files` and GCP refs on top.
+- No pm2 `env_<profile>` blocks: one file per environment
+  (`services.prod.yaml`, `services.staging.yaml`), with `env_file` for what
+  differs.
+- `max_memory_restart` / `cron_restart`: later, with health checks (milestone 5).
+- `secret_files` values are refs as written inside `${secret:…}`; the spec stores
+  the ref, never the value.
