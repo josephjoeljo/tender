@@ -268,26 +268,37 @@ public final class HeadServices: Sendable {
 
     // MARK: Service files
 
-    /// Every node's full specs, in parallel. `node` asks only that one.
+    /// Every node's full specs, in parallel. `node` asks only that one. A node that can't
+    /// be reached is unreachable; one that answers with an error is reported with it.
     func clusterSpecs(node: String? = nil) async -> SpecList {
         var asked = node.map { [NodeID($0)] } ?? []
         if node == nil { asked = Array(Set(await state.upNodes() + [options.nodeID])) }
         var combined = SpecList(nodes: [])
         if node == nil { combined.unreachableNodes = await state.downNodes().map(\.rawValue) }
-        await withTaskGroup(of: (NodeID, NodeSpecs?).self) { group in
+        await withTaskGroup(of: (NodeID, Result<NodeSpecs, any Error>).self) { group in
             for node in asked {
-                group.addTask { [self] in (node, try? await agent(on: node).specs()) }
+                group.addTask { [self] in
+                    do {
+                        return (node, .success(try await agent(on: node).specs()))
+                    } catch {
+                        return (node, .failure(error))
+                    }
+                }
             }
-            for await (node, specs) in group {
-                if let specs {
+            for await (node, result) in group {
+                switch result {
+                case .success(let specs):
                     combined.nodes.append(specs)
-                } else if !combined.unreachableNodes.contains(node.rawValue) {
-                    combined.unreachableNodes.append(node.rawValue)
+                case .failure(is TransportError):
+                    if !combined.unreachableNodes.contains(node.rawValue) { combined.unreachableNodes.append(node.rawValue) }
+                case .failure(let error):
+                    combined.failedNodes.append(NodeFailure(node: node, error: "\(error)"))
                 }
             }
         }
         combined.nodes.sort { $0.node.rawValue < $1.node.rawValue }
         combined.unreachableNodes.sort()
+        combined.failedNodes.sort { $0.node.rawValue < $1.node.rawValue }
         return combined
     }
 

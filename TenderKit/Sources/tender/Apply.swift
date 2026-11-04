@@ -87,6 +87,9 @@ extension Tender {
                 for unreachable in list.unreachableNodes {
                     FileHandle.standardError.write(Data("warning: \(unreachable) is unreachable and left out.\n".utf8))
                 }
+                for failure in list.failedNodes {
+                    FileHandle.standardError.write(Data("warning: \(failure.node) is left out: \(terminalSafe(failure.error))\n".utf8))
+                }
                 print(try ServiceFile.render(list.items(service: service, node: node)), terminator: "")
             } catch let error as TenderClientError {
                 try options.fail(error)

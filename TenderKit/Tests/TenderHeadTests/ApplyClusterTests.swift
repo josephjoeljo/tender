@@ -1,5 +1,6 @@
 import AsyncHTTPClient
 import Foundation
+import GRDB
 import Testing
 @testable import TenderClient
 import TenderCore
@@ -187,5 +188,19 @@ private func actions(_ response: ApplyResponse) -> [String] {
             #expect(error.description.contains("twice"))
         }
         #expect(try await head.client.list().processes.isEmpty)
+    }
+}
+
+@Test func exportReportsANodesErrorRatherThanCallingItUnreachable() async throws {
+    try await withCluster { head, worker async throws in
+        _ = try await head.client.apply(try request(file.components(separatedBy: "---")[1]))
+        // A spec the worker can't decode makes its specs() throw, though it's up.
+        let db = try DatabaseQueue(path: worker.env.stateDB.path(percentEncoded: false))
+        try await db.write { try $0.execute(sql: "UPDATE services SET spec = 'not json'") }
+        let list = try await head.client.specs()
+        #expect(list.unreachableNodes.isEmpty)
+        #expect(list.failedNodes.map(\.node) == [NodeID("worker")])
+        #expect(list.failedNodes.first?.error.isEmpty == false)
+        #expect(list.nodes.map(\.node) == [NodeID("head")])
     }
 }

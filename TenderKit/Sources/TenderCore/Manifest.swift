@@ -178,11 +178,23 @@ public struct NodeSpecs: Codable, Sendable, Equatable {
 /// Response of `GET /v1/specs`.
 public struct SpecList: Codable, Sendable, Equatable {
     public var nodes: [NodeSpecs]
+    /// Down, or the call didn't get through.
     public var unreachableNodes: [String]
+    /// Reached, but reading the specs failed there.
+    public var failedNodes: [NodeFailure]
 
-    public init(nodes: [NodeSpecs], unreachableNodes: [String] = []) {
+    public init(nodes: [NodeSpecs], unreachableNodes: [String] = [], failedNodes: [NodeFailure] = []) {
         self.nodes = nodes
         self.unreachableNodes = unreachableNodes
+        self.failedNodes = failedNodes
+    }
+
+    /// Heads from before `failedNodes` don't send it.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        nodes = try container.decode([NodeSpecs].self, forKey: .nodes)
+        unreachableNodes = try container.decode([String].self, forKey: .unreachableNodes)
+        failedNodes = try container.decodeIfPresent([NodeFailure].self, forKey: .failedNodes) ?? []
     }
 
     /// Every service and adopted job, in a stable order, each with its node set.
