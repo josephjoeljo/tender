@@ -11,7 +11,6 @@ import TenderActorSystem
 import TenderAgent
 import TenderCore
 import TenderLogStore
-import TenderMCP
 import TenderMetrics
 import TenderPKI
 import TenderProtocol
@@ -61,8 +60,6 @@ public final class HeadServices: Sendable {
     public let logs: LogStore
     public let audit: AuditLog
     private let deploys = DeployCounter()
-    /// One instance, so that the write rate limit holds across requests.
-    let mcpTools = NIOLockedValueBox<TenderTools?>(nil)
     private let environment: TenderEnvironment
     private let secrets: any SecretStore
     private let authority: CertificateAuthority
@@ -216,13 +213,13 @@ public final class HeadServices: Sendable {
     }
 
     /// Which nodes a by-name command means: the one asked for, or everywhere the service runs.
-    func targets(service: String, node: String?) async -> [NodeID] {
+    private func targets(service: String, node: String?) async -> [NodeID] {
         if let node { return [NodeID(node)] }
         let running = await state.nodes(running: service)
         return running.isEmpty ? [options.nodeID] : running
     }
 
-    func command(_ build: (String) -> AgentCommand, service: String, node: String?) async throws -> ProcessList {
+    private func command(_ build: (String) -> AgentCommand, service: String, node: String?) async throws -> ProcessList {
         for target in await targets(service: service, node: node) {
             _ = try await translatingTransport(target) { try await agent(on: target).apply(build(service)) }
         }
@@ -267,7 +264,7 @@ public final class HeadServices: Sendable {
         return combined
     }
 
-    func translatingTransport<T: Sendable>(_ node: NodeID, _ call: () async throws -> T) async throws -> T {
+    private func translatingTransport<T: Sendable>(_ node: NodeID, _ call: () async throws -> T) async throws -> T {
         do {
             return try await call()
         } catch let error as TransportError {
@@ -275,7 +272,7 @@ public final class HeadServices: Sendable {
         }
     }
 
-    func rollback(service: String, to sha12: String?, node: String?) async throws -> ProcessList {
+    private func rollback(service: String, to sha12: String?, node: String?) async throws -> ProcessList {
         for target in await targets(service: service, node: node) {
             _ = try await translatingTransport(target) { try await agent(on: target).rollback(service: service, to: sha12) }
         }
@@ -669,7 +666,6 @@ public final class HeadServices: Sendable {
             await respond { try await handleJoin(try await decode(JoinRequest.self, from: request)) }
         }
         installClusterRoutes(on: router)
-        installMCPRoute(on: router)
         return router
     }
 
@@ -709,8 +705,7 @@ struct BearerAuthMiddleware: RouterMiddleware {
         guard let token = try? store.apiToken(secret: presented) else {
             return errorResponse(NodeCallError(code: "unauthorized", message: "Unknown token.", httpStatus: 401))
         }
-        // MCP is always POST; its tools check the scope one by one.
-        if request.method != .get, token.scope != .write, request.uri.path != TenderMCPRoute.path {
+        if request.method != .get, token.scope != .write {
             return errorResponse(NodeCallError(code: "forbidden", message: "This token is read-only.", httpStatus: 403))
         }
         return try await next(request, context)

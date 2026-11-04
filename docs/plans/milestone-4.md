@@ -63,13 +63,9 @@ Out of scope: health checks, discovery, rolling deploys.
 
 ## Decisions
 
-- Write tools take `dry_run`: it returns the planned action from the current
-  process list, changes nothing, and isn't rate limited.
-- The HTTP endpoint is stateless streamable HTTP (one JSON response per POST, no
-  sessions, GET → 405), with a fresh MCP server per request so that JSON-RPC ids
-  from different clients can't collide.
-- `tender mcp` runs the tools locally over `TenderClient` instead of forwarding MCP
-  frames: the head then checks the bridge's token and audits each forwarded call
-  like any CLI call.
-- MCP requests are audited per tool call (read tools too), not per HTTP request.
-- Per-node secrets from milestone 1.5 (§4–6) ship in this milestone.
+- Shelved (November 2026). Agents run the `tender` CLI through a Claude Code skill
+  instead: no extra dependency, and API token scopes are still enforced by the
+  head. Revisit when an agent without a shell (Claude Desktop, a hosted agent)
+  needs to operate the cluster, or when limits must be enforced server-side
+  rather than asked for in the skill.
+- Per-node secrets from milestone 1.5 (§4–6) ship in this milestone instead.

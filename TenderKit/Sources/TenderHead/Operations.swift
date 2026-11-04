@@ -17,11 +17,6 @@ public final class AuditLog: Sendable {
         public var method: String
         public var path: String
         public var status: Int
-        /// MCP tool calls only. Arguments are the tool's own; no tool takes a secret.
-        public var tool: String? = nil
-        public var arguments: String? = nil
-        public var error: String? = nil
-        public var durationMs: Int? = nil
     }
 
     public let directory: URL
@@ -71,10 +66,7 @@ struct AuditMiddleware: RouterMiddleware {
 
     func handle(_ request: Request, context: Context,
                 next: (Request, Context) async throws -> Response) async throws -> Response {
-        // MCP calls are recorded per tool, with their arguments, by the MCP route.
-        guard request.method != .get, request.uri.path != "/v1/join", request.uri.path != TenderMCPRoute.path else {
-            return try await next(request, context)
-        }
+        guard request.method != .get, request.uri.path != "/v1/join" else { return try await next(request, context) }
         do {
             let response = try await next(request, context)
             audit.record(.init(time: Date(), who: who(request), method: request.method.rawValue,

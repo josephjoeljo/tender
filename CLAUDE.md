@@ -185,12 +185,11 @@ Detailed plans: `docs/plans/milestone-{1..5}.md`.
    fetching from GCP Artifact Registry / GCS / S3.
    Plus the TenderApp dashboard: nodes, processes, logs (search + follow), releases.
    Plus Prometheus `/metrics` on the head.
-4. **MCP server** — read tools (`list_nodes`, `list_processes`,
-   `describe_process`, `search_logs`, `get_metrics_summary`, `list_releases`) +
-   mutating tools (`start/stop/restart_process`, `deploy/rollback_release`, all with
-   `dry_run`), per-token scopes, per-tool audit, write rate limit; streamable HTTP at
-   `/mcp` on the head + `tender mcp` stdio bridge (docs/ops/mcp.md). Plus per-node
-   secrets (milestone 1.5 §4–6).
+4. **Per-node secrets + agent skill** — milestone 1.5 §4–6 (`tender secret`,
+   `${secret:NAME}`, `tenderd exec`). The MCP server is shelved: agents use the
+   `tender` CLI through a Claude Code skill (`~/.claude/skills/tender`), with API
+   token scopes enforced by the head. The MCP plan stays in
+   `docs/plans/milestone-4.md` for when a shell-less agent needs it.
 5. **Later** — health checks → service discovery (registry + DNS) → rolling
    deploys (per-instance labels/ports, maxSurge/maxUnavailable) → load balancer.
 
