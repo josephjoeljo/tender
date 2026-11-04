@@ -1,6 +1,7 @@
+import AsyncHTTPClient
 import Foundation
 import Testing
-import TenderClient
+@testable import TenderClient
 import TenderCore
 import TenderLogStore
 @testable import TenderHead
@@ -113,5 +114,34 @@ private func actions(_ response: ApplyResponse) -> [String] {
         }
         let specs = try await TenderClient(head: address, caPEM: caPEM, token: writer.token).specs()
         #expect(specs.items().map(\.name) == ["api"])
+    }
+}
+
+/// The router drops empty path segments, so every spelling of `/v1/specs` reaches the
+/// handler and has to meet the same check.
+@Test func readingSpecsRemotelyTakesAWriteTokenHoweverThePathIsSpelled() async throws {
+    try await withCluster { head, _ async throws in
+        _ = try await head.client.apply(try request(file.components(separatedBy: "---")[0]))
+        let reader = try await head.client.createAPIToken(name: "reader", scope: .read)
+        let writer = try await head.client.createAPIToken(name: "writer", scope: .write)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let client = try PinnedClients.client(caPEM: try await ClientPinning.fetchCA(head: address, credential: reader.token))
+        func get(_ path: String, _ token: String) async throws -> (UInt, String) {
+            var request = HTTPClientRequest(url: "https://\(address)\(path)")
+            request.headers.add(name: "Authorization", value: "Bearer \(token)")
+            let response = try await client.execute(request, timeout: .seconds(30))
+            let body = try await response.body.collect(upTo: 1 << 20)
+            return (response.status.code, String(buffer: body))
+        }
+        for path in ["/v1/specs", "/v1/specs/", "//v1/specs", "/v1//specs", "/v1/specs?node=head"] {
+            let (status, body) = try await get(path, reader.token)
+            #expect(status == 403, "\(path)")
+            #expect(!body.contains("literal-password"), "\(path)")
+        }
+        let (status, body) = try await get("/v1//specs/", writer.token)
+        #expect(status == 200)
+        #expect(body.contains("literal-password"))
+        // Other reads still take a read token.
+        #expect(try await get("//v1/processes/", reader.token).0 == 200)
     }
 }

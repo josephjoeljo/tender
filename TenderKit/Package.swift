@@ -128,6 +128,7 @@ let package = Package(
         .testTarget(name: "TenderHeadTests", dependencies: [
             "TenderHead", "TenderAgent", "TenderClient", "TenderCore", "TenderPKI", "TenderActorSystem", "TenderProtocol", "LaunchdKit", "TenderLogStore",
             .product(name: "Crypto", package: "swift-crypto"),
+            .product(name: "AsyncHTTPClient", package: "async-http-client"),
         ]),
         .testTarget(name: "TenderLogStoreTests", dependencies: ["TenderLogStore", "TenderCore"]),
         .testTarget(name: "TenderMetricsTests", dependencies: ["TenderMetrics", "TenderCore"]),

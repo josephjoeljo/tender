@@ -71,16 +71,16 @@ struct AuditMiddleware: RouterMiddleware {
 
     func handle(_ request: Request, context: Context,
                 next: (Request, Context) async throws -> Response) async throws -> Response {
-        guard request.method != .get, request.uri.path != "/v1/join" else { return try await next(request, context) }
+        guard request.method != .get, request.routedPath != "/v1/join" else { return try await next(request, context) }
         let note = AuditNote()
         do {
             let response = try await AuditLog.$note.withValue(note) { try await next(request, context) }
             audit.record(.init(time: Date(), who: who(request), method: request.method.rawValue,
-                               path: request.uri.path, status: response.status.code, detail: note.text))
+                               path: request.routedPath, status: response.status.code, detail: note.text))
             return response
         } catch {
             audit.record(.init(time: Date(), who: who(request), method: request.method.rawValue,
-                               path: request.uri.path, status: 500, detail: note.text))
+                               path: request.routedPath, status: 500, detail: note.text))
             throw error
         }
     }

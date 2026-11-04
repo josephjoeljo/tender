@@ -505,7 +505,8 @@ public final class HeadServices: Sendable {
     // MARK: Routes
 
     /// Shared by the Unix socket and the public listener.
-    private func installClusterRoutes(on router: Router<BasicRequestContext>) {
+    /// `remote` is the public listener, where some reads need a write token.
+    private func installClusterRoutes(on router: Router<BasicRequestContext>, remote: Bool = false) {
         router.get("/v1/logs") { [self] request, _ in
             await respond { try await logs.search(try logQuery(from: request)) }
         }
@@ -563,8 +564,10 @@ public final class HeadServices: Sendable {
                 return await clusterSecrets(nodes: nodes)
             }
         }
-        // Full specs, environment included, so a token needs write scope (see BearerAuthMiddleware).
-        router.get("/v1/specs") { [self] request, _ in
+        // Full specs, environment included, so a remote token needs write scope. The check
+        // is on the route rather than on the path, so `/v1/specs/` and `//v1/specs` get it too.
+        let specs = remote ? router.group().add(middleware: WriteScopeMiddleware(store: store)) : router.group()
+        specs.get("/v1/specs") { [self] request, _ in
             await respond { await clusterSpecs(node: request.uri.queryParameters.get("node")) }
         }
         router.post("/v1/apply") { [self] request, _ in
@@ -766,7 +769,7 @@ public final class HeadServices: Sendable {
         router.post("/v1/join") { [self] request, _ in
             await respond { try await handleJoin(try await decode(JoinRequest.self, from: request)) }
         }
-        installClusterRoutes(on: router)
+        installClusterRoutes(on: router, remote: true)
         return router
     }
 
@@ -789,30 +792,58 @@ public final class HeadServices: Sendable {
     }
 }
 
+extension Request {
+    /// The path as the router matches it, which drops empty segments: `//v1/join/` reaches
+    /// the `/v1/join` handler, so a middleware comparing paths has to see it that way too.
+    var routedPath: String { "/" + uri.path.split(separator: "/").joined(separator: "/") }
+}
+
 /// `Authorization: Bearer <token>`. `GET` needs read scope, everything else write.
 struct BearerAuthMiddleware: RouterMiddleware {
     typealias Context = BasicRequestContext
     static let publicPaths: Set<String> = ["/v1/ca", "/v1/join"]
-    /// Reads that need write scope: specs can hold literal credentials from an `env_file`,
-    /// and a write token could set them anyway.
-    static let privateReads: Set<String> = ["/v1/specs"]
     let store: HeadStore
 
     func handle(_ request: Request, context: Context,
                 next: (Request, Context) async throws -> Response) async throws -> Response {
-        if Self.publicPaths.contains(request.uri.path) { return try await next(request, context) }
+        if Self.publicPaths.contains(request.routedPath) { return try await next(request, context) }
+        let token: APITokenInfo
+        switch Self.token(of: request, store: store) {
+        case .success(let found): token = found
+        case .failure(let error): return errorResponse(error)
+        }
+        if request.method != .get, token.scope != .write { return errorResponse(WriteScopeMiddleware.forbidden) }
+        return try await next(request, context)
+    }
+
+    static func token(of request: Request, store: HeadStore) -> Result<APITokenInfo, NodeCallError> {
         guard let header = request.headers[.authorization], header.hasPrefix("Bearer ") else {
-            return errorResponse(NodeCallError(code: "unauthorized", message: "A bearer token is required.", httpStatus: 401))
+            return .failure(NodeCallError(code: "unauthorized", message: "A bearer token is required.", httpStatus: 401))
         }
         // Clients may present the full `<secret>.<fingerprint>`; only the secret is stored.
         let presented = header.dropFirst("Bearer ".count).split(separator: ".").first.map(String.init) ?? ""
         guard let token = try? store.apiToken(secret: presented) else {
-            return errorResponse(NodeCallError(code: "unauthorized", message: "Unknown token.", httpStatus: 401))
+            return .failure(NodeCallError(code: "unauthorized", message: "Unknown token.", httpStatus: 401))
         }
-        if request.method != .get || Self.privateReads.contains(request.uri.path), token.scope != .write {
-            return errorResponse(NodeCallError(code: "forbidden", message: "This token is read-only.", httpStatus: 403))
+        return .success(token)
+    }
+}
+
+/// For reads that need write scope: specs can hold literal credentials from an `env_file`,
+/// and a write token could set them anyway. It goes on the route, so it runs only once the
+/// router has matched, whatever the spelling of the path.
+struct WriteScopeMiddleware: RouterMiddleware {
+    typealias Context = BasicRequestContext
+    static let forbidden = NodeCallError(code: "forbidden", message: "This token is read-only.", httpStatus: 403)
+    let store: HeadStore
+
+    func handle(_ request: Request, context: Context,
+                next: (Request, Context) async throws -> Response) async throws -> Response {
+        switch BearerAuthMiddleware.token(of: request, store: store) {
+        case .success(let token) where token.scope == .write: return try await next(request, context)
+        case .success: return errorResponse(Self.forbidden)
+        case .failure(let error): return errorResponse(error)
         }
-        return try await next(request, context)
     }
 }
 
