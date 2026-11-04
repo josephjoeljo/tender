@@ -35,6 +35,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.5.0"),
+        // Service files. TenderClient only: the app and the daemons never parse YAML.
+        .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2"),
     ],
     targets: [
         // MARK: 0 — Foundation
@@ -93,6 +95,7 @@ let package = Package(
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOHTTP1", package: "swift-nio"),
+            .product(name: "Yams", package: "Yams"),
         ]),
         .target(name: "TenderHead", dependencies: [
             "TenderCore", "TenderProtocol", "TenderActorSystem", "TenderAgent", "TenderLogStore", "TenderPKI",
@@ -136,6 +139,7 @@ let package = Package(
         .testTarget(name: "ProcessMetricsTests", dependencies: ["ProcessMetrics"]),
         .testTarget(name: "LogTailTests", dependencies: ["LogTail", "LaunchdKit"]),
         .testTarget(name: "TenderCoreTests", dependencies: ["TenderCore"]),
+        .testTarget(name: "TenderClientTests", dependencies: ["TenderClient", "TenderCore"]),
         .testTarget(name: "TenderAgentTests", dependencies: [
             "TenderAgent", "TenderClient", "TenderCore", "LaunchdKit", "LogTail", "FileWatch",
             .product(name: "Crypto", package: "swift-crypto"),
