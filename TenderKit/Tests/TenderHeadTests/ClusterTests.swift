@@ -13,7 +13,12 @@ import TenderProtocol
 
 actor MemoryLaunchd: LaunchdControlling {
     var loaded: Set<String> = []
-    func bootstrap(plistURL: URL) async throws { loaded.insert(plistURL.deletingPathExtension().lastPathComponent) }
+    /// Every start, so that tests can tell an untouched job from a restarted one.
+    var bootstraps = 0
+    func bootstrap(plistURL: URL) async throws {
+        bootstraps += 1
+        loaded.insert(plistURL.deletingPathExtension().lastPathComponent)
+    }
     func bootout(label: String) async throws {
         guard loaded.remove(label) != nil else { throw LaunchctlError.notFound(label) }
     }
@@ -112,7 +117,7 @@ final class Daemon: @unchecked Sendable {
 private let sleeper = ServiceSpec(name: "api", program: .executable("/bin/sleep"), arguments: ["1000"])
 
 /// Starts a head and a joined worker.
-private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async throws {
+func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async throws {
     let head = try Daemon(node: "head", head: true)
     let worker = try Daemon(node: "worker", head: false)
     try await head.start()

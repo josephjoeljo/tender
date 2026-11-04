@@ -29,6 +29,10 @@ distributed actor TestAgent: NodeAgentProtocol {
     distributed func setSecret(_ name: String, value: Data) async throws {}
     distributed func deleteSecret(_ name: String) async throws {}
     distributed func listSecrets() async throws -> SecretList { SecretList(secrets: []) }
+    distributed func specs() async throws -> NodeSpecs { NodeSpecs(node: id.node) }
+    distributed func applyManifest(_ request: ApplyRequest) async throws -> ApplyResponse {
+        ApplyResponse(diff: ManifestDiff(), dryRun: request.dryRun)
+    }
 }
 
 distributed actor TestRegistry: HeadRegistryProtocol {

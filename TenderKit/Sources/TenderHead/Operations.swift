@@ -17,7 +17,12 @@ public final class AuditLog: Sendable {
         public var method: String
         public var path: String
         public var status: Int
+        /// A handler's own summary, such as an apply's file hash and counts. Never values.
+        public var detail: String? = nil
     }
+
+    /// Set while a call runs, so that its handler can add a `detail` to the call's record.
+    @TaskLocal static var note: AuditNote?
 
     public let directory: URL
     private let lock = NIOLock()
@@ -67,16 +72,26 @@ struct AuditMiddleware: RouterMiddleware {
     func handle(_ request: Request, context: Context,
                 next: (Request, Context) async throws -> Response) async throws -> Response {
         guard request.method != .get, request.uri.path != "/v1/join" else { return try await next(request, context) }
+        let note = AuditNote()
         do {
-            let response = try await next(request, context)
+            let response = try await AuditLog.$note.withValue(note) { try await next(request, context) }
             audit.record(.init(time: Date(), who: who(request), method: request.method.rawValue,
-                               path: request.uri.path, status: response.status.code))
+                               path: request.uri.path, status: response.status.code, detail: note.text))
             return response
         } catch {
             audit.record(.init(time: Date(), who: who(request), method: request.method.rawValue,
-                               path: request.uri.path, status: 500))
+                               path: request.uri.path, status: 500, detail: note.text))
             throw error
         }
+    }
+}
+
+final class AuditNote: Sendable {
+    private let box = NIOLockedValueBox<String?>(nil)
+
+    var text: String? {
+        get { box.withLockedValue { $0 } }
+        set { box.withLockedValue { $0 = newValue } }
     }
 }
 

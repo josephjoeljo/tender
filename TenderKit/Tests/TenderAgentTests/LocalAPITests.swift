@@ -9,7 +9,12 @@ import TenderCore
 /// In-memory launchd: the API tests are about HTTP, not launchctl.
 actor MemoryLaunchd: LaunchdControlling {
     var loaded: Set<String> = []
-    func bootstrap(plistURL: URL) async throws { loaded.insert(plistURL.deletingPathExtension().lastPathComponent) }
+    /// Every start, so that tests can tell an untouched job from a restarted one.
+    var bootstraps = 0
+    func bootstrap(plistURL: URL) async throws {
+        bootstraps += 1
+        loaded.insert(plistURL.deletingPathExtension().lastPathComponent)
+    }
     func bootout(label: String) async throws {
         guard loaded.remove(label) != nil else { throw LaunchctlError.notFound(label) }
     }
@@ -23,7 +28,7 @@ actor MemoryLaunchd: LaunchdControlling {
 }
 
 /// Runs a daemon on a temp socket for the duration of `body`.
-private func withDaemon(launchd: MemoryLaunchd = MemoryLaunchd(),
+func withDaemon(launchd: MemoryLaunchd = MemoryLaunchd(),
                         _ body: (TenderClient, TenderEnvironment) async throws -> Void) async throws {
     let env = try makeTestEnvironment()
     defer { try? FileManager.default.removeItem(at: env.root) }

@@ -264,6 +264,95 @@ public final class HeadServices: Sendable {
         return combined
     }
 
+    // MARK: Service files
+
+    /// Every node's full specs, in parallel. `node` asks only that one.
+    func clusterSpecs(node: String? = nil) async -> SpecList {
+        var asked = node.map { [NodeID($0)] } ?? []
+        if node == nil { asked = Array(Set(await state.upNodes() + [options.nodeID])) }
+        var combined = SpecList(nodes: [])
+        if node == nil { combined.unreachableNodes = await state.downNodes().map(\.rawValue) }
+        await withTaskGroup(of: (NodeID, NodeSpecs?).self) { group in
+            for node in asked {
+                group.addTask { [self] in (node, try? await agent(on: node).specs()) }
+            }
+            for await (node, specs) in group {
+                if let specs {
+                    combined.nodes.append(specs)
+                } else if !combined.unreachableNodes.contains(node.rawValue) {
+                    combined.unreachableNodes.append(node.rawValue)
+                }
+            }
+        }
+        combined.nodes.sort { $0.node.rawValue < $1.node.rawValue }
+        combined.unreachableNodes.sort()
+        return combined
+    }
+
+    /// Splits the file by node and lets each node diff and apply its part, in parallel. A
+    /// node that fails is reported and the others go ahead; nothing is rolled back. With
+    /// `prune`, every node that's up is asked, so that services the file doesn't list go.
+    func apply(_ request: ApplyRequest) async throws -> ApplyResponse {
+        let known = Set(await state.summaries().map(\.info.id) + [options.nodeID])
+        do {
+            try Manifest(items: request.items).validate(knownNodes: known)
+        } catch let error as ManifestError {
+            throw NodeCallError(code: "invalid_manifest", message: error.message, httpStatus: 400)
+        }
+        var byNode: [NodeID: [ManifestItem]] = [:]
+        for var item in request.items {
+            item.node = item.node ?? options.nodeID
+            byNode[item.node!, default: []].append(item)
+        }
+        var failed: [NodeFailure] = []
+        if request.prune {
+            for node in await state.upNodes() + [options.nodeID] where byNode[node] == nil { byNode[node] = [] }
+            for node in await state.downNodes() where byNode[node] == nil {
+                failed.append(NodeFailure(node: node, error: "\(node) is down, so it wasn't pruned."))
+            }
+        }
+        var responses: [(NodeID, ApplyResponse)] = []
+        await withTaskGroup(of: (NodeID, Result<ApplyResponse, any Error>).self) { group in
+            for (node, items) in byNode {
+                let part = ApplyRequest(items: items, prune: request.prune, dryRun: request.dryRun, sha256: request.sha256)
+                group.addTask { [self] in
+                    do {
+                        return (node, .success(try await translatingTransport(node) { try await agent(on: node).applyManifest(part) }))
+                    } catch {
+                        return (node, .failure(error))
+                    }
+                }
+            }
+            for await (node, result) in group {
+                switch result {
+                case .success(let response): responses.append((node, response))
+                case .failure(let error): failed.append(NodeFailure(node: node, error: "\(error)"))
+                }
+            }
+        }
+        var combined = ApplyResponse(diff: ManifestDiff(), dryRun: request.dryRun)
+        for (_, response) in responses.sorted(by: { $0.0.rawValue < $1.0.rawValue }) {
+            combined.diff.changes += response.diff.changes
+            combined.results += response.results
+        }
+        combined.failedNodes = failed.sorted { $0.node.rawValue < $1.node.rawValue }
+        AuditLog.note?.text = Self.auditDetail(request: request, response: combined)
+        return combined
+    }
+
+    /// Names and counts, never values.
+    static func auditDetail(request: ApplyRequest, response: ApplyResponse) -> String {
+        var parts = ["sha256=\(request.sha256 ?? "none")", "dryRun=\(request.dryRun)", "prune=\(request.prune)",
+                     response.diff.summary]
+        let changed = response.diff.changes.filter { $0.action != .unchanged }
+            .map { "\($0.action.rawValue) \($0.kind.rawValue) \($0.name)@\($0.node)" }
+        if !changed.isEmpty { parts.append("changes: " + changed.joined(separator: ", ")) }
+        let errors = response.results.filter { $0.error != nil }.map { "\($0.name)@\($0.node)" }
+        if !errors.isEmpty { parts.append("failed: " + errors.joined(separator: ", ")) }
+        if !response.failedNodes.isEmpty { parts.append("failed nodes: " + response.failedNodes.map(\.node.rawValue).joined(separator: ", ")) }
+        return parts.joined(separator: "; ")
+    }
+
     private func translatingTransport<T: Sendable>(_ node: NodeID, _ call: () async throws -> T) async throws -> T {
         do {
             return try await call()
@@ -471,6 +560,13 @@ public final class HeadServices: Sendable {
                 }
                 return await clusterSecrets(nodes: nodes)
             }
+        }
+        // Full specs, environment included, so a token needs write scope (see BearerAuthMiddleware).
+        router.get("/v1/specs") { [self] request, _ in
+            await respond { await clusterSpecs(node: request.uri.queryParameters.get("node")) }
+        }
+        router.post("/v1/apply") { [self] request, _ in
+            await respond { try await apply(try await decode(ApplyRequest.self, from: request, limit: 16 << 20)) }
         }
         router.get("/v1/nodes") { [self] _, _ in
             await respond { NodeList(nodes: await state.summaries()) }
@@ -695,6 +791,9 @@ public final class HeadServices: Sendable {
 struct BearerAuthMiddleware: RouterMiddleware {
     typealias Context = BasicRequestContext
     static let publicPaths: Set<String> = ["/v1/ca", "/v1/join"]
+    /// Reads that need write scope: specs can hold literal credentials from an `env_file`,
+    /// and a write token could set them anyway.
+    static let privateReads: Set<String> = ["/v1/specs"]
     let store: HeadStore
 
     func handle(_ request: Request, context: Context,
@@ -708,16 +807,16 @@ struct BearerAuthMiddleware: RouterMiddleware {
         guard let token = try? store.apiToken(secret: presented) else {
             return errorResponse(NodeCallError(code: "unauthorized", message: "Unknown token.", httpStatus: 401))
         }
-        if request.method != .get, token.scope != .write {
+        if request.method != .get || Self.privateReads.contains(request.uri.path), token.scope != .write {
             return errorResponse(NodeCallError(code: "forbidden", message: "This token is read-only.", httpStatus: 403))
         }
         return try await next(request, context)
     }
 }
 
-func decode<T: Decodable>(_ type: T.Type, from request: Request) async throws -> T {
+func decode<T: Decodable>(_ type: T.Type, from request: Request, limit: Int = 1 << 20) async throws -> T {
     var request = request
-    let body = try await request.collectBody(upTo: 1 << 20)
+    let body = try await request.collectBody(upTo: limit)
     do {
         return try JSONDecoder().decode(type, from: Data(body.readableBytesView))
     } catch {

@@ -58,6 +58,16 @@ public struct Adoption: Sendable {
         return adopted
     }
 
+    /// The `logPath` the job was adopted with, if any. `adopt` records one as stdout with
+    /// no stderr, which is only an override when the job itself says something else.
+    public func logPathOverride(_ job: AdoptedJob) async throws -> String? {
+        guard let path = job.stdoutPath, job.stderrPath == nil else { return nil }
+        if let live = try await launchd.print(label: job.label), live.stdoutPath == path, live.stderrPath == nil {
+            return nil
+        }
+        return path
+    }
+
     /// Stops managing the job and leaves it exactly as it is. An unknown label is an
     /// error rather than a no-op: it is usually a typo, or the wrong node.
     public func forget(label: String) throws {

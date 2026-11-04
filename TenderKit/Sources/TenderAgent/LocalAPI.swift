@@ -294,7 +294,7 @@ struct ProcessController: Sendable {
         return try await list()
     }
 
-    private func validate(_ spec: ServiceSpec) throws {
+    func validate(_ spec: ServiceSpec) throws {
         guard ServiceSpec.isValidName(spec.name) else {
             throw APIFailure(status: .badRequest, code: "invalid_name",
                              message: "Service names may only use letters, digits, '-' and '_', up to 64 characters.")
@@ -329,6 +329,10 @@ struct ProcessController: Sendable {
             }
             path = executable
         case .release(let sha12):
+            // Empty is `ProgramSource.nodeRelease`, which must be pinned before it's stored.
+            guard !sha12.isEmpty, sha12.allSatisfy(\.isHexDigit) else {
+                throw APIFailure(status: .badRequest, code: "invalid_release", message: "'\(sha12)' isn't a release sha12.")
+            }
             path = environment.releaseBinary(service: spec.name, sha12: sha12).path(percentEncoded: false)
         }
         guard FileManager.default.isExecutableFile(atPath: path) else {
@@ -443,6 +447,17 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
 
     router.post("/v1/gc") { _, _ in
         await respond { try await controller.collectGarbage() }
+    }
+
+    router.get("/v1/specs") { _, _ in
+        await respond { SpecList(nodes: [try await controller.specs()]) }
+    }
+    router.post("/v1/apply") { request, _ in
+        await respond {
+            var request = request
+            let body = try await request.collectBody(upTo: 16 << 20)
+            return try await controller.applyManifest(try decodeBody(ApplyRequest.self, Data(body.readableBytesView)))
+        }
     }
 
     // Values go in, never out: no route returns one.
