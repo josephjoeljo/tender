@@ -45,9 +45,13 @@ Things about how Tender works that may not be what you'd assume.
   plain plist.
 - **Where the values are at launch:** `tenderd` writes each such service's resolved
   secrets to `env/<service>/secrets.json` under Tender's root (`/opt/tender/env/` in
-  production): `0400`, owned by the service's user, in a `0700` directory it owns. It's
-  outside `run/` because that directory is root's alone. It's what lets a service
-  restart while `tenderd` is down.
+  production): `0400`, owned by the service's user, in a `0711` directory root owns, so
+  the service can read it but not replace it. It's outside `run/` because that directory
+  is root's alone. It's what lets a service restart while `tenderd` is down.
+- **Isolation is per user, not per service:** a secrets file is readable by the service's
+  user, and so is the environment of its running processes. Services that share a user,
+  as they all do by default (`_tender`), can read each other's secrets. Give each service
+  that holds secrets its own `--user`.
 - **Exit code 78:** a referenced secret that isn't set makes `tenderd exec` exit with
   78 (`EX_CONFIG`) and name the secret on stderr. launchd keeps retrying, throttled.
   `tender secret list` lists unset references under `missing`.
@@ -56,8 +60,13 @@ Things about how Tender works that may not be what you'd assume.
   reconciler replaces those jobs. Revisions never repeat, even after a delete.
 - **Upgrades:** service secrets are in the same Keychain as the node's keys, so
   `tender daemon install --system` carries them across with `secrets-export`.
-- **A service named `shared`** can't have secrets of its own: `shared/NAME` always
-  means the shared scope.
+- **No service may be named `shared`:** `shared/NAME` always means the shared scope.
+- **Deleting a service keeps its secrets:** `tender delete api` leaves `api/*` on the node,
+  so redeploying by delete and start needs no new secrets, and a new service named `api`
+  gets the old ones. `tender secret list` shows them; `tender secret delete api/NAME`
+  removes one.
+- **A stopped service with an unwritable secrets file** still stops and deletes; only
+  its running jobs are left as they were.
 
 ## Orphans
 
@@ -80,6 +89,11 @@ Things about how Tender works that may not be what you'd assume.
   command each other, even with valid certificates.
 - **Write tokens run code:** an API token with `write` scope can start any executable on any
   node, as any account except root. Treat it like SSH access.
+- **Write tokens can read secrets:** values never leave a node through the API, but a
+  `write` token can start a process that prints any secret on that node, and logs are
+  readable with `read` scope. Guard `write` tokens as you would the secrets themselves.
+- **Protocol version 3:** secrets changed the head↔worker protocol. Upgrade a worker before
+  it rejoins a version 3 head; a mismatched node is refused at the handshake.
 - **Socket-only:** `tender adopt`, join and API tokens, CA export and cloud credentials work
   over the local socket only, never with `--remote`.
 - **Certificates expire** after 2 years and aren't renewed automatically yet. The head reissues

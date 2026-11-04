@@ -122,6 +122,8 @@ tender start api --env 'MONGO_URL=mongodb://app:${secret:MONGO_PASSWORD}@db/olym
 
 Values stay on the node: in the System Keychain in production, and in 0600 files in dev mode. The head passes them on and keeps nothing. A Mac that dies takes its secrets with it, so keep your own copy, for example a script that pipes each one into `tender secret set`.
 
+Secrets are isolated by user, not by service. At launch a service reads them from a file owned by its user, so services sharing a user (by default all of them, as `_tender`) can read each other's secrets and environments: start each service that holds secrets with its own `--user`. A `write`-scoped API token can start a process that prints any secret, so treat write tokens as secrets too. `tender delete <service>` keeps the service's `<service>/*` secrets; remove them with `tender secret delete`.
+
 ### Ship a new binary
 
 Tender watches a folder for each service: `/opt/tender/bin/<service>/` in production and `~/Library/Application Support/Tender/bin/<service>/` in dev mode. Drop a new binary there, and Tender copies it to a new release. It uses `<service>/<service>` if that file exists, and otherwise the newest file in the folder.

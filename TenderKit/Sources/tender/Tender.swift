@@ -174,7 +174,10 @@ extension Tender {
     }
 
     struct Delete: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Stop a service and remove its definition.")
+        static let configuration = CommandConfiguration(
+            abstract: "Stop a service and remove its definition.",
+            discussion: "Its secrets (<service>/NAME) stay, for a later start under the same name. Remove them with `tender secret delete`."
+        )
         @Argument(help: "Service name.") var name: String
         @Option(help: "Only on this node. Defaults to every node running it.") var node: String?
         @OptionGroup var options: CommonOptions

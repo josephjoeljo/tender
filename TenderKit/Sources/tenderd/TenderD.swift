@@ -95,7 +95,8 @@ struct Run: AsyncParsableCommand {
 }
 
 /// What a service that references secrets runs as: launchd starts this, and it becomes
-/// the program. It runs as the service's user, and reads only that service's file.
+/// the program. It runs as the service's user and reads the service's file, which any
+/// service with the same user could read too: isolation is per user, not per service.
 struct Exec: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Start a program with its secrets filled in. Written into plists by tenderd.",
