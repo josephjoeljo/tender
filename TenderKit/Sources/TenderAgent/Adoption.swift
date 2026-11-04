@@ -9,6 +9,7 @@ public enum AdoptionError: Error, Equatable, CustomStringConvertible {
     case invalidLabel(String)
     case noPlist(String)
     case systemJob(String)
+    case notAdopted(String)
 
     public var description: String {
         switch self {
@@ -17,6 +18,7 @@ public enum AdoptionError: Error, Equatable, CustomStringConvertible {
         case .invalidLabel(let label): "'\(label)' isn't a valid launchd label."
         case .systemJob(let label): "'\(label)' belongs to macOS and can't be adopted."
         case .noPlist(let label): "'\(label)' has no plist on record, so Tender can't bootstrap it."
+        case .notAdopted(let label): "Tender isn't managing a job labeled '\(label)'. `tender list` shows adopted jobs."
         }
     }
 }
@@ -56,9 +58,10 @@ public struct Adoption: Sendable {
         return adopted
     }
 
-    /// Stops managing the job and leaves it exactly as it is.
+    /// Stops managing the job and leaves it exactly as it is. An unknown label is an
+    /// error rather than a no-op: it is usually a typo, or the wrong node.
     public func forget(label: String) throws {
-        try store.removeAdopted(label: label)
+        guard try store.removeAdopted(label: label) else { throw AdoptionError.notAdopted(label) }
     }
 
     public func start(_ job: AdoptedJob) async throws {

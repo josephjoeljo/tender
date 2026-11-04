@@ -231,9 +231,12 @@ public struct StateStore: Sendable {
         }
     }
 
-    public func removeAdopted(label: String) throws {
+    /// Returns whether there was a record to remove.
+    @discardableResult
+    public func removeAdopted(label: String) throws -> Bool {
         try pool.write { db in
             try db.execute(sql: "DELETE FROM adopted_jobs WHERE label = ?", arguments: [label])
+            return db.changesCount > 0
         }
     }
 

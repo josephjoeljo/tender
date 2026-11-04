@@ -102,6 +102,18 @@ private func apiErrorCode(_ call: () async throws -> ProcessList) async -> Strin
         #expect(await apiErrorCode { try await client.delete(service: label) } == "adopted_job")
         #expect(try await client.stop(service: label).processes.map(\.state) == [.stopped])
         #expect(try await client.forget(label: label).processes.isEmpty)
+        #expect(await apiErrorCode { try await client.forget(label: label) } == "not_adopted")
+    }
+}
+
+/// Decoding a path parameter must not smuggle in what percent-encoding hid.
+@Test func decodedPathParametersRefuseSlashesAndControlCharacters() async throws {
+    try await withDaemon { client, _ async throws in
+        for name in ["a/b", "../x", "a\u{0}b", "a\nb", "a\u{7F}b"] {
+            #expect(await apiErrorCode { try await client.stop(service: name) } == "bad_request", "\(name)")
+            #expect(await apiErrorCode { try await client.forget(label: name) } == "bad_request", "\(name)")
+        }
+        #expect(await apiErrorCode { try await client.stop(service: "nope@1") } == "service_not_found")
     }
 }
 
