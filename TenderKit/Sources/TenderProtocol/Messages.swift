@@ -32,9 +32,13 @@ public struct Heartbeat: Codable, Sendable, Equatable {
     public var previousRoundTrip: TimeInterval?
     public var spoolBacklog: Int
     public var spoolDropped: Int
+    /// Failed GCP Secret Manager fetches since the node's daemon started.
+    public var secretFetchErrors: Int
 
     public init(node: NodeID, nodeClock: Date, processes: [InstanceStatus], orphans: [String] = [],
-                previousRoundTrip: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0) {
+                previousRoundTrip: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0,
+                secretFetchErrors: Int = 0) {
+        self.secretFetchErrors = secretFetchErrors
         self.previousRoundTrip = previousRoundTrip
         self.spoolBacklog = spoolBacklog
         self.spoolDropped = spoolDropped

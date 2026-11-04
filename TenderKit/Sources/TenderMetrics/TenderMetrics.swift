@@ -54,6 +54,7 @@ public enum MetricsRenderer {
         var skew = family("tender_node_clock_skew_seconds", "gauge", "Head clock minus node clock.")
         var backlog = family("tender_log_spool_backlog", "gauge", "Lines waiting in the node's spool.")
         var dropped = family("tender_log_spool_dropped_total", "counter", "Lines dropped because the spool was over its limits.")
+        var secretErrors = family("tender_secret_fetch_errors_total", "counter", "Failed GCP Secret Manager fetches since the node's daemon started.")
         for node in snapshot.nodes {
             let labels = [("node", node.info.id.rawValue)]
             up.samples.append((labels, node.up ? 1 : 0))
@@ -61,6 +62,7 @@ public enum MetricsRenderer {
             if let value = node.clockSkew { skew.samples.append((labels, value)) }
             backlog.samples.append((labels, Double(node.spoolBacklog)))
             dropped.samples.append((labels, Double(node.spoolDropped)))
+            secretErrors.samples.append((labels, Double(node.secretFetchErrors)))
         }
         var processUp = family("tender_process_up", "gauge", "1 if the instance is running.")
         var restarts = family("tender_process_restarts_total", "counter", "launchd restarts since the job was loaded.")
@@ -83,7 +85,7 @@ public enum MetricsRenderer {
         }
 
         var output = ""
-        for item in [up, last, skew, processUp, restarts, cpu, rss, ingested, backlog, dropped, deploys] {
+        for item in [up, last, skew, processUp, restarts, cpu, rss, ingested, backlog, dropped, secretErrors, deploys] {
             output += "# HELP \(item.name) \(item.help)\n# TYPE \(item.name) \(item.type)\n"
             for sample in item.samples {
                 let labels = sample.labels.map { "\($0.0)=\"\(escaped($0.1))\"" }.joined(separator: ",")
