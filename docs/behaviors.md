@@ -31,8 +31,11 @@ Things about how Tender works that may not be what you'd assume.
 - **The diff hides environment values:** it says a variable was added, removed or changed.
   The audit log records the file's hash and the diff's counts and names, never values.
 - **`--prune` abandons adopted jobs** the file doesn't list, leaving them running, and
-  deletes services the file doesn't list. Through a head it covers every node that's up; a
-  node that's down is reported and not pruned.
+  deletes services the file doesn't list, but only on the nodes the file names: each item's
+  `node:`, and the head (or the local node) for items without one. A file that names only
+  `mac-1` never prunes `mac-2`. `--prune-all` (`pruneAll` in the API) prunes every node
+  that's up; a node that's down is reported and not pruned. The diff starts with
+  `Pruning on <nodes>`.
 - **Reading specs remotely takes a `write` token:** `GET /v1/specs` (`tender export`)
   returns environments as stored, which can include literal credentials.
 - **Removing `log_path`** from an adopted job re-adopts it with the job's own log paths,

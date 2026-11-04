@@ -204,18 +204,37 @@ public struct SpecList: Codable, Sendable, Equatable {
 /// Body of `POST /v1/apply`.
 public struct ApplyRequest: Codable, Sendable, Equatable {
     public var items: [ManifestItem]
-    /// Also removes services and adopted jobs that the file doesn't list, on the nodes asked.
+    /// Also removes services and adopted jobs that the file doesn't list, on the nodes the
+    /// file names: each item's `node`, and the head (or the local node) for items without
+    /// one. A file for one node can't empty another by mistake.
     public var prune: Bool
+    /// Prunes every node that's up, including the ones the file doesn't name. Implies `prune`.
+    public var pruneAll: Bool
     public var dryRun: Bool
     /// Of the file the items came from, for the audit log.
     public var sha256: String?
 
-    public init(items: [ManifestItem], prune: Bool = false, dryRun: Bool = false, sha256: String? = nil) {
+    public init(items: [ManifestItem], prune: Bool = false, pruneAll: Bool = false, dryRun: Bool = false, sha256: String? = nil) {
         self.items = items
         self.prune = prune
+        self.pruneAll = pruneAll
         self.dryRun = dryRun
         self.sha256 = sha256
     }
+
+    /// Clients from before `pruneAll` don't send it.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        items = try container.decode([ManifestItem].self, forKey: .items)
+        prune = try container.decode(Bool.self, forKey: .prune)
+        pruneAll = try container.decodeIfPresent(Bool.self, forKey: .pruneAll) ?? false
+        dryRun = try container.decode(Bool.self, forKey: .dryRun)
+        sha256 = try container.decodeIfPresent(String.self, forKey: .sha256)
+    }
+
+    /// Whether this node, asked with these items, prunes: a node the file doesn't name
+    /// gets no items, and is pruned only with `pruneAll`.
+    public var prunesHere: Bool { pruneAll || (prune && !items.isEmpty) }
 }
 
 public enum ManifestAction: String, Codable, Sendable {
@@ -255,8 +274,20 @@ public struct ManifestChange: Codable, Sendable, Equatable {
 
 public struct ManifestDiff: Codable, Sendable, Equatable {
     public var changes: [ManifestChange]
+    /// The nodes where what the file doesn't list is pruned. Empty without `--prune`.
+    public var prunedNodes: [NodeID]
 
-    public init(changes: [ManifestChange] = []) { self.changes = changes }
+    public init(changes: [ManifestChange] = [], prunedNodes: [NodeID] = []) {
+        self.changes = changes
+        self.prunedNodes = prunedNodes
+    }
+
+    /// Nodes from before `prunedNodes` don't send it.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        changes = try container.decode([ManifestChange].self, forKey: .changes)
+        prunedNodes = try container.decodeIfPresent([NodeID].self, forKey: .prunedNodes) ?? []
+    }
 
     public var hasChanges: Bool { changes.contains { $0.action != .unchanged } }
 
@@ -307,7 +338,7 @@ public struct ManifestDiff: Codable, Sendable, Equatable {
                 }
             }
         }
-        return ManifestDiff(changes: changes)
+        return ManifestDiff(changes: changes, prunedNodes: prune ? current.map(\.node).sorted { $0.rawValue < $1.rawValue } : [])
     }
 
     /// Everything a service file can set. `node` is where the spec is, not a field, and

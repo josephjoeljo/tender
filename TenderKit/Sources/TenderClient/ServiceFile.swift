@@ -291,6 +291,9 @@ public enum DotEnv {
 public enum ManifestDiffRenderer {
     public static func render(_ diff: ManifestDiff) -> String {
         var lines: [String] = []
+        if !diff.prunedNodes.isEmpty {
+            lines.append("Pruning on \(diff.prunedNodes.map(\.rawValue).joined(separator: ", ")): what the file doesn't list there goes.")
+        }
         for change in diff.changes where change.action != .unchanged {
             let symbol = switch change.action {
             case .create: "+"

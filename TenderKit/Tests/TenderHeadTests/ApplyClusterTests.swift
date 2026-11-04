@@ -25,8 +25,8 @@ private let file = """
     node: worker
     """
 
-private func request(_ yaml: String, prune: Bool = false, dryRun: Bool = false) throws -> ApplyRequest {
-    ApplyRequest(items: try ServiceFile.parse(yaml).items, prune: prune, dryRun: dryRun, sha256: "feedface")
+private func request(_ yaml: String, prune: Bool = false, pruneAll: Bool = false, dryRun: Bool = false) throws -> ApplyRequest {
+    ApplyRequest(items: try ServiceFile.parse(yaml).items, prune: prune, pruneAll: pruneAll, dryRun: dryRun, sha256: "feedface")
 }
 
 private func actions(_ response: ApplyResponse) -> [String] {
@@ -58,8 +58,9 @@ private func actions(_ response: ApplyResponse) -> [String] {
         #expect(!(try await head.client.apply(try request(exported, prune: true))).diff.hasChanges)
 
         let onlyAPI = "kind: Service\nname: api\nexec: /bin/sleep\nargs: [\"1000\"]\nenv:\n  MONGO_URL: \"mongodb://app:literal-password@db\"\n"
-        let pruned = try await head.client.apply(try request(onlyAPI, prune: true))
+        let pruned = try await head.client.apply(try request(onlyAPI, pruneAll: true))
         #expect(actions(pruned) == ["unchanged api@head", "prune web@worker", "prune homebrew.mxcl.postgresql@18@worker"])
+        #expect(pruned.diff.prunedNodes == [NodeID("head"), NodeID("worker")])
         #expect(pruned.succeeded)
         #expect(try await head.client.list().processes.map(\.service) == ["api"])
 
@@ -143,5 +144,34 @@ private func actions(_ response: ApplyResponse) -> [String] {
         #expect(body.contains("literal-password"))
         // Other reads still take a read token.
         #expect(try await get("//v1/processes/", reader.token).0 == 200)
+    }
+}
+
+/// A file for one node can't empty another: `prune` stays on the nodes the file names.
+@Test func pruneOnlyTouchesTheNodesTheFileNames() async throws {
+    try await withCluster { head, worker async throws in
+        try await worker.launchd.bootstrap(plistURL: URL(filePath: "/tmp/homebrew.mxcl.postgresql@18.plist"))
+        #expect(try await head.client.apply(try request(file)).succeeded)
+        let extra = "kind: Service\nname: extra\nexec: /bin/sleep\nargs: [\"3000\"]\n"
+        _ = try await head.client.apply(try request(extra))
+
+        // api has no node, so the file names the head only.
+        let onlyAPI = file.components(separatedBy: "---")[0]
+        let pruned = try await head.client.apply(try request(onlyAPI, prune: true))
+        #expect(actions(pruned) == ["unchanged api@head", "prune extra@head"])
+        #expect(pruned.diff.prunedNodes == [NodeID("head")])
+        #expect(ManifestDiffRenderer.render(pruned.diff).hasPrefix("Pruning on head: "))
+        #expect(Set(try await head.client.list().processes.map { "\($0.service)@\($0.node)" })
+                == ["api@head", "web@worker", "homebrew.mxcl.postgresql@18@worker"])
+
+        // Naming the worker prunes it too, and only what that file doesn't list there.
+        let workerOnly = "kind: Service\nname: web\nexec: /bin/sleep\nargs: [\"2000\"]\nnode: worker\n"
+        let second = try await head.client.apply(try request(workerOnly, prune: true, dryRun: true))
+        #expect(actions(second) == ["unchanged web@worker", "prune homebrew.mxcl.postgresql@18@worker"])
+        #expect(second.diff.prunedNodes == [NodeID("worker")])
+
+        let all = try await head.client.apply(try request(workerOnly, pruneAll: true, dryRun: true))
+        #expect(actions(all) == ["prune api@head", "unchanged web@worker", "prune homebrew.mxcl.postgresql@18@worker"])
+        #expect(all.diff.prunedNodes == [NodeID("head"), NodeID("worker")])
     }
 }

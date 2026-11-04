@@ -292,8 +292,8 @@ public final class HeadServices: Sendable {
     }
 
     /// Splits the file by node and lets each node diff and apply its part, in parallel. A
-    /// node that fails is reported and the others go ahead; nothing is rolled back. With
-    /// `prune`, every node that's up is asked, so that services the file doesn't list go.
+    /// node that fails is reported and the others go ahead; nothing is rolled back. `prune`
+    /// prunes the nodes the file names; `pruneAll` also asks every other node that's up.
     func apply(_ request: ApplyRequest) async throws -> ApplyResponse {
         let known = Set(await state.summaries().map(\.info.id) + [options.nodeID])
         do {
@@ -307,7 +307,7 @@ public final class HeadServices: Sendable {
             byNode[item.node!, default: []].append(item)
         }
         var failed: [NodeFailure] = []
-        if request.prune {
+        if request.pruneAll {
             for node in await state.upNodes() + [options.nodeID] where byNode[node] == nil { byNode[node] = [] }
             for node in await state.downNodes() where byNode[node] == nil {
                 failed.append(NodeFailure(node: node, error: "\(node) is down, so it wasn't pruned."))
@@ -316,7 +316,8 @@ public final class HeadServices: Sendable {
         var responses: [(NodeID, ApplyResponse)] = []
         await withTaskGroup(of: (NodeID, Result<ApplyResponse, any Error>).self) { group in
             for (node, items) in byNode {
-                let part = ApplyRequest(items: items, prune: request.prune, dryRun: request.dryRun, sha256: request.sha256)
+                let part = ApplyRequest(items: items, prune: request.prune || request.pruneAll, pruneAll: request.pruneAll,
+                                        dryRun: request.dryRun, sha256: request.sha256)
                 group.addTask { [self] in
                     do {
                         return (node, .success(try await translatingTransport(node) { try await agent(on: node).applyManifest(part) }))
@@ -335,8 +336,10 @@ public final class HeadServices: Sendable {
         var combined = ApplyResponse(diff: ManifestDiff(), dryRun: request.dryRun)
         for (_, response) in responses.sorted(by: { $0.0.rawValue < $1.0.rawValue }) {
             combined.diff.changes += response.diff.changes
+            combined.diff.prunedNodes += response.diff.prunedNodes
             combined.results += response.results
         }
+        combined.diff.prunedNodes.sort { $0.rawValue < $1.rawValue }
         combined.failedNodes = failed.sorted { $0.node.rawValue < $1.node.rawValue }
         AuditLog.note?.text = Self.auditDetail(request: request, response: combined)
         return combined
@@ -345,6 +348,7 @@ public final class HeadServices: Sendable {
     /// Names and counts, never values.
     static func auditDetail(request: ApplyRequest, response: ApplyResponse) -> String {
         var parts = ["sha256=\(request.sha256 ?? "none")", "dryRun=\(request.dryRun)", "prune=\(request.prune)",
+                     "pruneAll=\(request.pruneAll)",
                      response.diff.summary]
         let changed = response.diff.changes.filter { $0.action != .unchanged }
             .map { "\($0.action.rawValue) \($0.kind.rawValue) \($0.name)@\($0.node)" }

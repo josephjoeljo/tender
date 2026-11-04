@@ -27,7 +27,7 @@ extension ProcessController {
                              message: "\(other.kind.rawValue) '\(other.name)' is for node '\(target)', but this daemon is '\(node)' and not a head. Apply the file through the head.")
         }
         let current = try await specs()
-        let diff = ManifestDiff.compute(items: request.items, current: [current], defaultNode: node, prune: request.prune)
+        let diff = ManifestDiff.compute(items: request.items, current: [current], defaultNode: node, prune: request.prunesHere)
         guard !request.dryRun else { return ApplyResponse(diff: diff, dryRun: true) }
 
         var results: [ApplyItemResult] = []

@@ -164,11 +164,12 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 ```sh
 tender apply -f services.yaml --dry-run   # only print what would change
 tender apply -f services.yaml             # print the changes, ask, apply
-tender apply -f services.yaml --prune     # also remove what the file doesn't list
+tender apply -f services.yaml --prune     # also remove what the file doesn't list, on the nodes it names
+tender apply -f services.yaml --prune-all # the same on every node
 tender export > services.yaml             # what runs now, as a file that applies as a no-op
 ```
 
-Applying the same file twice changes nothing and restarts nothing. Without `--prune`, services the file doesn't list are left alone. Unknown keys are errors, inline `env` wins over `env_file`, and `--yes` (or a stdin that isn't a terminal) skips the question. Through a head, each node applies its part; a node that fails is reported and the others go ahead. Use one file per environment (`services.prod.yaml`, `services.staging.yaml`).
+Applying the same file twice changes nothing and restarts nothing. Without `--prune`, services the file doesn't list are left alone; with it, only on the nodes the file names (an item's `node:`, or the head for items without one), so a file for one node can't empty another. `--prune-all` prunes every node, and the diff starts with the nodes it prunes. Unknown keys are errors, inline `env` wins over `env_file`, and `--yes` (or a stdin that isn't a terminal) skips the question. Through a head, each node applies its part; a node that fails is reported and the others go ahead. Use one file per environment (`services.prod.yaml`, `services.staging.yaml`).
 
 ### Ship a new binary
 

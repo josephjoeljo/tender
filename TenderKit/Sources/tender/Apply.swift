@@ -10,12 +10,15 @@ extension Tender {
             discussion: """
                 Prints what would change first, then asks, unless --yes is given or stdin isn't a terminal. \
                 Applying the same file again changes nothing and restarts nothing. Services the file doesn't \
-                list are left alone unless --prune. See docs/examples/services.yaml.
+                list are left alone unless --prune, which prunes only the nodes the file names (an item's \
+                node:, or the head for items without one); --prune-all prunes every node. See \
+                docs/examples/services.yaml.
                 """
         )
         @Option(name: .shortAndLong, help: "The service file.") var file: String
         @Flag(help: "Only print what would change.") var dryRun = false
-        @Flag(help: "Also delete services, and abandon adopted jobs, that the file doesn't list.") var prune = false
+        @Flag(help: "Also delete services, and abandon adopted jobs, that the file doesn't list, on the nodes it names.") var prune = false
+        @Flag(help: "Like --prune, on every node, including ones the file doesn't name.") var pruneAll = false
         @Flag(name: .shortAndLong, help: "Don't ask before applying.") var yes = false
         @OptionGroup var options: CommonOptions
 
@@ -28,7 +31,8 @@ extension Tender {
             }
             do {
                 let client = try options.makeClient()
-                var request = ApplyRequest(items: loaded.manifest.items, prune: prune, dryRun: true, sha256: loaded.sha256)
+                var request = ApplyRequest(items: loaded.manifest.items, prune: prune || pruneAll, pruneAll: pruneAll,
+                                           dryRun: true, sha256: loaded.sha256)
                 let preview = try await client.apply(request)
                 if dryRun || !preview.diff.hasChanges {
                     try report(preview, diff: true)

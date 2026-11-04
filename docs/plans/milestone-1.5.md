@@ -13,7 +13,8 @@ so 5c only adds `health`, `rollout`, `placement.labels` and `${svc:…}`.
 - `tender apply -f services.yaml` creates or updates every service in the file
   on the nodes it names, prints a diff first, and `--dry-run` stops after the
   diff. Running it twice changes nothing.
-- Services in the cluster but not in the file are left alone unless `--prune`.
+- Services in the cluster but not in the file are left alone unless `--prune`
+  (the nodes the file names) or `--prune-all` (every node).
 - `env_file: .env` and inline `env:` both work; inline wins on conflicts.
 - `tender export > services.yaml` writes the running services back out, and
   applying that file is a no-op.
@@ -80,10 +81,10 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
   against `GET /v1/processes` so the same code serves the CLI, app and MCP.
 
 ### 3. Apply + export — API and CLI (done)
-- `POST /v1/apply { items, prune, dryRun } -> ManifestDiff + results` on the
+- `POST /v1/apply { items, prune, pruneAll, dryRun } -> ManifestDiff + results` on the
   local socket and the head. The head fans out per node with the existing
   `NodeAgentProtocol.apply(_:)`; per-node failures are reported, not rolled back.
-- `tender apply -f <file> [--dry-run] [--prune] [--yes]`: prints the diff,
+- `tender apply -f <file> [--dry-run] [--prune | --prune-all] [--yes]`: prints the diff,
   asks unless `--yes`/non-TTY, `--json` for agents.
 - `tender export [--service s] [--node n]` → YAML, secrets as `${secret:…}`.
 - Audit log entry per apply (file hash, diff summary, token).
@@ -210,6 +211,9 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
   export writes `binary:` without a sha.
 - Unchanged items aren't touched, so a stopped service stays stopped; a changed one is
   replaced and started. `--prune` also abandons adopted jobs the file doesn't list.
+- `--prune` prunes only the nodes the file names (items' `node:`, plus the default node for
+  items without one), so a file for one node can't empty the others; `--prune-all` /
+  `pruneAll` prunes every node that's up. The diff lists the nodes it prunes.
 - Diffs never show environment values, only that a variable was added, removed or
   changed. The audit record of an apply gets a `detail`: file sha256, counts and names.
 - `secret_files` are written by `tenderd exec` as the service's user (temp file with

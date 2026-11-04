@@ -120,6 +120,17 @@ private let api = ServiceSpec(name: "api", program: .executable("/bin/sleep"), a
 
 @Test func manifestItemsRoundTripThroughJSON() throws {
     let items: [ManifestItem] = [.service(api), .adopted(AdoptedItem(label: "homebrew.mxcl.redis", node: mac1, logPath: "/x"))]
-    let request = ApplyRequest(items: items, prune: true, dryRun: true, sha256: "abc")
+    let request = ApplyRequest(items: items, prune: true, pruneAll: true, dryRun: true, sha256: "abc")
     #expect(try JSONDecoder().decode(ApplyRequest.self, from: JSONEncoder().encode(request)) == request)
+    let older = try JSONDecoder().decode(ApplyRequest.self, from: Data(#"{"items":[],"prune":true,"dryRun":false}"#.utf8))
+    #expect(!older.pruneAll)
+    #expect(try JSONDecoder().decode(ManifestDiff.self, from: Data(#"{"changes":[]}"#.utf8)).prunedNodes.isEmpty)
+}
+
+/// The head hands a node the file doesn't name an empty part, which only `pruneAll` prunes.
+@Test func aNodeWithNoItemsIsPrunedOnlyWithPruneAll() {
+    #expect(ApplyRequest(items: [.service(api)], prune: true).prunesHere)
+    #expect(!ApplyRequest(items: [], prune: true).prunesHere)
+    #expect(ApplyRequest(items: [], pruneAll: true).prunesHere)
+    #expect(!ApplyRequest(items: [.service(api)]).prunesHere)
 }
