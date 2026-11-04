@@ -238,13 +238,17 @@ public struct AdoptedJob: Codable, Sendable, Equatable {
     public var plistPath: String?
     public var stdoutPath: String?
     public var stderrPath: String?
+    /// The `--log-path` (or `log_path:`) it was adopted with. Kept apart from `stdoutPath`
+    /// so that export and apply know it without asking launchd, which forgets a stopped job.
+    public var logPath: String?
 
-    public init(label: String, domain: String, plistPath: String?, stdoutPath: String?, stderrPath: String?) {
+    public init(label: String, domain: String, plistPath: String?, stdoutPath: String?, stderrPath: String?, logPath: String? = nil) {
         self.label = label
         self.domain = domain
         self.plistPath = plistPath
         self.stdoutPath = stdoutPath
         self.stderrPath = stderrPath
+        self.logPath = logPath
     }
 }
 

@@ -103,6 +103,29 @@ private func actions(_ response: ApplyResponse) -> [String] {
     }
 }
 
+/// launchd forgets a booted-out job, so whether its log path was overridden has to come
+/// from the record. Redis logs to stdout only, which looks just like an override.
+@Test func aStoppedAdoptedJobStaysUnchanged() async throws {
+    let launchd = MemoryLaunchd()
+    try await launchd.bootstrap(plistURL: URL(filePath: "/tmp/homebrew.mxcl.mongodb-community.plist"))
+    try await launchd.bootstrap(plistURL: URL(filePath: "/tmp/homebrew.mxcl.redis.plist"))
+    await launchd.setStdoutPath("/tmp/redis.log", label: "homebrew.mxcl.redis")
+    try await withDaemon(launchd: launchd) { client, _ async throws in
+        let yaml = file + "\n---\nkind: Adopted\nlabel: homebrew.mxcl.redis\n"
+        _ = try await apply(client, yaml)
+        let exported = try ServiceFile.render(try await client.specs().items())
+        _ = try await client.stop(service: "homebrew.mxcl.mongodb-community")
+        _ = try await client.stop(service: "homebrew.mxcl.redis")
+        #expect(!(await launchd.loaded.contains("homebrew.mxcl.mongodb-community")))
+
+        #expect(try ServiceFile.render(try await client.specs().items()) == exported, "export doesn't depend on whether the job runs")
+        let again = try await apply(client, yaml)
+        #expect(!again.diff.hasChanges, "\(again.diff.changes)")
+        #expect(again.results.isEmpty)
+        #expect(try await client.specs().nodes.first?.adopted.map(\.logPath) == ["/tmp/mongo.log", nil])
+    }
+}
+
 @Test func binaryUsesTheNodesReleaseAndKeepsItAcrossApplies() async throws {
     try await withDaemon { client, env async throws in
         let yaml = "kind: Service\nname: api\nbinary: api\nargs: [\"1000\"]\n"

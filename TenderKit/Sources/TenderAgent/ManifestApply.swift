@@ -9,10 +9,7 @@ extension ProcessController {
     }
 
     func specs() async throws -> NodeSpecs {
-        var adopted: [AdoptedItem] = []
-        for job in try store.adoptedJobs() {
-            adopted.append(AdoptedItem(label: job.label, logPath: try await adoption.logPathOverride(job)))
-        }
+        let adopted = try store.adoptedJobs().map { AdoptedItem(label: $0.label, logPath: $0.logPath) }
         return NodeSpecs(node: try localNode(), services: try store.services().map(\.spec), adopted: adopted)
     }
 

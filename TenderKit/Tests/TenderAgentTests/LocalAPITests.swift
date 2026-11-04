@@ -11,6 +11,9 @@ actor MemoryLaunchd: LaunchdControlling {
     var loaded: Set<String> = []
     /// Every start, so that tests can tell an untouched job from a restarted one.
     var bootstraps = 0
+    /// `StandardOutPath` by label, for jobs that have one.
+    var stdoutPaths: [String: String] = [:]
+    func setStdoutPath(_ path: String, label: String) { stdoutPaths[label] = path }
     func bootstrap(plistURL: URL) async throws {
         bootstraps += 1
         loaded.insert(plistURL.deletingPathExtension().lastPathComponent)
@@ -22,7 +25,8 @@ actor MemoryLaunchd: LaunchdControlling {
     func enable(label: String) async throws {}
     func disable(label: String) async throws {}
     func print(label: String) async throws -> JobInfo? {
-        loaded.contains(label) ? JobInfo(output: "x/\(label) = {\n\tstate = running\n\tpid = 42\n\truns = 1\n}\n") : nil
+        let stdout = stdoutPaths[label].map { "\tstdout path = \($0)\n" } ?? ""
+        return loaded.contains(label) ? JobInfo(output: "x/\(label) = {\n\tstate = running\n\tpid = 42\n\truns = 1\n\(stdout)}\n") : nil
     }
     func listLabels(prefix: String) async throws -> [String] { loaded.filter { $0.hasPrefix(prefix) }.sorted() }
 }
