@@ -101,7 +101,7 @@ To debug the daemon instead of installing it, add these launch arguments to the 
 | `tender deploy <name> --release <version>` | Fetch a release and restart on it. Needs a [release source](docs/ops/releases-and-logs.md) |
 | `tender nodes` | List the cluster's nodes |
 
-`tender start` also takes `--instances`, `--env KEY=VALUE`, `--cwd`, `--user`, and `--node`. Services start in `/` unless you set `--cwd`. Run `tender help <command>` for the rest.
+`tender start` also takes `--instances`, `--env KEY=VALUE`, `--cwd`, `--user`, `--node` and `--secret-file PATH=REF`. Services start in `/` unless you set `--cwd`. Run `tender help <command>` for the rest.
 
 ### Secrets
 
@@ -119,6 +119,16 @@ tender start api --env 'MONGO_URL=mongodb://app:${secret:MONGO_PASSWORD}@db/olym
 | `tender secret set <service>/<NAME>` | Store a secret and restart the services that use it |
 | `tender secret list` | List secrets by name, node and the services using them. Values are never shown |
 | `tender secret delete <service>/<NAME>` | Delete a secret. Services still using it exit with code 78 |
+
+A value that mustn't be in the environment, such as a key file, can be written as a file before each start instead:
+
+```sh
+tender start api --secret-file /opt/olympsis/api/gcp.json=GCP_KEY -- ./api
+```
+
+The file is written by `tenderd exec` as the service's own user, `0400`, and replaced whole at each start. The path must be absolute and outside Tender's own directories, and the service's user must be able to create files in its directory. The reference is what goes between `${secret:` and `}`: `GCP_KEY`, `shared/GCP_KEY` or a `gcp:` reference.
+
+Secrets can also come from GCP Secret Manager: `${secret:gcp:NAME}` (latest, re-checked every 5 minutes), `${secret:gcp:NAME@4}` (pinned) and `${secret:gcp:projects/P/secrets/S[@4]}`. Each node fetches them with its own credentials and caches them, so services still start while GCP is down. Setup, IAM roles and the full behaviour are in [docs/ops/gcp-secrets.md](docs/ops/gcp-secrets.md).
 
 Values stay on the node: in the System Keychain in production, and in 0600 files in dev mode. The head passes them on and keeps nothing. A Mac that dies takes its secrets with it, so keep your own copy, for example a script that pipes each one into `tender secret set`.
 
