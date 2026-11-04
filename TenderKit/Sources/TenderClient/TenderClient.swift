@@ -281,6 +281,38 @@ public struct TenderClient: Sendable {
         try await send(.POST, "/v1/credentials", body: try JSONEncoder().encode(CredentialsRequest(serviceAccountJSON: serviceAccountJSON)))
     }
 
+    // MARK: Secrets
+
+    /// `name` is `<service>/<NAME>` or `shared/<NAME>`. Through a head, a service's secret
+    /// goes to every node running it unless `node` is given; a shared one needs `node` or
+    /// `allNodes`. Services that reference it restart.
+    public func setSecret(_ name: String, value: Data, node: String? = nil, allNodes: Bool = false) async throws -> SecretList {
+        try await send(.PUT, "/v1/secrets/\(try secretPath(name))\(try secretQuery(node: node, allNodes: allNodes))",
+                       body: try JSONEncoder().encode(SecretSetRequest(value: value)))
+    }
+
+    public func deleteSecret(_ name: String, node: String? = nil, allNodes: Bool = false) async throws -> SecretList {
+        try await send(.DELETE, "/v1/secrets/\(try secretPath(name))\(try secretQuery(node: node, allNodes: allNodes))")
+    }
+
+    /// Names, nodes, revisions and users. Values never leave the node they're on.
+    public func secrets(node: String? = nil) async throws -> SecretList {
+        try await send(.GET, "/v1/secrets\(try nodeQuery(node))")
+    }
+
+    private func secretPath(_ name: String) throws -> String {
+        guard let parsed = SecretName(path: name) else {
+            throw TenderClientError.api(status: 400, code: "invalid_secret_name",
+                                        message: "'\(name)' isn't <service>/<NAME> or shared/<NAME>. NAME uses letters, digits and '_'.")
+        }
+        return "\(try escaped(parsed.service ?? "shared"))/\(try escaped(parsed.name))"
+    }
+
+    private func secretQuery(node: String?, allNodes: Bool) throws -> String {
+        if allNodes { return node == nil ? "?all=true" : "\(try nodeQuery(node))&all=true" }
+        return try nodeQuery(node)
+    }
+
     /// Boots out orphaned launchd jobs.
     public func collectGarbage(node: String? = nil) async throws -> ProcessList {
         try await send(.POST, "/v1/gc\(try nodeQuery(node))")

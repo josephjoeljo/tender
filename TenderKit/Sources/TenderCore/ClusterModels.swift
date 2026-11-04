@@ -3,7 +3,8 @@ import Foundation
 extension TenderVersion {
     /// Exact match required at handshake. Add new `distributed func`s rather than
     /// changing shipped ones, and bump this when a node can't serve an older peer.
-    public static let protocolVersion = 2
+    /// 3: secrets (`setSecret`, `deleteSecret`, `listSecrets`).
+    public static let protocolVersion = 3
 }
 
 /// How a failed call on a node is reported, locally and across the wire.

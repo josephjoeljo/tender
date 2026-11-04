@@ -226,12 +226,57 @@ public final class HeadServices: Sendable {
         return await clusterStatus()
     }
 
+    // MARK: Secrets
+
+    /// A service's secret goes where the service runs, like other by-name commands. A
+    /// shared one has no such place, so it needs a node or every node.
+    private func secretTargets(scope: String, node: String?, all: Bool) async throws -> [NodeID] {
+        if let node { return [NodeID(node)] }
+        if all { return Set(await state.upNodes() + [options.nodeID]).sorted { $0.rawValue < $1.rawValue } }
+        guard scope != "shared" else {
+            throw NodeCallError(code: "node_required", message: "A shared secret needs a node, or all nodes.", httpStatus: 400)
+        }
+        return await targets(service: scope, node: nil)
+    }
+
+    /// Asks each node in parallel. Names and revisions only: no node sends values back.
+    func clusterSecrets(nodes: [NodeID]? = nil) async -> SecretList {
+        var asked = nodes ?? []
+        if nodes == nil { asked = Set(await state.upNodes() + [options.nodeID]).sorted { $0.rawValue < $1.rawValue } }
+        var combined = SecretList(secrets: [])
+        if nodes == nil { combined.unreachableNodes = await state.downNodes().map(\.rawValue) }
+        await withTaskGroup(of: (NodeID, SecretList?).self) { group in
+            for node in asked {
+                group.addTask { [self] in (node, try? await agent(on: node).listSecrets()) }
+            }
+            for await (node, list) in group {
+                if let list {
+                    combined.secrets += list.secrets
+                    combined.missing += list.missing.map { "\(node): \($0)" }
+                } else if !combined.unreachableNodes.contains(node.rawValue) {
+                    combined.unreachableNodes.append(node.rawValue)
+                }
+            }
+        }
+        combined.secrets.sort { ($0.name, $0.node.rawValue) < ($1.name, $1.node.rawValue) }
+        combined.missing.sort()
+        combined.unreachableNodes.sort()
+        return combined
+    }
+
     private func translatingTransport<T: Sendable>(_ node: NodeID, _ call: () async throws -> T) async throws -> T {
         do {
             return try await call()
         } catch let error as TransportError {
             throw NodeCallError(code: "node_unreachable", message: error.description, httpStatus: 503)
         }
+    }
+
+    private func rollback(service: String, to sha12: String?, node: String?) async throws -> ProcessList {
+        for target in await targets(service: service, node: node) {
+            _ = try await translatingTransport(target) { try await agent(on: target).rollback(service: service, to: sha12) }
+        }
+        return await clusterStatus()
     }
 
     /// Each node fetches and verifies on its own, in parallel. One node failing doesn't
@@ -398,6 +443,35 @@ public final class HeadServices: Sendable {
                 return await clusterReleases(service: service)
             }
         }
+        router.get("/v1/secrets") { [self] request, _ in
+            await respond { await clusterSecrets(nodes: request.uri.queryParameters.get("node").map { [NodeID($0)] }) }
+        }
+        // The audit log records the path, so the name, but never the body.
+        router.put("/v1/secrets/:scope/:name") { [self] request, context in
+            await respond {
+                let set = try await decode(SecretSetRequest.self, from: request)
+                let scope = try context.parameters.requireDecoded("scope")
+                let path = "\(scope)/\(try context.parameters.requireDecoded("name"))"
+                let query = request.uri.queryParameters
+                let nodes = try await secretTargets(scope: scope, node: query.get("node"), all: query.get("all") == "true")
+                for node in nodes {
+                    try await translatingTransport(node) { try await agent(on: node).setSecret(path, value: set.value) }
+                }
+                return await clusterSecrets(nodes: nodes)
+            }
+        }
+        router.delete("/v1/secrets/:scope/:name") { [self] request, context in
+            await respond {
+                let scope = try context.parameters.requireDecoded("scope")
+                let path = "\(scope)/\(try context.parameters.requireDecoded("name"))"
+                let query = request.uri.queryParameters
+                let nodes = try await secretTargets(scope: scope, node: query.get("node"), all: query.get("all") == "true")
+                for node in nodes {
+                    try await translatingTransport(node) { try await agent(on: node).deleteSecret(path) }
+                }
+                return await clusterSecrets(nodes: nodes)
+            }
+        }
         router.get("/v1/nodes") { [self] _, _ in
             await respond { NodeList(nodes: await state.summaries()) }
         }
@@ -442,10 +516,7 @@ public final class HeadServices: Sendable {
             await respond {
                 let service = try context.parameters.requireDecoded("service")
                 let rollback = try await decodeOptional(RollbackRequest.self, from: request) ?? RollbackRequest()
-                for target in await targets(service: service, node: request.uri.queryParameters.get("node")) {
-                    _ = try await translatingTransport(target) { try await agent(on: target).rollback(service: service, to: rollback.to) }
-                }
-                return await clusterStatus()
+                return try await self.rollback(service: service, to: rollback.to, node: request.uri.queryParameters.get("node"))
             }
         }
         router.delete("/v1/adopt/:label") { [self] request, context in

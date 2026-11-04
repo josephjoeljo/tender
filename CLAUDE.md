@@ -174,8 +174,7 @@ Production uses `/opt/tender`, `/Library/LaunchDaemons`, and the `system` domain
 Detailed plans: `docs/plans/milestone-{1..5}.md`.
 
 1. **Single-node agent** — pm2 parity on launchd: start/stop/restart/delete/list,
-   logs, adopt, binaries-folder watching. ← current (scaffold builds in Xcode;
-   plan: `docs/plans/milestone-1.md`)
+   logs, adopt, binaries-folder watching. Done.
 2. **Head + join** (binaries placed on workers by hand for now) — spike: `@Resolvable` across modules over loopback on our
    macOS version; then TenderActorSystem, node registration, mTLS, remote commands,
    cluster-wide `tender list`.
@@ -186,9 +185,11 @@ Detailed plans: `docs/plans/milestone-{1..5}.md`.
    fetching from GCP Artifact Registry / GCS / S3.
    Plus the TenderApp dashboard: nodes, processes, logs (search + follow), releases.
    Plus Prometheus `/metrics` on the head.
-4. **MCP server** — read tools (`list_nodes`, `list_processes`,
-   `describe_process`, `search_logs`) + mutating tools (`start/stop/restart_process`),
-   per-token scopes, audit log.
+4. **Per-node secrets + agent skill** — milestone 1.5 §4–6 (`tender secret`,
+   `${secret:NAME}`, `tenderd exec`). The MCP server is shelved: agents use the
+   `tender` CLI through a Claude Code skill (`~/.claude/skills/tender`), with API
+   token scopes enforced by the head. The MCP plan stays in
+   `docs/plans/milestone-4.md` for when a shell-less agent needs it.
 5. **Later** — health checks → service discovery (registry + DNS) → rolling
    deploys (per-instance labels/ports, maxSurge/maxUnavailable) → load balancer.
 

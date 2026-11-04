@@ -22,6 +22,61 @@ struct ProcessController: Sendable {
     var identities: ClusterIdentityStore? = nil
     var cloud: CloudServices? = nil
     var releaseSourceOverride: (any ReleaseSource)? = nil
+    var vault: SecretVault? = nil
+
+    // MARK: Secrets
+
+    private func requireVault() throws -> SecretVault {
+        guard let vault else {
+            throw APIFailure(status: .notImplemented, code: "no_secrets", message: "This daemon has no secret store.")
+        }
+        return vault
+    }
+
+    private func secretName(_ path: String) throws -> SecretName {
+        guard let name = SecretName(path: path) else {
+            throw APIFailure(status: .badRequest, code: "invalid_secret_name",
+                             message: "'\(path)' isn't <service>/<NAME> or shared/<NAME>. NAME uses letters, digits and '_'.")
+        }
+        return name
+    }
+
+    /// Restarts every service that references it, through the plist's revision.
+    func setSecret(_ path: String, value: Data) async throws -> SecretList {
+        do {
+            try requireVault().set(try secretName(path), value: value)
+        } catch let error as SecretVaultError {
+            throw APIFailure(status: .badRequest, code: "invalid_secret_value", message: error.description)
+        }
+        try await reconciler.reconcile()
+        return try listSecrets()
+    }
+
+    /// Idempotent. Services that reference it restart and then exit with 78 until it's set again.
+    func deleteSecret(_ path: String) async throws -> SecretList {
+        try requireVault().delete(try secretName(path))
+        try await reconciler.reconcile()
+        return try listSecrets()
+    }
+
+    func listSecrets() throws -> SecretList {
+        let vault = try requireVault()
+        let node = try identities?.config()?.nodeID ?? NodeID(defaultNodeID())
+        let specs = try store.services().map(\.spec).filter(\.usesSecretTemplates)
+        var users: [String: [String]] = [:]
+        var missing: [String] = []
+        for spec in specs {
+            for ref in (try? spec.secretRefs()) ?? [] {
+                users[ref.secretName(service: spec.name).description, default: []].append(spec.name)
+            }
+            missing += try vault.missing(for: spec).map { "\(spec.name): \($0)" }
+        }
+        let secrets = try vault.live().map { item in
+            SecretInfo(name: item.name.description, scope: item.name.scope, node: node, updatedAt: item.record.updatedAt,
+                       revision: item.record.revision, usedBy: users[item.name.description] ?? [])
+        }
+        return SecretList(secrets: secrets, missing: missing)
+    }
 
     func list() async throws -> ProcessList {
         var list = try await reconciler.status()
@@ -244,9 +299,22 @@ struct ProcessController: Sendable {
             throw APIFailure(status: .badRequest, code: "invalid_name",
                              message: "Service names may only use letters, digits, '-' and '_', up to 64 characters.")
         }
+        // `shared/NAME` names a shared secret, so this service's own secrets couldn't be named.
+        guard spec.name != "shared" else {
+            throw APIFailure(status: .badRequest, code: "invalid_name",
+                             message: "'shared' is reserved for shared secrets; pick another service name.")
+        }
         guard (1...64).contains(spec.instances) else {
             throw APIFailure(status: .badRequest, code: "invalid_instances",
                              message: "instances must be between 1 and 64.")
+        }
+        do {
+            _ = try spec.secretRefs()
+        } catch let error as SecretTemplateError {
+            throw APIFailure(status: .badRequest, code: "invalid_secret_ref", message: error.description)
+        }
+        if spec.usesSecretTemplates, vault == nil {
+            throw APIFailure(status: .notImplemented, code: "no_secrets", message: "This daemon has no secret store.")
         }
         // By uid, since any account name can be an alias for uid 0.
         if spec.user == "root" || getpwnam(spec.user)?.pointee.pw_uid == 0 {
@@ -375,6 +443,25 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
 
     router.post("/v1/gc") { _, _ in
         await respond { try await controller.collectGarbage() }
+    }
+
+    // Values go in, never out: no route returns one.
+    router.get("/v1/secrets") { _, _ in
+        await respond { try controller.listSecrets() }
+    }
+    router.put("/v1/secrets/:scope/:name") { request, context in
+        await respond {
+            var request = request
+            let body = try await request.collectBody(upTo: 1 << 20)
+            let set = try decodeBody(SecretSetRequest.self, Data(body.readableBytesView))
+            let path = "\(try context.parameters.requireDecoded("scope"))/\(try context.parameters.requireDecoded("name"))"
+            return try await controller.setSecret(path, value: set.value)
+        }
+    }
+    router.delete("/v1/secrets/:scope/:name") { _, context in
+        await respond {
+            try await controller.deleteSecret("\(try context.parameters.requireDecoded("scope"))/\(try context.parameters.requireDecoded("name"))")
+        }
     }
 
     router.get("/v1/releases/:service") { _, context in

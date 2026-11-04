@@ -8,7 +8,7 @@ struct Tender: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
-        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Abandon.self, Gc.self, Version.self, Daemon.self,
+        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Abandon.self, Secret.self, Gc.self, Version.self, Daemon.self,
                       Deploy.self, Credentials.self, Token.self, Join.self, Leave.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
     )
 }
@@ -174,7 +174,10 @@ extension Tender {
     }
 
     struct Delete: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Stop a service and remove its definition.")
+        static let configuration = CommandConfiguration(
+            abstract: "Stop a service and remove its definition.",
+            discussion: "Its secrets (<service>/NAME) stay, for a later start under the same name. Remove them with `tender secret delete`."
+        )
         @Argument(help: "Service name.") var name: String
         @Option(help: "Only on this node. Defaults to every node running it.") var node: String?
         @OptionGroup var options: CommonOptions
