@@ -122,6 +122,14 @@ public struct Manifest: Codable, Sendable, Equatable {
         guard spec.user != "root", !spec.user.isEmpty else {
             throw ManifestError("\(what): managed processes never run as root.")
         }
+        for (path, ref) in spec.secretFiles {
+            guard path.hasPrefix("/") else {
+                throw ManifestError("\(what): secret_files paths must be absolute, not '\(path)'.")
+            }
+            guard SecretRef(reference: ref) != nil else {
+                throw ManifestError("\(what): secret_files '\(path)': '\(ref)' isn't NAME, shared/NAME or gcp:NAME.")
+            }
+        }
         do {
             _ = try spec.secretRefs()
         } catch let error as SecretTemplateError {
@@ -129,14 +137,6 @@ public struct Manifest: Codable, Sendable, Equatable {
         }
         for key in spec.environment.keys where !SecretName.isValidName(key) {
             throw ManifestError("\(what): '\(key)' isn't a valid environment variable name.")
-        }
-        for (path, ref) in spec.secretFiles {
-            guard path.hasPrefix("/") else {
-                throw ManifestError("\(what): secret_files paths must be absolute, not '\(path)'.")
-            }
-            guard SecretRef(reference: ref) != nil else {
-                throw ManifestError("\(what): secret_files '\(path)': '\(ref)' isn't NAME or shared/NAME.")
-            }
         }
     }
 

@@ -84,7 +84,7 @@ func laterKeysAreNotSupportedYet(key: String) {
 @Test func badSecretReferencesAreRejected() {
     #expect(parseError("kind: Service\nname: api\nexec: /bin/sleep\nenv:\n  A: \"${secret:not-valid}\"\n")?.contains("isn't a valid secret reference") == true)
     #expect(parseError("kind: Service\nname: api\nexec: /bin/sleep\nargs: [\"${secret:X\"]\n") != nil)
-    #expect(parseError("kind: Service\nname: api\nexec: /bin/sleep\nsecret_files:\n  /k.json: other/KEY\n")?.contains("isn't NAME or shared/NAME") == true)
+    #expect(parseError("kind: Service\nname: api\nexec: /bin/sleep\nsecret_files:\n  /k.json: other/KEY\n")?.contains("isn't NAME, shared/NAME or gcp:NAME") == true)
 }
 
 @Test func malformedDocumentsSayWhatIsWrong() {
