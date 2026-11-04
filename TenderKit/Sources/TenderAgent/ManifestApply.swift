@@ -66,14 +66,25 @@ extension ProcessController {
         }
         // One pass for the whole file. A label that fails is retried by the next sweep.
         if reconcile {
-            let report = try await reconciler.reconcile()
-            for index in results.indices where results[index].kind == .service && results[index].error == nil {
-                let prefix = "\(environment.serviceLabelPrefix).\(results[index].name)."
-                if let failure = report.failures.first(where: { $0.label.hasPrefix(prefix) }) {
-                    results[index].error = "\(failure.label): \(failure.message)"
+            do {
+                let report = try await reconciler.reconcile()
+                for index in results.indices where results[index].kind == .service && results[index].error == nil {
+                    let prefix = "\(environment.serviceLabelPrefix).\(results[index].name)."
+                    if let failure = report.failures.first(where: { $0.label.hasPrefix(prefix) }) {
+                        results[index].error = "\(failure.label): \(failure.message)"
+                    }
+                }
+            } catch {
+                // The specs are stored, so this isn't "nothing changed": say so on each one.
+                for index in results.indices where results[index].kind == .service && results[index].error == nil {
+                    results[index].error = "stored, but launchd wasn't updated yet (the next sweep retries): \(error)"
                 }
             }
-            for (old, new) in replaced { removeSecretFiles(of: old, keeping: new) }
+            // Only once the instances that used them are replaced or gone; otherwise an old
+            // instance may still read them, and they stay until a later apply.
+            for (old, new) in replaced where results.contains(where: { $0.kind == .service && $0.name == old.name && $0.error == nil }) {
+                removeSecretFiles(of: old, keeping: new)
+            }
         }
         return ApplyResponse(diff: diff, results: results, dryRun: false)
     }

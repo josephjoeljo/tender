@@ -141,6 +141,20 @@ private func actions(_ response: ApplyResponse) -> [String] {
     }
 }
 
+/// The specs are stored by then, so the items say so rather than the call failing as
+/// if nothing had changed.
+@Test func aReconcileThatFailsIsReportedOnTheItems() async throws {
+    let launchd = MemoryLaunchd()
+    try await withDaemon(launchd: launchd) { client, _ async throws in
+        await launchd.setListingFails(true)
+        let response = try await apply(client, "kind: Service\nname: api\nexec: /bin/sleep\nargs: [\"1000\"]\n")
+        #expect(response.results.count == 1)
+        #expect(response.results.first?.error?.contains("launchd wasn't updated yet") == true)
+        #expect(try await client.specs().nodes.first?.services.map(\.name) == ["api"])
+        await launchd.setListingFails(false)
+    }
+}
+
 @Test func binaryUsesTheNodesReleaseAndKeepsItAcrossApplies() async throws {
     try await withDaemon { client, env async throws in
         let yaml = "kind: Service\nname: api\nbinary: api\nargs: [\"1000\"]\n"

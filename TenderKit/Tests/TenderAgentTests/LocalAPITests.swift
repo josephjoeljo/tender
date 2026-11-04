@@ -14,6 +14,9 @@ actor MemoryLaunchd: LaunchdControlling {
     /// `StandardOutPath` by label, for jobs that have one.
     var stdoutPaths: [String: String] = [:]
     func setStdoutPath(_ path: String, label: String) { stdoutPaths[label] = path }
+    /// Makes listing fail, which fails a whole reconcile.
+    var listingFails = false
+    func setListingFails(_ fails: Bool) { listingFails = fails }
     func bootstrap(plistURL: URL) async throws {
         bootstraps += 1
         loaded.insert(plistURL.deletingPathExtension().lastPathComponent)
@@ -28,7 +31,10 @@ actor MemoryLaunchd: LaunchdControlling {
         let stdout = stdoutPaths[label].map { "\tstdout path = \($0)\n" } ?? ""
         return loaded.contains(label) ? JobInfo(output: "x/\(label) = {\n\tstate = running\n\tpid = 42\n\truns = 1\n\(stdout)}\n") : nil
     }
-    func listLabels(prefix: String) async throws -> [String] { loaded.filter { $0.hasPrefix(prefix) }.sorted() }
+    func listLabels(prefix: String) async throws -> [String] {
+        if listingFails { throw LaunchctlError.notFound("listing") }
+        return loaded.filter { $0.hasPrefix(prefix) }.sorted()
+    }
 }
 
 /// Runs a daemon on a temp socket for the duration of `body`.
