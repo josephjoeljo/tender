@@ -297,7 +297,7 @@ public final class HeadServices: Sendable {
     func apply(_ request: ApplyRequest) async throws -> ApplyResponse {
         let known = Set(await state.summaries().map(\.info.id) + [options.nodeID])
         do {
-            try Manifest(items: request.items).validate(knownNodes: known)
+            try Manifest(items: request.items).validate(knownNodes: known, defaultNode: options.nodeID)
         } catch let error as ManifestError {
             throw NodeCallError(code: "invalid_manifest", message: error.message, httpStatus: 400)
         }

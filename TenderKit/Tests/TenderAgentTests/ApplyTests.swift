@@ -126,6 +126,21 @@ private func actions(_ response: ApplyResponse) -> [String] {
     }
 }
 
+@Test func aServiceListedWithAndWithoutTheLocalNodeIsADuplicate() async throws {
+    try await withDaemon { client, _ async throws in
+        let node = try #require(try await client.specs().nodes.first?.node)
+        let yaml = "kind: Service\nname: api\nexec: /bin/sleep\n---\nkind: Service\nname: api\nexec: /bin/cat\nnode: \(node)\n"
+        do {
+            _ = try await apply(client, yaml)
+            Issue.record("expected an error")
+        } catch let error as TenderClientError {
+            #expect(error.code == "invalid_manifest")
+            #expect(error.description.contains("twice"))
+        }
+        #expect(try await client.list().processes.isEmpty)
+    }
+}
+
 @Test func binaryUsesTheNodesReleaseAndKeepsItAcrossApplies() async throws {
     try await withDaemon { client, env async throws in
         let yaml = "kind: Service\nname: api\nbinary: api\nargs: [\"1000\"]\n"

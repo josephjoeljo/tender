@@ -84,8 +84,9 @@ public struct Manifest: Codable, Sendable, Equatable {
 
     /// What can be checked without a node: names, counts, paths and references. A node
     /// checks the rest (executables exist, users exist) when the file is applied.
-    /// `knownNodes` nil skips the node check.
-    public func validate(knownNodes: Set<NodeID>? = nil) throws {
+    /// `knownNodes` nil skips the node check. `defaultNode` is where items without a node
+    /// go, so that one listed without `node:` and once with that node is a duplicate too.
+    public func validate(knownNodes: Set<NodeID>? = nil, defaultNode: NodeID? = nil) throws {
         var seen = Set<String>()
         for item in items {
             let what = "\(item.kind.rawValue) '\(item.name)'"
@@ -96,7 +97,7 @@ public struct Manifest: Codable, Sendable, Equatable {
             if let node = item.node, let knownNodes, !knownNodes.contains(node) {
                 throw ManifestError("\(what): there's no node named '\(node)'. `tender nodes` lists them.")
             }
-            let key = "\(item.kind.rawValue)/\(item.name)@\(item.node?.rawValue ?? "")"
+            let key = "\(item.kind.rawValue)/\(item.name)@\((item.node ?? defaultNode)?.rawValue ?? "")"
             guard seen.insert(key).inserted else {
                 throw ManifestError("\(what) appears twice for the same node.")
             }

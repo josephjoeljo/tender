@@ -175,3 +175,17 @@ private func actions(_ response: ApplyResponse) -> [String] {
         #expect(all.diff.prunedNodes == [NodeID("head"), NodeID("worker")])
     }
 }
+
+@Test func aServiceListedWithAndWithoutTheDefaultNodeIsADuplicate() async throws {
+    try await withCluster { head, _ async throws in
+        let yaml = "kind: Service\nname: api\nexec: /bin/sleep\n---\nkind: Service\nname: api\nexec: /bin/cat\nnode: head\n"
+        do {
+            _ = try await head.client.apply(try request(yaml))
+            Issue.record("expected an error")
+        } catch let error as TenderClientError {
+            #expect(error.code == "invalid_manifest")
+            #expect(error.description.contains("twice"))
+        }
+        #expect(try await head.client.list().processes.isEmpty)
+    }
+}

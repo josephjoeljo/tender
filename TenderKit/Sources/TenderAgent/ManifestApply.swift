@@ -18,7 +18,7 @@ extension ProcessController {
     func applyManifest(_ request: ApplyRequest) async throws -> ApplyResponse {
         let node = try localNode()
         do {
-            try Manifest(items: request.items).validate()
+            try Manifest(items: request.items).validate(defaultNode: node)
         } catch let error as ManifestError {
             throw APIFailure(status: .badRequest, code: "invalid_manifest", message: error.message)
         }
