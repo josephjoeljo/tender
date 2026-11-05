@@ -32,9 +32,13 @@ public struct Heartbeat: Codable, Sendable, Equatable {
     public var previousRoundTrip: TimeInterval?
     public var spoolBacklog: Int
     public var spoolDropped: Int
+    /// Failed GCP Secret Manager fetches since the node's daemon started.
+    public var secretFetchErrors: Int
 
     public init(node: NodeID, nodeClock: Date, processes: [InstanceStatus], orphans: [String] = [],
-                previousRoundTrip: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0) {
+                previousRoundTrip: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0,
+                secretFetchErrors: Int = 0) {
+        self.secretFetchErrors = secretFetchErrors
         self.previousRoundTrip = previousRoundTrip
         self.spoolBacklog = spoolBacklog
         self.spoolDropped = spoolDropped
@@ -67,6 +71,11 @@ public protocol NodeAgentProtocol: DistributedActor where ActorSystem: Distribut
     distributed func deleteSecret(_ name: String) async throws
     /// Names, revisions and users. Never values.
     distributed func listSecrets() async throws -> SecretList
+    /// Everything this node runs, in full, for diffs and `tender export`.
+    distributed func specs() async throws -> NodeSpecs
+    /// Diffs `request.items` against this node and, unless it's a dry run, applies the
+    /// changes. Items must name this node or none. One failing item doesn't stop the others.
+    distributed func applyManifest(_ request: ApplyRequest) async throws -> ApplyResponse
 }
 
 /// What a worker tells the head.

@@ -100,8 +100,10 @@ To debug the daemon instead of installing it, add these launch arguments to the 
 | `tender rollback <name>` | Go back to an earlier release |
 | `tender deploy <name> --release <version>` | Fetch a release and restart on it. Needs a [release source](docs/ops/releases-and-logs.md) |
 | `tender nodes` | List the cluster's nodes |
+| `tender apply -f services.yaml` | Create or update every service a [service file](#service-files) describes |
+| `tender export` | Print what runs as a service file |
 
-`tender start` also takes `--instances`, `--env KEY=VALUE`, `--cwd`, `--user`, and `--node`. Services start in `/` unless you set `--cwd`. Run `tender help <command>` for the rest.
+`tender start` also takes `--instances`, `--env KEY=VALUE`, `--cwd`, `--user`, `--node` and `--secret-file PATH=REF`. Services start in `/` unless you set `--cwd`. Run `tender help <command>` for the rest.
 
 ### Secrets
 
@@ -120,9 +122,54 @@ tender start api --env 'MONGO_URL=mongodb://app:${secret:MONGO_PASSWORD}@db/olym
 | `tender secret list` | List secrets by name, node and the services using them. Values are never shown |
 | `tender secret delete <service>/<NAME>` | Delete a secret. Services still using it exit with code 78 |
 
+A value that mustn't be in the environment, such as a key file, can be written as a file before each start instead:
+
+```sh
+tender start api --secret-file /opt/olympsis/api/gcp.json=GCP_KEY -- ./api
+```
+
+The file is written by `tenderd exec` as the service's own user, `0400`, and replaced whole at each start. The path must be absolute and outside Tender's own directories, and the service's user must be able to create files in its directory. The reference is what goes between `${secret:` and `}`: `GCP_KEY`, `shared/GCP_KEY` or a `gcp:` reference.
+
+Secrets can also come from GCP Secret Manager: `${secret:gcp:NAME}` (latest, re-checked every 5 minutes), `${secret:gcp:NAME@4}` (pinned) and `${secret:gcp:projects/P/secrets/S[@4]}`. Each node fetches them with its own credentials and caches them, so services still start while GCP is down. Setup, IAM roles and the full behaviour are in [docs/ops/gcp-secrets.md](docs/ops/gcp-secrets.md).
+
 Values stay on the node: in the System Keychain in production, and in 0600 files in dev mode. The head passes them on and keeps nothing. A Mac that dies takes its secrets with it, so keep your own copy, for example a script that pipes each one into `tender secret set`.
 
 Secrets are isolated by user, not by service. At launch a service reads them from a file owned by its user, so services sharing a user (by default all of them, as `_tender`) can read each other's secrets and environments: start each service that holds secrets with its own `--user`. A `write`-scoped API token can start a process that prints any secret, so treat write tokens as secrets too. `tender delete <service>` keeps the service's `<service>/*` secrets; remove them with `tender secret delete`.
+
+### Service files
+
+Describe services in YAML, one document per service or adopted job, and apply the file. [docs/examples/services.yaml](docs/examples/services.yaml) runs the Olympsis backend.
+
+```yaml
+kind: Service
+name: api
+binary: api                       # the release from bin/api/; or exec: /absolute/path
+args: ["--port", "8080"]
+cwd: /opt/olympsis/api
+instances: 2
+node: mac-1                       # defaults to the node you're talking to
+env_file: ./api.env               # relative to this file, read by the CLI
+env:
+  LOG_LEVEL: info
+  MONGO_URL: "mongodb://app:${secret:MONGO_PASSWORD}@10.0.0.3/olympsis"
+secret_files:
+  /opt/olympsis/api/gcp.json: GCP_KEY
+---
+kind: Adopted
+label: homebrew.mxcl.mongodb-community
+node: mac-1
+log_path: /opt/homebrew/var/log/mongodb/mongo.log
+```
+
+```sh
+tender apply -f services.yaml --dry-run   # only print what would change
+tender apply -f services.yaml             # print the changes, ask, apply
+tender apply -f services.yaml --prune     # also remove what the file doesn't list, on the nodes it names
+tender apply -f services.yaml --prune-all # the same on every node
+tender export > services.yaml             # what runs now, as a file that applies as a no-op
+```
+
+Applying the same file twice changes nothing and restarts nothing. Without `--prune`, services the file doesn't list are left alone; with it, only on the nodes the file names (an item's `node:`, or the head for items without one), so a file for one node can't empty another. `--prune-all` prunes every node, and the diff starts with the nodes it prunes. Unknown keys are errors, inline `env` wins over `env_file`, and `--yes` (or a stdin that isn't a terminal) skips the question. Through a head, each node applies its part; a node that fails is reported and the others go ahead. Use one file per environment (`services.prod.yaml`, `services.staging.yaml`).
 
 ### Ship a new binary
 

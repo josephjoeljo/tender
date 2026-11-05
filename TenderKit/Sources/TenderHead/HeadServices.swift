@@ -253,15 +253,121 @@ public final class HeadServices: Sendable {
                 if let list {
                     combined.secrets += list.secrets
                     combined.missing += list.missing.map { "\(node): \($0)" }
+                    combined.gcp += list.gcp
                 } else if !combined.unreachableNodes.contains(node.rawValue) {
                     combined.unreachableNodes.append(node.rawValue)
                 }
             }
         }
         combined.secrets.sort { ($0.name, $0.node.rawValue) < ($1.name, $1.node.rawValue) }
+        combined.gcp.sort { ($0.name, $0.node.rawValue) < ($1.name, $1.node.rawValue) }
         combined.missing.sort()
         combined.unreachableNodes.sort()
         return combined
+    }
+
+    // MARK: Service files
+
+    /// Every node's full specs, in parallel. `node` asks only that one. A node that can't
+    /// be reached is unreachable; one that answers with an error is reported with it.
+    func clusterSpecs(node: String? = nil) async -> SpecList {
+        var asked = node.map { [NodeID($0)] } ?? []
+        if node == nil { asked = Array(Set(await state.upNodes() + [options.nodeID])) }
+        var combined = SpecList(nodes: [])
+        if node == nil { combined.unreachableNodes = await state.downNodes().map(\.rawValue) }
+        await withTaskGroup(of: (NodeID, Result<NodeSpecs, any Error>).self) { group in
+            for node in asked {
+                group.addTask { [self] in
+                    do {
+                        return (node, .success(try await agent(on: node).specs()))
+                    } catch {
+                        return (node, .failure(error))
+                    }
+                }
+            }
+            for await (node, result) in group {
+                switch result {
+                case .success(let specs):
+                    combined.nodes.append(specs)
+                case .failure(is TransportError):
+                    if !combined.unreachableNodes.contains(node.rawValue) { combined.unreachableNodes.append(node.rawValue) }
+                case .failure(let error):
+                    combined.failedNodes.append(NodeFailure(node: node, error: "\(error)"))
+                }
+            }
+        }
+        combined.nodes.sort { $0.node.rawValue < $1.node.rawValue }
+        combined.unreachableNodes.sort()
+        combined.failedNodes.sort { $0.node.rawValue < $1.node.rawValue }
+        return combined
+    }
+
+    /// Splits the file by node and lets each node diff and apply its part, in parallel. A
+    /// node that fails is reported and the others go ahead; nothing is rolled back. `prune`
+    /// prunes the nodes the file names; `pruneAll` also asks every other node that's up.
+    func apply(_ request: ApplyRequest) async throws -> ApplyResponse {
+        let known = Set(await state.summaries().map(\.info.id) + [options.nodeID])
+        do {
+            try Manifest(items: request.items).validate(knownNodes: known, defaultNode: options.nodeID)
+        } catch let error as ManifestError {
+            throw NodeCallError(code: "invalid_manifest", message: error.message, httpStatus: 400)
+        }
+        var byNode: [NodeID: [ManifestItem]] = [:]
+        for var item in request.items {
+            item.node = item.node ?? options.nodeID
+            byNode[item.node!, default: []].append(item)
+        }
+        var failed: [NodeFailure] = []
+        if request.pruneAll {
+            for node in await state.upNodes() + [options.nodeID] where byNode[node] == nil { byNode[node] = [] }
+            for node in await state.downNodes() where byNode[node] == nil {
+                failed.append(NodeFailure(node: node, error: "\(node) is down, so it wasn't pruned."))
+            }
+        }
+        var responses: [(NodeID, ApplyResponse)] = []
+        await withTaskGroup(of: (NodeID, Result<ApplyResponse, any Error>).self) { group in
+            for (node, items) in byNode {
+                let part = ApplyRequest(items: items, prune: request.prune || request.pruneAll, pruneAll: request.pruneAll,
+                                        dryRun: request.dryRun, sha256: request.sha256)
+                group.addTask { [self] in
+                    do {
+                        return (node, .success(try await translatingTransport(node) { try await agent(on: node).applyManifest(part) }))
+                    } catch {
+                        return (node, .failure(error))
+                    }
+                }
+            }
+            for await (node, result) in group {
+                switch result {
+                case .success(let response): responses.append((node, response))
+                case .failure(let error): failed.append(NodeFailure(node: node, error: "\(error)"))
+                }
+            }
+        }
+        var combined = ApplyResponse(diff: ManifestDiff(), dryRun: request.dryRun)
+        for (_, response) in responses.sorted(by: { $0.0.rawValue < $1.0.rawValue }) {
+            combined.diff.changes += response.diff.changes
+            combined.diff.prunedNodes += response.diff.prunedNodes
+            combined.results += response.results
+        }
+        combined.diff.prunedNodes.sort { $0.rawValue < $1.rawValue }
+        combined.failedNodes = failed.sorted { $0.node.rawValue < $1.node.rawValue }
+        AuditLog.note?.text = Self.auditDetail(request: request, response: combined)
+        return combined
+    }
+
+    /// Names and counts, never values.
+    static func auditDetail(request: ApplyRequest, response: ApplyResponse) -> String {
+        var parts = ["sha256=\(request.sha256 ?? "none")", "dryRun=\(request.dryRun)", "prune=\(request.prune)",
+                     "pruneAll=\(request.pruneAll)",
+                     response.diff.summary]
+        let changed = response.diff.changes.filter { $0.action != .unchanged }
+            .map { "\($0.action.rawValue) \($0.kind.rawValue) \($0.name)@\($0.node)" }
+        if !changed.isEmpty { parts.append("changes: " + changed.joined(separator: ", ")) }
+        let errors = response.results.filter { $0.error != nil }.map { "\($0.name)@\($0.node)" }
+        if !errors.isEmpty { parts.append("failed: " + errors.joined(separator: ", ")) }
+        if !response.failedNodes.isEmpty { parts.append("failed nodes: " + response.failedNodes.map(\.node.rawValue).joined(separator: ", ")) }
+        return parts.joined(separator: "; ")
     }
 
     private func translatingTransport<T: Sendable>(_ node: NodeID, _ call: () async throws -> T) async throws -> T {
@@ -414,7 +520,8 @@ public final class HeadServices: Sendable {
     // MARK: Routes
 
     /// Shared by the Unix socket and the public listener.
-    private func installClusterRoutes(on router: Router<BasicRequestContext>) {
+    /// `remote` is the public listener, where some reads need a write token.
+    private func installClusterRoutes(on router: Router<BasicRequestContext>, remote: Bool = false) {
         router.get("/v1/logs") { [self] request, _ in
             await respond { try await logs.search(try logQuery(from: request)) }
         }
@@ -470,6 +577,19 @@ public final class HeadServices: Sendable {
                     try await translatingTransport(node) { try await agent(on: node).deleteSecret(path) }
                 }
                 return await clusterSecrets(nodes: nodes)
+            }
+        }
+        // Full specs, environment included, so a remote token needs write scope. The check
+        // is on the route rather than on the path, so `/v1/specs/` and `//v1/specs` get it too.
+        let specs = remote ? router.group().add(middleware: WriteScopeMiddleware(store: store)) : router.group()
+        specs.get("/v1/specs") { [self] request, _ in
+            await respond { await clusterSpecs(node: request.uri.queryParameters.get("node")) }
+        }
+        router.post("/v1/apply") { [self] request, _ in
+            await respond {
+                let body = try await decode(ApplyRequest.self, from: request, limit: 16 << 20)
+                if remote { try await refuseNewLogPaths(in: body) }
+                return try await apply(body)
             }
         }
         router.get("/v1/nodes") { [self] _, _ in
@@ -599,6 +719,24 @@ public final class HeadServices: Sendable {
         )
     }
 
+    /// An adopted job's `log_path` makes the root daemon read a file of the caller's choosing,
+    /// which is why `/v1/adopt` is socket only. Remotely, a file may keep the paths a job
+    /// already has, so an export still applies, but not set new ones.
+    private func refuseNewLogPaths(in request: ApplyRequest) async throws {
+        let wanted = request.items.compactMap { item -> (label: String, node: NodeID, path: String)? in
+            guard case .adopted(let job) = item, let path = job.logPath else { return nil }
+            return (job.label, job.node ?? options.nodeID, path)
+        }
+        guard !wanted.isEmpty else { return }
+        let current = await clusterSpecs(node: nil)
+        for job in wanted {
+            let existing = current.nodes.first { $0.node == job.node }?.adopted.first { $0.label == job.label }
+            guard existing?.logPath == job.path else {
+                throw NodeCallError(code: "forbidden", message: "Adopted '\(job.label)': log_path can only be set over the local socket. Run `tender apply` on \(job.node) itself, or leave log_path out.", httpStatus: 403)
+            }
+        }
+    }
+
     /// Administration stays on the socket: file permissions are its authentication.
     func installSocketRoutes(on router: Router<BasicRequestContext>) {
         router.add(middleware: AuditMiddleware(audit: audit, who: { _ in "local-socket" }))
@@ -668,7 +806,7 @@ public final class HeadServices: Sendable {
         router.post("/v1/join") { [self] request, _ in
             await respond { try await handleJoin(try await decode(JoinRequest.self, from: request)) }
         }
-        installClusterRoutes(on: router)
+        installClusterRoutes(on: router, remote: true)
         return router
     }
 
@@ -691,6 +829,12 @@ public final class HeadServices: Sendable {
     }
 }
 
+extension Request {
+    /// The path as the router matches it, which drops empty segments: `//v1/join/` reaches
+    /// the `/v1/join` handler, so a middleware comparing paths has to see it that way too.
+    var routedPath: String { "/" + uri.path.split(separator: "/").joined(separator: "/") }
+}
+
 /// `Authorization: Bearer <token>`. `GET` needs read scope, everything else write.
 struct BearerAuthMiddleware: RouterMiddleware {
     typealias Context = BasicRequestContext
@@ -699,25 +843,50 @@ struct BearerAuthMiddleware: RouterMiddleware {
 
     func handle(_ request: Request, context: Context,
                 next: (Request, Context) async throws -> Response) async throws -> Response {
-        if Self.publicPaths.contains(request.uri.path) { return try await next(request, context) }
+        if Self.publicPaths.contains(request.routedPath) { return try await next(request, context) }
+        let token: APITokenInfo
+        switch Self.token(of: request, store: store) {
+        case .success(let found): token = found
+        case .failure(let error): return errorResponse(error)
+        }
+        if request.method != .get, token.scope != .write { return errorResponse(WriteScopeMiddleware.forbidden) }
+        return try await next(request, context)
+    }
+
+    static func token(of request: Request, store: HeadStore) -> Result<APITokenInfo, NodeCallError> {
         guard let header = request.headers[.authorization], header.hasPrefix("Bearer ") else {
-            return errorResponse(NodeCallError(code: "unauthorized", message: "A bearer token is required.", httpStatus: 401))
+            return .failure(NodeCallError(code: "unauthorized", message: "A bearer token is required.", httpStatus: 401))
         }
         // Clients may present the full `<secret>.<fingerprint>`; only the secret is stored.
         let presented = header.dropFirst("Bearer ".count).split(separator: ".").first.map(String.init) ?? ""
         guard let token = try? store.apiToken(secret: presented) else {
-            return errorResponse(NodeCallError(code: "unauthorized", message: "Unknown token.", httpStatus: 401))
+            return .failure(NodeCallError(code: "unauthorized", message: "Unknown token.", httpStatus: 401))
         }
-        if request.method != .get, token.scope != .write {
-            return errorResponse(NodeCallError(code: "forbidden", message: "This token is read-only.", httpStatus: 403))
-        }
-        return try await next(request, context)
+        return .success(token)
     }
 }
 
-func decode<T: Decodable>(_ type: T.Type, from request: Request) async throws -> T {
+/// For reads that need write scope: specs can hold literal credentials from an `env_file`,
+/// and a write token could set them anyway. It goes on the route, so it runs only once the
+/// router has matched, whatever the spelling of the path.
+struct WriteScopeMiddleware: RouterMiddleware {
+    typealias Context = BasicRequestContext
+    static let forbidden = NodeCallError(code: "forbidden", message: "This token is read-only.", httpStatus: 403)
+    let store: HeadStore
+
+    func handle(_ request: Request, context: Context,
+                next: (Request, Context) async throws -> Response) async throws -> Response {
+        switch BearerAuthMiddleware.token(of: request, store: store) {
+        case .success(let token) where token.scope == .write: return try await next(request, context)
+        case .success: return errorResponse(Self.forbidden)
+        case .failure(let error): return errorResponse(error)
+        }
+    }
+}
+
+func decode<T: Decodable>(_ type: T.Type, from request: Request, limit: Int = 1 << 20) async throws -> T {
     var request = request
-    let body = try await request.collectBody(upTo: 1 << 20)
+    let body = try await request.collectBody(upTo: limit)
     do {
         return try JSONDecoder().decode(type, from: Data(body.readableBytesView))
     } catch {

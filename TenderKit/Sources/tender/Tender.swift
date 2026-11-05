@@ -8,7 +8,7 @@ struct Tender: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
-        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Abandon.self, Secret.self, Gc.self, Version.self, Daemon.self,
+        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Abandon.self, Apply.self, Export.self, Secret.self, Gc.self, Version.self, Daemon.self,
                       Deploy.self, Credentials.self, Token.self, Join.self, Leave.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
     )
 }
@@ -99,6 +99,9 @@ extension Tender {
         @Option(help: "Node to run on. Defaults to the node you're talking to.")
         var node: String?
 
+        @Option(name: .customLong("secret-file"), help: "A secret written as a file before each start, as PATH=REF, for example /opt/api/gcp.json=GCP_KEY. Repeatable.")
+        var secretFiles: [String] = []
+
         @OptionGroup var options: CommonOptions
 
         @Argument(parsing: .postTerminator, help: "Command to run, after `--`.")
@@ -117,7 +120,8 @@ extension Tender {
                 workingDirectory: cwd,
                 instances: instances,
                 node: node.map { NodeID($0) },
-                user: user
+                user: user,
+                secretFiles: try Self.parse(secretFiles, option: "--secret-file", as: "PATH=REF", splitAtLast: true)
             )
             try await options.execute { try await $0.start(spec) }
         }
@@ -139,11 +143,13 @@ extension Tender {
             throw ValidationError("'\(executable)' was not found in PATH.")
         }
 
-        static func parse(_ pairs: [String]) throws -> [String: String] {
+        /// A path can hold `=` and a secret reference can't, so `--secret-file` splits at the last one.
+        static func parse(_ pairs: [String], option: String = "--env", as form: String = "KEY=VALUE",
+                          splitAtLast: Bool = false) throws -> [String: String] {
             var result: [String: String] = [:]
             for pair in pairs {
-                guard let separator = pair.firstIndex(of: "="), separator != pair.startIndex else {
-                    throw ValidationError("--env expects KEY=VALUE, got '\(pair)'.")
+                guard let separator = splitAtLast ? pair.lastIndex(of: "=") : pair.firstIndex(of: "="), separator != pair.startIndex else {
+                    throw ValidationError("\(option) expects \(form), got '\(pair)'.")
                 }
                 result[String(pair[..<separator])] = String(pair[pair.index(after: separator)...])
             }

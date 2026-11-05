@@ -44,6 +44,9 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// Account the process runs as. launchd ignores it in the gui domain (dev mode).
     public var user: String
     public var logPaths: LogPaths?
+    /// Secrets written as files before launch: target path → reference, as inside
+    /// `${secret:…}` (`GCP_KEY`, `shared/GCP_KEY`). For values that mustn't be in the environment.
+    public var secretFiles: [String: String]
 
     public init(
         name: String,
@@ -54,7 +57,8 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         instances: Int = 1,
         node: NodeID? = nil,
         user: String = ServiceSpec.defaultUser,
-        logPaths: LogPaths? = nil
+        logPaths: LogPaths? = nil,
+        secretFiles: [String: String] = [:]
     ) {
         self.name = name
         self.program = program
@@ -65,6 +69,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         self.node = node
         self.user = user
         self.logPaths = logPaths
+        self.secretFiles = secretFiles
     }
 
     /// Service names end up in launchd labels and file paths, so only a safe
@@ -77,6 +82,25 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
             default: false
             }
         }
+    }
+}
+
+extension ServiceSpec {
+    /// Specs saved before a field existed still decode.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            name: try container.decode(String.self, forKey: .name),
+            program: try container.decode(ProgramSource.self, forKey: .program),
+            arguments: try container.decode([String].self, forKey: .arguments),
+            environment: try container.decode([String: String].self, forKey: .environment),
+            workingDirectory: try container.decodeIfPresent(String.self, forKey: .workingDirectory),
+            instances: try container.decode(Int.self, forKey: .instances),
+            node: try container.decodeIfPresent(NodeID.self, forKey: .node),
+            user: try container.decode(String.self, forKey: .user),
+            logPaths: try container.decodeIfPresent(LogPaths.self, forKey: .logPaths),
+            secretFiles: try container.decodeIfPresent([String: String].self, forKey: .secretFiles) ?? [:]
+        )
     }
 }
 
@@ -214,13 +238,17 @@ public struct AdoptedJob: Codable, Sendable, Equatable {
     public var plistPath: String?
     public var stdoutPath: String?
     public var stderrPath: String?
+    /// The `--log-path` (or `log_path:`) it was adopted with. Kept apart from `stdoutPath`
+    /// so that export and apply know it without asking launchd, which forgets a stopped job.
+    public var logPath: String?
 
-    public init(label: String, domain: String, plistPath: String?, stdoutPath: String?, stderrPath: String?) {
+    public init(label: String, domain: String, plistPath: String?, stdoutPath: String?, stderrPath: String?, logPath: String? = nil) {
         self.label = label
         self.domain = domain
         self.plistPath = plistPath
         self.stdoutPath = stdoutPath
         self.stderrPath = stderrPath
+        self.logPath = logPath
     }
 }
 

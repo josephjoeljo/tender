@@ -21,7 +21,7 @@ import TenderCore
     let env = try makeTestEnvironment()
     defer { try? FileManager.default.removeItem(at: env.root) }
     let store = try StateStore(environment: env)
-    let job = AdoptedJob(label: "x.y", domain: "gui/501", plistPath: "/p.plist", stdoutPath: "/o", stderrPath: nil)
+    let job = AdoptedJob(label: "x.y", domain: "gui/501", plistPath: "/p.plist", stdoutPath: "/o", stderrPath: nil, logPath: "/o")
     try store.saveAdopted(job)
     try store.saveAdopted(job)
     let reopened = try StateStore(environment: env)

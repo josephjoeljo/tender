@@ -13,7 +13,8 @@ so 5c only adds `health`, `rollout`, `placement.labels` and `${svc:…}`.
 - `tender apply -f services.yaml` creates or updates every service in the file
   on the nodes it names, prints a diff first, and `--dry-run` stops after the
   diff. Running it twice changes nothing.
-- Services in the cluster but not in the file are left alone unless `--prune`.
+- Services in the cluster but not in the file are left alone unless `--prune`
+  (the nodes the file names) or `--prune-all` (every node).
 - `env_file: .env` and inline `env:` both work; inline wins on conflicts.
 - `tender export > services.yaml` writes the running services back out, and
   applying that file is a no-op.
@@ -63,7 +64,7 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 
 ## Work breakdown
 
-### 1. Models — `TenderCore`
+### 1. Models — `TenderCore` (done)
 - `ServiceSpec`: + `secretRefs: [SecretRef]`, `secretFiles: [String: SecretRef]`
   (derived from the env/args templates; the template itself is stored, never the
   resolved value).
@@ -72,18 +73,18 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 - `Manifest` = `[ManifestItem]` (`service(ServiceSpec)`, `adopted(AdoptRequest)`),
   Codable, plus validation (names, nodes exist, refs parse).
 
-### 2. YAML parsing + diff — `TenderClient/Manifest`
+### 2. YAML parsing + diff — `TenderClient/Manifest` (done)
 - Yams for parsing (new dependency, `TenderClient` only — the app and agent
   never parse YAML).
 - `env_file` read and merged on the CLI side; the node only sees the final spec.
 - `ManifestDiff`: create / update (field-level) / unchanged / prune, computed
   against `GET /v1/processes` so the same code serves the CLI, app and MCP.
 
-### 3. Apply + export — API and CLI
-- `POST /v1/apply { items, prune, dryRun } -> ManifestDiff + results` on the
+### 3. Apply + export — API and CLI (done)
+- `POST /v1/apply { items, prune, pruneAll, dryRun } -> ManifestDiff + results` on the
   local socket and the head. The head fans out per node with the existing
   `NodeAgentProtocol.apply(_:)`; per-node failures are reported, not rolled back.
-- `tender apply -f <file> [--dry-run] [--prune] [--yes]`: prints the diff,
+- `tender apply -f <file> [--dry-run] [--prune | --prune-all] [--yes]`: prints the diff,
   asks unless `--yes`/non-TTY, `--json` for agents.
 - `tender export [--service s] [--node n]` → YAML, secrets as `${secret:…}`.
 - Audit log entry per apply (file hash, diff summary, token).
@@ -127,9 +128,9 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 - App: secrets section lists names, nodes and users; no values, no editing in
   this milestone.
 - `scripts/` example: restore a node's secrets from a local file (the user's
-  backup script), piping each value to `tender secret set`.
+  backup script), piping each value to `tender secret set`. Done: `scripts/restore-secrets.sh`.
 
-### 7. GCP Secret Manager source (step G, may slip)
+### 7. GCP Secret Manager source (step G) — done
 - Ref syntax: `${secret:gcp:NAME}`, `${secret:gcp:NAME@4}`,
   `${secret:gcp:projects/P/secrets/S}`; default project in `CloudConfig.secrets`.
 - `GCPSecretSource` in `GoogleCloud.swift` reuses `GoogleTokenProvider` (scope
@@ -144,7 +145,7 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
   `tender_secret_fetch_errors_total`); never fetched → instance does not start,
   error names the secret and the missing IAM role.
 
-### 8. Tests
+### 8. Tests (service-file parts done)
 - YAML parse/validate fixtures (good, unknown keys, 5c-only keys, bad refs).
 - Diff: create/update/unchanged/prune; apply idempotence; export round-trip.
 - Interpolation and escaping; `env_file` precedence.
@@ -187,8 +188,43 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 - GCP Secret Manager is an additional source behind the same refs, not a
   replacement.
 
-## Open questions
+## Decided while building
 
-- pm2 `env_<profile>` blocks (`--env production`): needed, or one file per
-  environment?
-- `max_memory_restart` / `cron_restart` parity: in this milestone or later?
+- Per-node secrets (§4–6) shipped with milestone 4; this milestone adds service
+  files, `secret_files` and GCP refs on top.
+- No pm2 `env_<profile>` blocks: one file per environment
+  (`services.prod.yaml`, `services.staging.yaml`), with `env_file` for what
+  differs.
+- `max_memory_restart` / `cron_restart`: later, with health checks (milestone 5).
+- `secret_files` values are refs as written inside `${secret:…}`; the spec stores
+  the ref, never the value.
+- `ManifestDiff` lives in `TenderCore`, not `TenderClient`: each node diffs its part of
+  the file against its own `StateStore`, and the head only splits and merges. YAML stays
+  in `TenderClient` (Yams).
+- The diff needs full specs, which `GET /v1/processes` doesn't carry, so there's
+  `GET /v1/specs` (socket and head; a remote token needs `write` scope, since specs can
+  hold literal `env_file` values). The head fans out with two add-only distributed funcs,
+  `specs()` and `applyManifest(_:)`, rather than `apply(.start(spec))`, so that each node
+  pins `binary:` to its own release. Protocol version 4.
+- `binary: <name>` must equal the service's name (releases are per service). It means
+  "the release this node runs, else its newest", so a rollback survives re-applying;
+  export writes `binary:` without a sha.
+- Unchanged items aren't touched, so a stopped service stays stopped; a changed one is
+  replaced and started. `--prune` also abandons adopted jobs the file doesn't list.
+- `--prune` prunes only the nodes the file names (items' `node:`, plus the default node for
+  items without one), so a file for one node can't empty the others; `--prune-all` /
+  `pruneAll` prunes every node that's up. The diff lists the nodes it prunes.
+- Diffs never show environment values, only that a variable was added, removed or
+  changed. The audit record of an apply gets a `detail`: file sha256, counts and names.
+- `secret_files` are written by `tenderd exec` as the service's user (temp file with
+  `O_CREAT|O_EXCL|O_NOFOLLOW`, `0400`, rename over the target), not by root as §5 first
+  said, so no root write ever lands in a directory the service controls. Root only
+  removes stale ones, with an `openat`/`O_NOFOLLOW` walk. `tender start --secret-file`.
+- GCP values are cached in the vault under `gcp.<project>.<secret>.<version>` items, so
+  revisions, delivery and `secrets-export` treat them like local secrets. Fetch status
+  (version, last check, error) is in memory and resets with the daemon.
+- A GCP reference never fetched fails the start (the spec isn't stored) rather than
+  leaving instances exiting 78; one already cached starts from the cache.
+- `tender_secret_fetch_errors_total` travels in heartbeats, so it exists only on joined
+  nodes; a standalone node shows errors in `tender secret list`. Protocol version 4.
+- The app doesn't show GCP references yet.

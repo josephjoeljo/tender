@@ -313,6 +313,19 @@ public struct TenderClient: Sendable {
         return try nodeQuery(node)
     }
 
+    // MARK: Service files
+
+    /// Diffs `request.items` against the cluster and, unless it's a dry run, applies them.
+    /// Per-item and per-node failures are in the response, not thrown.
+    public func apply(_ request: ApplyRequest) async throws -> ApplyResponse {
+        try await send(.POST, "/v1/apply", body: try JSONEncoder().encode(request))
+    }
+
+    /// Every service and adopted job, in full. Through a head, needs a write token.
+    public func specs(node: String? = nil) async throws -> SpecList {
+        try await send(.GET, "/v1/specs\(try nodeQuery(node))")
+    }
+
     /// Boots out orphaned launchd jobs.
     public func collectGarbage(node: String? = nil) async throws -> ProcessList {
         try await send(.POST, "/v1/gc\(try nodeQuery(node))")

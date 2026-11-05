@@ -52,7 +52,8 @@ public struct Adoption: Sendable {
             domain: LaunchdDomain.forEnvironment(environment).target,
             plistPath: job.plistPath,
             stdoutPath: logPath ?? job.stdoutPath,
-            stderrPath: logPath == nil ? job.stderrPath : nil
+            stderrPath: logPath == nil ? job.stderrPath : nil,
+            logPath: logPath
         )
         try store.saveAdopted(adopted)
         return adopted

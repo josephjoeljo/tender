@@ -9,7 +9,18 @@ import TenderCore
 /// In-memory launchd: the API tests are about HTTP, not launchctl.
 actor MemoryLaunchd: LaunchdControlling {
     var loaded: Set<String> = []
-    func bootstrap(plistURL: URL) async throws { loaded.insert(plistURL.deletingPathExtension().lastPathComponent) }
+    /// Every start, so that tests can tell an untouched job from a restarted one.
+    var bootstraps = 0
+    /// `StandardOutPath` by label, for jobs that have one.
+    var stdoutPaths: [String: String] = [:]
+    func setStdoutPath(_ path: String, label: String) { stdoutPaths[label] = path }
+    /// Makes listing fail, which fails a whole reconcile.
+    var listingFails = false
+    func setListingFails(_ fails: Bool) { listingFails = fails }
+    func bootstrap(plistURL: URL) async throws {
+        bootstraps += 1
+        loaded.insert(plistURL.deletingPathExtension().lastPathComponent)
+    }
     func bootout(label: String) async throws {
         guard loaded.remove(label) != nil else { throw LaunchctlError.notFound(label) }
     }
@@ -17,13 +28,17 @@ actor MemoryLaunchd: LaunchdControlling {
     func enable(label: String) async throws {}
     func disable(label: String) async throws {}
     func print(label: String) async throws -> JobInfo? {
-        loaded.contains(label) ? JobInfo(output: "x/\(label) = {\n\tstate = running\n\tpid = 42\n\truns = 1\n}\n") : nil
+        let stdout = stdoutPaths[label].map { "\tstdout path = \($0)\n" } ?? ""
+        return loaded.contains(label) ? JobInfo(output: "x/\(label) = {\n\tstate = running\n\tpid = 42\n\truns = 1\n\(stdout)}\n") : nil
     }
-    func listLabels(prefix: String) async throws -> [String] { loaded.filter { $0.hasPrefix(prefix) }.sorted() }
+    func listLabels(prefix: String) async throws -> [String] {
+        if listingFails { throw LaunchctlError.notFound("listing") }
+        return loaded.filter { $0.hasPrefix(prefix) }.sorted()
+    }
 }
 
 /// Runs a daemon on a temp socket for the duration of `body`.
-private func withDaemon(launchd: MemoryLaunchd = MemoryLaunchd(),
+func withDaemon(launchd: MemoryLaunchd = MemoryLaunchd(),
                         _ body: (TenderClient, TenderEnvironment) async throws -> Void) async throws {
     let env = try makeTestEnvironment()
     defer { try? FileManager.default.removeItem(at: env.root) }
