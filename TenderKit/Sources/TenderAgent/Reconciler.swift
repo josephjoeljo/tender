@@ -266,7 +266,9 @@ public actor Reconciler {
                 release: release,
                 cpu: usage?.cpu,
                 rss: usage?.rss,
-                cpuSeconds: usage?.cpuSeconds
+                cpuSeconds: usage?.cpuSeconds,
+                stats: usage?.stats,
+                kind: services[record.service]?.spec.kind ?? .guess(from: record.service)
             ))
         }
         await sampler.retain(pids: Set(processes.compactMap(\.pid)))

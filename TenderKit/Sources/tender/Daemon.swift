@@ -77,6 +77,11 @@ extension Tender {
             @Flag(help: "With --system: print what would be done and change nothing. Doesn't need root.")
             var dryRun = false
 
+            @Flag(help: "EXPERIMENTAL: have tenderd report CPU, GPU, Neural Engine and DRAM power (private macOS API).")
+            var experimentalPower = false
+
+            private var extraArguments: [String] { experimentalPower ? ["--experimental-power"] : [] }
+
             func validate() throws {
                 if dryRun, !mode.system { throw ValidationError("--dry-run only applies to --system.") }
             }
@@ -101,7 +106,8 @@ extension Tender {
                 let plist = environment.plistPath(label: environment.agentLabel)
                 try PlistRenderer().render(
                     label: environment.agentLabel,
-                    programArguments: [tenderd, "run", "--role", role, "--dev", "--identity-mode", "warn", "--listen", listen],
+                    programArguments: [tenderd, "run", "--role", role, "--dev", "--identity-mode", "warn", "--listen", listen]
+                        + extraArguments,
                     stdoutPath: environment.logsDirectory.appending(path: "tenderd.out.log").path(percentEncoded: false),
                     stderrPath: environment.logsDirectory.appending(path: "tenderd.err.log").path(percentEncoded: false)
                 ).write(to: plist, options: .atomic)
@@ -123,7 +129,7 @@ extension Tender {
                 if dryRun {
                     commands.forEach { print($0) }
                     print("write \(plist.path(percentEncoded: false)) (root:wheel 644):")
-                    print(String(decoding: try plan.renderDaemonPlist(role: role), as: UTF8.self))
+                    print(String(decoding: try plan.renderDaemonPlist(role: role, extraArguments: extraArguments), as: UTF8.self))
                     print("launchctl bootout system/\(environment.agentLabel)")
                     print("launchctl enable system/\(environment.agentLabel)")
                     print("launchctl bootstrap system \(plist.path(percentEncoded: false))")
@@ -167,7 +173,7 @@ extension Tender {
                         throw SystemInstallError.unfinishedUpgrade(daemon: installed, handoff: handoff)
                     }
                 }
-                try plan.renderDaemonPlist(role: role).write(to: plist, options: .atomic)
+                try plan.renderDaemonPlist(role: role, extraArguments: extraArguments).write(to: plist, options: .atomic)
                 try FileManager.default.setAttributes(
                     [.posixPermissions: 0o644, .ownerAccountID: 0, .groupOwnerAccountID: 0],
                     ofItemAtPath: plist.path(percentEncoded: false))

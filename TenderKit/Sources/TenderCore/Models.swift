@@ -30,6 +30,33 @@ public struct LogPaths: Codable, Sendable, Equatable {
     }
 }
 
+/// What a service is, so people can tell processes apart at a glance.
+public enum ProcessKind: String, Codable, Sendable, CaseIterable {
+    case server, gameServer = "game-server", database, cache, queue, worker, scheduler, proxy, model, other
+
+    /// A kind from a newer tenderd decodes as `.other` instead of failing the whole list.
+    public init(from decoder: Decoder) throws {
+        self = ProcessKind(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .other
+    }
+
+    /// A best guess from a service name or launchd label, for services started without `--kind`.
+    public static func guess(from name: String) -> ProcessKind {
+        let name = name.lowercased()
+        let hints: [(ProcessKind, [String])] = [
+            (.database, ["mongo", "postgres", "mysql", "mariadb", "sqlite", "clickhouse", "cockroach", "db"]),
+            (.cache, ["redis", "memcache", "valkey", "cache"]),
+            (.queue, ["rabbit", "kafka", "nats", "queue", "mq"]),
+            (.proxy, ["nginx", "caddy", "haproxy", "envoy", "traefik", "proxy", "gateway"]),
+            (.gameServer, ["game", "minecraft", "valheim", "factorio"]),
+            (.model, ["ollama", "llama", "mlx", "whisper", "inference", "model"]),
+            (.scheduler, ["cron", "scheduler", "timer"]),
+            (.worker, ["worker", "job", "consumer"]),
+            (.server, ["api", "server", "web", "http", "app"]),
+        ]
+        return hints.first { _, needles in needles.contains { name.contains($0) } }?.0 ?? .other
+    }
+}
+
 /// What the user asked Tender to run.
 public struct ServiceSpec: Codable, Sendable, Equatable {
     public static let defaultUser = "_tender"
@@ -44,6 +71,8 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
     /// Account the process runs as. launchd ignores it in the gui domain (dev mode).
     public var user: String
     public var logPaths: LogPaths?
+    /// Nil means "guess from the name".
+    public var kind: ProcessKind?
 
     public init(
         name: String,
@@ -54,7 +83,8 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         instances: Int = 1,
         node: NodeID? = nil,
         user: String = ServiceSpec.defaultUser,
-        logPaths: LogPaths? = nil
+        logPaths: LogPaths? = nil,
+        kind: ProcessKind? = nil
     ) {
         self.name = name
         self.program = program
@@ -65,6 +95,7 @@ public struct ServiceSpec: Codable, Sendable, Equatable {
         self.node = node
         self.user = user
         self.logPaths = logPaths
+        self.kind = kind
     }
 
     /// Service names end up in launchd labels and file paths, so only a safe
@@ -106,11 +137,18 @@ public struct InstanceStatus: Codable, Sendable, Equatable {
     public var cpuSeconds: Double?
     /// A job Tender manages but didn't create. `service` is then its launchd label.
     public var adopted: Bool
+    /// Detailed resource use. Nil from nodes running an older tenderd.
+    public var stats: ProcessStats?
+    /// Nil from nodes running an older tenderd.
+    public var kind: ProcessKind?
 
     public init(service: String, instance: Int, node: NodeID, state: InstanceState,
                 pid: Int32? = nil, lastExitCode: Int32? = nil, uptime: TimeInterval? = nil,
                 restarts: Int = 0, release: String? = nil, cpu: Double? = nil, rss: UInt64? = nil,
-                cpuSeconds: Double? = nil, adopted: Bool = false) {
+                cpuSeconds: Double? = nil, adopted: Bool = false, stats: ProcessStats? = nil,
+                kind: ProcessKind? = nil) {
+        self.kind = kind
+        self.stats = stats
         self.cpuSeconds = cpuSeconds
         self.service = service
         self.instance = instance

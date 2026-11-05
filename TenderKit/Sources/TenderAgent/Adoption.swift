@@ -112,7 +112,9 @@ public struct Adoption: Sendable {
                 cpu: usage?.cpu,
                 rss: usage?.rss,
                 cpuSeconds: usage?.cpuSeconds,
-                adopted: true
+                adopted: true,
+                stats: usage?.stats,
+                kind: .guess(from: adopted.label)
             ))
         }
         return statuses

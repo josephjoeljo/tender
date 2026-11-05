@@ -10,6 +10,7 @@ final class ClusterModel {
     private(set) var health: ClusterHealth = .notConfigured
     private(set) var nodes: [NodeSummary] = []
     private(set) var processes: [InstanceStatus] = []
+    private(set) var history = NodeHistory()
     private(set) var head: String?
     private(set) var connections = ConnectionList()
     private(set) var connectionStatus: [UUID: ConnectionStatus] = [:]
@@ -49,6 +50,7 @@ final class ClusterModel {
         health = previewHealth
         self.nodes = nodes
         self.processes = processes
+        history = .preview(nodes)
         head = nodes.isEmpty ? nil : "mac-1:7071"
     }
     #endif
@@ -104,6 +106,7 @@ final class ClusterModel {
         head = nil
         nodes = []
         processes = []
+        history = NodeHistory()
         health = .notConfigured
         savedConnectionError = nil
         do {
@@ -165,6 +168,7 @@ final class ClusterModel {
             guard requested == connections.activeID else { return }
             nodes = nodeList.nodes
             processes = processList.processes
+            history.record(nodeList.nodes)
             health = ClusterHealth(nodes: nodeList, processes: processList)
         } catch {
             guard requested == connections.activeID else { return }

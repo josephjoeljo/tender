@@ -7,14 +7,16 @@ struct DashboardView: View {
     let model: ClusterModel
 
     enum Section: String, CaseIterable, Identifiable {
-        case nodes = "Nodes", processes = "Processes", logs = "Logs", releases = "Releases"
+        case nodes = "Nodes", processes = "Processes", logs = "Logs", releases = "Releases", settings = "Settings"
         var id: String { rawValue }
+        static let pages: [Section] = [.nodes, .processes, .logs, .releases]
         var symbol: String {
             switch self {
             case .nodes: "desktopcomputer"
             case .processes: "gearshape.2"
             case .logs: "text.alignleft"
             case .releases: "shippingbox"
+            case .settings: "gearshape"
             }
         }
     }
@@ -23,12 +25,21 @@ struct DashboardView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(Section.allCases, selection: $selection) { section in
-                Label(section.rawValue, systemImage: section.symbol).tag(section)
+            List(selection: $selection) {
+                ForEach(Section.pages) { section in
+                    Label(section.rawValue, systemImage: section.symbol).tag(section)
+                }
+                SwiftUI.Section {
+                    Label(Section.settings.rawValue, systemImage: Section.settings.symbol).tag(Section.settings)
+                }
             }
+            .font(.app(.body))
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
         } detail: {
-            if model.head == nil {
+            if selection == .settings {
+                SettingsView(model: model, fixedWidth: false)
+                    .navigationTitle("Settings")
+            } else if model.head == nil {
                 ContentUnavailableView("No head connected", systemImage: "leaf",
                                        description: Text("Add a head and token in Settings."))
             } else {
@@ -37,35 +48,53 @@ struct DashboardView: View {
                 case .processes: ProcessesView(model: model)
                 case .logs: LogsView(model: model)
                 case .releases: ReleasesView(model: model)
+                case .settings: EmptyView()
                 }
             }
         }
     }
 }
 
+/// In the list, click a row to drop down its machine stats; the bento grid shows them all at once.
+/// Either way, a node's chevron or card opens it on its own, with its history.
 struct NodesView: View {
     let model: ClusterModel
+    @State private var expanded: Set<String> = []
+    @State private var addingNode = false
+    @State private var path: [String] = []
+    @AppStorage("nodesLayout") private var layout: NodesLayout = .list
 
     var body: some View {
-        Table(model.nodes) {
-            TableColumn("Node") { node in
-                HStack {
-                    Image(systemName: "circle.fill").font(.system(size: 8)).foregroundStyle(node.up ? .green : .red)
-                    Text(node.info.id.rawValue)
+        NavigationStack(path: $path) {
+            Group {
+                switch layout {
+                case .list:
+                    List(model.nodes) { node in
+                        ExpandableRow(isExpanded: expanded.contains(node.id), toggle: { expanded.toggle(node.id) }) {
+                            NodeTrackRow(node: node, open: { path.append(node.id) })
+                        } detail: {
+                            NodeStatsPanel(node: node)
+                        }
+                        .alignmentGuide(.listRowSeparatorLeading) { _ in RowLayout.textLeading }
+                    }
+                    .listStyle(.inset)
+                case .bento:
+                    NodesBentoView(nodes: model.nodes, open: { path.append($0.id) })
                 }
             }
-            TableColumn("Address") { Text($0.info.address ?? "-") }
-            TableColumn("Processes") { Text("\($0.instanceCount)") }
-            TableColumn("Crashed") { Text("\($0.crashedCount)").foregroundStyle($0.crashedCount > 0 ? .red : .primary) }
-            TableColumn("Clock skew") { node in
-                Text(node.clockSkew.map { String(format: "%.2f s", $0) } ?? "-")
-                    .foregroundStyle(abs(node.clockSkew ?? 0) > 1 ? .orange : .primary)
+            .navigationTitle("Nodes")
+            .toolbar {
+                Picker("Layout", selection: $layout) {
+                    ForEach(NodesLayout.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .help("Show nodes as a list or as cards")
+                Button("Add Node", systemImage: "plus") { addingNode = true }
+                    .help("Add a Mac to this cluster")
             }
-            TableColumn("Log backlog") { Text("\($0.spoolBacklog)") }
-            TableColumn("Dropped") { Text("\($0.spoolDropped)").foregroundStyle($0.spoolDropped > 0 ? .orange : .primary) }
-            TableColumn("Version") { Text($0.info.version) }
+            .navigationDestination(for: String.self) { NodeDetailView(model: model, nodeID: $0) }
         }
-        .navigationTitle("Nodes")
+        .sheet(isPresented: $addingNode) { AddNodeSheet(model: model) }
     }
 }
 
@@ -77,22 +106,23 @@ extension InstanceStatus: @retroactive Identifiable {
     public var id: String { rowID }
 }
 
+/// Click a row to drop down the process's CPU, memory, storage, GPU, Neural Engine and energy use.
 struct ProcessesView: View {
     let model: ClusterModel
+    @State private var expanded: Set<String> = []
 
     var body: some View {
+        let counts = Dictionary(model.processes.map { ("\($0.node.rawValue)/\($0.service)", 1) }, uniquingKeysWith: +)
         List(model.processes) { process in
-            HStack {
-                ProcessRow(process: process, model: model)
-                Text(process.rss.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) } ?? "-")
-                    .frame(width: 70, alignment: .trailing)
-                Text(process.cpu.map { String(format: "%.1f%%", $0) } ?? "-")
-                    .frame(width: 60, alignment: .trailing)
-                Text("\(process.restarts) restarts")
-                    .frame(width: 80, alignment: .trailing)
-                    .foregroundStyle(process.restarts > 0 ? .orange : .secondary)
+            ExpandableRow(isExpanded: expanded.contains(process.id), toggle: { expanded.toggle(process.id) }) {
+                ProcessTrackRow(process: process, model: model,
+                                showsInstance: counts["\(process.node.rawValue)/\(process.service)", default: 0] > 1)
+            } detail: {
+                ProcessStatsPanel(process: process, node: model.nodes.first { $0.info.id == process.node })
             }
+            .alignmentGuide(.listRowSeparatorLeading) { _ in RowLayout.textLeading }
         }
+        .listStyle(.inset)
         .navigationTitle("Processes")
     }
 }
@@ -145,17 +175,17 @@ struct LogsView: View {
             Divider()
             if !gaps.isEmpty {
                 Text(gaps.map { "\($0.node?.rawValue ?? "?") dropped \($0.droppedLines) lines" }.joined(separator: " · "))
-                    .font(.caption)
+                    .font(.app(.caption))
                     .foregroundStyle(.orange)
                     .padding(4)
             }
             if let error {
-                Text(error).font(.caption).foregroundStyle(.red).padding(4)
+                Text(error).font(.app(.caption)).foregroundStyle(.red).padding(4)
             }
             ScrollViewReader { proxy in
                 List(entries, id: \.rowID) { entry in
                     Text(entry.formatted)
-                        .font(.system(.caption, design: .monospaced))
+                        .font(.app(.caption))
                         .foregroundStyle(entry.stream == .err ? .red : .primary)
                         .textSelection(.enabled)
                         .id(entry.rowID)
@@ -229,14 +259,14 @@ struct ReleasesView: View {
                     .disabled(service.isEmpty || version.isEmpty)
             }
             if let message {
-                Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                Text(message).font(.app(.caption)).foregroundStyle(.secondary).textSelection(.enabled)
             }
             List(releases?.nodes ?? [], id: \.node.rawValue) { node in
                 Section(node.node.rawValue) {
                     ForEach(node.releases.releases, id: \.sha12) { release in
                         HStack {
                             Image(systemName: release.sha12 == node.releases.current ? "checkmark.circle.fill" : "circle")
-                            Text(release.sha12).font(.system(.body, design: .monospaced))
+                            Text(release.sha12).font(.app(.body))
                             Text(release.createdAt.formatted()).foregroundStyle(.secondary)
                             Spacer()
                             if release.sha12 != node.releases.current {
@@ -273,3 +303,8 @@ struct ReleasesView: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Nodes") { NodesView(model: .previewDegraded).frame(width: 1000, height: 500) }
+#Preview("Processes") { ProcessesView(model: .previewHealthy).frame(width: 900, height: 500) }
+#endif

@@ -21,6 +21,7 @@ struct TenderApp: App {
     var body: some Scene {
         MenuBarExtra {
             MenuBarView(model: model)
+                .font(.app(.body))
         } label: {
             MenuBarLabel(model: model)
         }
@@ -28,11 +29,13 @@ struct TenderApp: App {
 
         Window("Tender Dashboard", id: "dashboard") {
             DashboardView(model: model)
+                .font(.app(.body))
                 .frame(minWidth: 900, minHeight: 560)
         }
 
         Settings {
             SettingsView(model: model)
+                .font(.app(.body))
         }
     }
 }

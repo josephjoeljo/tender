@@ -72,3 +72,12 @@ private let plan = SystemInstallPlan()
     #expect(result.stdout == "out\n")
     #expect(result.stderr == "err\n")
 }
+
+@Test func daemonPlistCarriesExtraArguments() throws {
+    let plan = SystemInstallPlan()
+    let plist = try #require(
+        try PropertyListSerialization.propertyList(from: try plan.renderDaemonPlist(role: "head", extraArguments: ["--experimental-power"]),
+                                                   format: nil) as? [String: Any])
+    let arguments = try #require(plist["ProgramArguments"] as? [String])
+    #expect(arguments.suffix(3) == ["--role", "head", "--experimental-power"])
+}

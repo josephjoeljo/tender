@@ -59,9 +59,12 @@ public struct NodeSummary: Codable, Sendable, Equatable {
     public var clockSkew: TimeInterval?
     public var spoolBacklog: Int
     public var spoolDropped: Int
+    /// From the latest heartbeat. Nil from nodes running an older tenderd.
+    public var stats: NodeStats?
 
     public init(info: NodeInfo, up: Bool, lastHeartbeatAge: TimeInterval?, instanceCount: Int, crashedCount: Int,
-                clockSkew: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0) {
+                clockSkew: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0, stats: NodeStats? = nil) {
+        self.stats = stats
         self.clockSkew = clockSkew
         self.spoolBacklog = spoolBacklog
         self.spoolDropped = spoolDropped

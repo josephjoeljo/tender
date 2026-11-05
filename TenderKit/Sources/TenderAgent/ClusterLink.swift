@@ -2,6 +2,7 @@ import Distributed
 import Foundation
 import Logging
 import LogTail
+import ProcessMetrics
 import ServiceLifecycle
 import TenderActorSystem
 import TenderCore
@@ -37,10 +38,13 @@ public struct ClusterOptions: Sendable {
     public var identityMode: IdentityMode
     public var requiredTags: [String]
     public var heartbeatInterval: Duration
+    /// Adds IOReport power readings (CPU, GPU, Neural Engine, DRAM) to heartbeats. Private API.
+    public var experimentalPower: Bool
 
     public init(listenHost: String? = nil, advertiseHost: String? = nil, agentPort: Int = 7070,
                 identityMode: IdentityMode = .enforce, requiredTags: [String] = [],
-                heartbeatInterval: Duration = .seconds(5)) {
+                heartbeatInterval: Duration = .seconds(5), experimentalPower: Bool = false) {
+        self.experimentalPower = experimentalPower
         self.listenHost = listenHost
         self.advertiseHost = advertiseHost
         self.agentPort = agentPort
@@ -267,6 +271,7 @@ struct ClusterLink: Service {
         var registered = false
         var roundTrip: TimeInterval?
         let info = await nodeInfo(config: config)
+        let machine = SystemSampler(experimentalPower: options.experimentalPower)
         while !Task.isCancelled {
             do {
                 let registry = try $HeadRegistryProtocol.resolve(
@@ -277,11 +282,12 @@ struct ClusterLink: Service {
                     logger.info("registered with head", metadata: ["head": "\(config.headNode)"])
                 }
                 let list = try await controller.list()
+                let stats = await machine.sample()
                 let start = ContinuousClock.now
                 try await registry.heartbeat(Heartbeat(
                     node: config.nodeID, nodeClock: Date(), processes: list.processes, orphans: list.orphans,
                     previousRoundTrip: roundTrip, spoolBacklog: (try? spool.backlog()) ?? 0,
-                    spoolDropped: (try? spool.droppedTotal()) ?? 0))
+                    spoolDropped: (try? spool.droppedTotal()) ?? 0, stats: stats))
                 let elapsed = (ContinuousClock.now - start).components
                 roundTrip = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
             } catch {

@@ -7,11 +7,14 @@ struct MenuBarView: View {
     let model: ClusterModel
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
+    /// The process list's natural height. A ScrollView in a menu bar window has no ideal
+    /// height of its own and collapses to zero, so the list is sized to this, up to a cap.
+    @State private var processListHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(model.health.summary, systemImage: model.health.symbol)
-                .font(.headline)
+                .font(.app(.headline))
                 .lineLimit(3)
             if !model.nodes.isEmpty {
                 Divider()
@@ -28,18 +31,19 @@ struct MenuBarView: View {
             }
             if !model.processes.isEmpty {
                 Divider()
-                Text(model.problems.isEmpty ? "Processes" : "Needs attention").font(.subheadline.bold())
+                Text(model.problems.isEmpty ? "Processes" : "Needs attention").font(.app(.subheadline).bold())
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(model.problems.isEmpty ? model.processes : model.problems, id: \.rowID) { process in
                             ProcessRow(process: process, model: model)
                         }
                     }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { processListHeight = $0 }
                 }
-                .frame(maxHeight: 220)
+                .frame(height: min(max(processListHeight, 20), 220))
             }
             if let error = model.actionError {
-                Text(error).font(.caption).foregroundStyle(.red).lineLimit(3)
+                Text(error).font(.app(.caption)).foregroundStyle(.red).lineLimit(3)
             }
             Divider()
             HStack {
@@ -73,7 +77,7 @@ struct ProcessRow: View {
             VStack(alignment: .leading) {
                 Text("\(process.service)[\(process.instance)]")
                 Text("\(process.node.rawValue) · \(process.state.rawValue)")
-                    .font(.caption)
+                    .font(.app(.caption))
                     .foregroundStyle(process.state == .crashed ? .red : .secondary)
             }
             Spacer()
@@ -99,11 +103,15 @@ extension ClusterModel {
     private static func node(_ name: String, up: Bool, processes: Int, crashed: Int = 0) -> NodeSummary {
         NodeSummary(info: NodeInfo(id: NodeID(name), version: "0.1.0", macOS: "macOS", hardware: "Mac", address: "\(name):7070",
                                    labels: name == "mac-1" ? [NodeInfo.roleLabel: NodeInfo.headRole] : [:]),
-                    up: up, lastHeartbeatAge: up ? 2 : 90, instanceCount: processes, crashedCount: crashed)
+                    up: up, lastHeartbeatAge: up ? 2 : 90, instanceCount: processes, crashedCount: crashed,
+                    stats: up ? .preview : nil)
     }
 
     private static func process(_ service: String, _ instance: Int, _ node: String, _ state: InstanceState) -> InstanceStatus {
-        InstanceStatus(service: service, instance: instance, node: NodeID(node), state: state)
+        InstanceStatus(service: service, instance: instance, node: NodeID(node), state: state,
+                       pid: state == .running ? 4242 : nil, uptime: state == .running ? 7200 : nil,
+                       cpu: state == .running ? 3.2 : nil, rss: state == .running ? 150 << 20 : nil,
+                       cpuSeconds: state == .running ? 410 : nil, stats: state == .running ? .preview : nil)
     }
 
     static var previewHealthy: ClusterModel {

@@ -5,6 +5,8 @@ import TenderClient
 /// fingerprint, which pins the connection, and it's kept in the Keychain.
 struct SettingsView: View {
     let model: ClusterModel
+    /// The Settings window sizes itself to the form; the dashboard gives it the detail column.
+    var fixedWidth = true
     @State private var name = ""
     @State private var head = ""
     @State private var token = ""
@@ -22,7 +24,7 @@ struct SettingsView: View {
                     row(connection)
                 }
                 if let savedError = model.savedConnectionError {
-                    Text(savedError).foregroundStyle(.red).font(.caption)
+                    Text(savedError).foregroundStyle(.red).font(.app(.caption))
                 }
             }
             Section("Add a connection") {
@@ -30,17 +32,18 @@ struct SettingsView: View {
                 TextField("Head address", text: $head, prompt: Text("mac-1:7071"))
                 SecureField("API token", text: $token)
                 Text("Create one on the head: tender api-token create app --scope write")
-                    .font(.caption)
+                    .font(.app(.caption))
                     .foregroundStyle(.secondary)
                 Button("Add and Connect") { add() }
                     .disabled(busy || head.isEmpty || token.isEmpty)
                 if let error {
-                    Text(error).foregroundStyle(.red).font(.caption)
+                    Text(error).foregroundStyle(.red).font(.app(.caption))
                 }
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480)
+        .frame(width: fixedWidth ? 480 : nil)
+        .frame(maxWidth: fixedWidth ? nil : 640)
         .task { await model.checkConnections() }
         .confirmationDialog("Remove \(removing?.name ?? "this connection")?", isPresented: isRemoving, presenting: removing) { connection in
             Button("Remove", role: .destructive) {
@@ -62,14 +65,14 @@ struct SettingsView: View {
                 .foregroundStyle(active ? Color.accentColor : Color.secondary)
             VStack(alignment: .leading) {
                 Text(connection.name)
-                Text(connection.context.head).font(.caption).foregroundStyle(.secondary)
+                Text(connection.context.head).font(.app(.caption)).foregroundStyle(.secondary)
                 if active, let headName = model.headNodeName {
                     Label {
                         Text("Head: \(headName)")
                     } icon: {
                         Image(systemName: "crown.fill").foregroundStyle(.yellow)
                     }
-                    .font(.caption)
+                    .font(.app(.caption))
                     .foregroundStyle(.secondary)
                 }
                 status(of: connection)
@@ -88,11 +91,11 @@ struct SettingsView: View {
     private func status(of connection: SavedConnection) -> some View {
         switch model.connectionStatus[connection.id] {
         case .reachable:
-            Text("Reachable").font(.caption).foregroundStyle(.green)
+            Text("Reachable").font(.app(.caption)).foregroundStyle(.green)
         case .unreachable(let reason):
-            Text(reason).font(.caption).foregroundStyle(.red)
+            Text(reason).font(.app(.caption)).foregroundStyle(.red)
         case .checking, nil:
-            Text("Checking…").font(.caption).foregroundStyle(.secondary)
+            Text("Checking…").font(.app(.caption)).foregroundStyle(.secondary)
         }
     }
 
