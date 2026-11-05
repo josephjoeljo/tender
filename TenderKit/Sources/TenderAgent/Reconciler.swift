@@ -79,6 +79,7 @@ public actor Reconciler {
     private let throttleInterval: Int?
     private let logger: Logger
     private let vault: SecretVault?
+    private let gcp: GCPSecretSync?
     /// `tenderd` itself, which services that reference secrets start through.
     private let execPath: String?
     private let sampler = UsageSampler()
@@ -89,6 +90,7 @@ public actor Reconciler {
         store: StateStore,
         launchd: any LaunchdControlling,
         vault: SecretVault? = nil,
+        gcp: GCPSecretSync? = nil,
         execPath: String? = nil,
         throttleInterval: Int? = nil,
         logger: Logger = Logger(label: "tender.reconciler")
@@ -97,6 +99,7 @@ public actor Reconciler {
         self.store = store
         self.launchd = launchd
         self.vault = vault
+        self.gcp = gcp
         self.execPath = execPath
         self.throttleInterval = throttleInterval
         self.logger = logger
@@ -151,9 +154,11 @@ public actor Reconciler {
         // secret does, so the plist differs and the job is replaced, which restarts it.
         if spec.usesSecretTemplates {
             guard let execPath, let vault else { throw ReconcileApplyError.noExecWrapper(spec.name) }
+            // Paths and references only, so a changed `secret_files` replaces the job too.
+            let files = try spec.parsedSecretFiles().flatMap { ["--secret-file", "\($0.path)=\($0.ref)"] }
             programArguments = [execPath, "exec", "--service", spec.name, "--instance", String(instance),
-                                "--secrets", environment.serviceSecretsFile(service: spec.name).path(percentEncoded: false),
-                                "--"] + programArguments
+                                "--secrets", environment.serviceSecretsFile(service: spec.name).path(percentEncoded: false)]
+                + files + ["--"] + programArguments
             variables["TENDER_SECRETS_REV"] = try vault.revisionTag(for: spec)
         }
         return try PlistRenderer().render(
@@ -188,6 +193,15 @@ public actor Reconciler {
     @discardableResult
     public func reconcile() async throws -> ReconcileReport {
         try await exclusive { try await self.reconcileNow() }
+    }
+
+    /// Fetches the GCP secrets stored specs need now, and drops cached ones none uses.
+    /// Separate from `reconcile`, and outside `exclusive`, so that a slow or unreachable
+    /// Google never holds up a stop or a delete: the sweep calls it before reconciling.
+    public func refreshSecrets() async {
+        guard let gcp, let specs = try? store.services().map(\.spec).filter(\.usesSecretTemplates) else { return }
+        await gcp.refresh(specs)
+        await gcp.prune(keeping: specs)
     }
 
     /// Reconciles, then restarts the instances of `service` that were already
@@ -426,6 +440,7 @@ public struct ReconcilerSweep: Service {
     public func run() async throws {
         await cancelWhenGracefulShutdown {
             while !Task.isCancelled {
+                await reconciler.refreshSecrets()
                 do {
                     try await reconciler.reconcile()
                 } catch {

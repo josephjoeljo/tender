@@ -7,7 +7,8 @@ Status: draft, phase 1 in progress. See `CLAUDE.md` for conventions and mileston
 - Manage any launchd process (Go services, MongoDB, Postgres, workers) across a
   fleet of Macs from one head node.
 - Centralized, durable, searchable logs from every machine.
-- An MCP server so AI agents can inspect and operate the cluster safely.
+- AI agents can inspect and operate the cluster safely, through the CLI and a
+  Claude Code skill, with the same token scopes and audit as people.
 - Prometheus metrics.
 - Later: health checks, service discovery, rolling deploys, load balancing.
 
@@ -17,12 +18,12 @@ cross-node volume migration.
 ## 2. Topology
 
 ```
- CLI / AI agents (MCP)
+ CLI / app / AI agents (skill)
           │  (tailnet + mTLS)
           ▼
  ┌──────────── Head node (tenderd --role head) ────────────┐
  │ API server · Node registry · Command router             │
- │ Log store (SQLite/day + FTS5) · MCP server · /metrics   │
+ │ Log store (SQLite/day + FTS5) · Audit log · /metrics    │
  │ Internal CA                                             │
  └──────────────────────────────────────────────────────────┘
           ▲  mTLS (tenderd agent port) — workers dial the head; every node
@@ -45,7 +46,7 @@ Two independent layers:
    - `tag:tender-head`, `tag:tender-worker` ↔ each other on 7070 (tenderd
      actor transport, mTLS)
    - service-to-service traffic between nodes on each service's own ports
-   - admins / `tag:tender-agents` → head MCP + API ports, `/metrics`
+   - admins / `tag:tender-agents` → head API port, `/metrics`
 2. **mTLS**: head runs an internal CA.
    - `tender join <head> --token <t>`: worker generates key locally, sends CSR,
      receives cert with SAN = node ID. Key never leaves the worker.
@@ -53,14 +54,14 @@ Two independent layers:
 3. **Cross-check**: every node, on every inbound connection, resolves the peer
    IP via Tailscale LocalAPI `whois` and requires it to match the cert's node ID.
 
-MCP/API clients authenticate with bearer tokens scoped `read` or `write`.
+API clients authenticate with bearer tokens scoped `read` or `write`.
 All mutating calls go to an audit log (who, what, when, result).
 
 ## 4. Internal RPC: distributed actors
 
 Head↔worker traffic uses Swift distributed actors (`import Distributed`) over a
 custom `DistributedActorSystem`, `TenderActorSystem`. Public interfaces (CLI/app
-API, MCP, `/metrics`) stay HTTP/JSON so non-Swift tools can use them.
+API, `/metrics`) stay HTTP/JSON so non-Swift tools can use them.
 
 ### Contract: `@Resolvable` distributed protocols (decision 2a)
 
@@ -268,14 +269,14 @@ Every line carries three values:
 
 Rules:
 - Within one node: order by `seq` (always correct, even if `node_ts` went backwards).
-- Across nodes: order by `node_ts`, presented as approximate. The MCP
-  `search_logs` tool description says cross-node ordering is approximate.
+- Across nodes: order by `node_ts`, presented as approximate, and the CLI,
+  app and agent skill say so.
 - Day files are chosen by `ingest_ts`, so a node with a wrong clock can't write
   into the wrong day.
 
 Skew detection: heartbeats carry the worker's clock; the head estimates
 `offset = head_now - node_ts - rtt/2` and exports
-`tender_node_clock_skew_seconds`. `tender nodes`, the app, and MCP warn when
+`tender_node_clock_skew_seconds`. `tender nodes` and the app warn when
 |skew| > 1s.
 
 ## 8. Metrics (`/metrics` on head)
@@ -294,26 +295,25 @@ Skew detection: heartbeats carry the worker's clock; the head estimates
 | `tender_log_spool_dropped_total` | counter | node |
 | `tender_release_deploys_total` | counter | service, result |
 
-## 9. MCP server (head)
+## 9. Agents
 
-Transport: streamable HTTP on the tailnet. Bearer token with `read`/`write` scope.
+Agents use the `tender` CLI through a Claude Code skill
+(`~/.claude/skills/tender/SKILL.md`): read first, bounded log queries (`-n`,
+`--since`, `--grep`), `--json` for parsing, and confirmation before any mutating
+command. The head enforces the rest: an agent gets its own API token, a `read`
+token can't change anything, and every mutating call is audited under the
+token's name.
 
-Read tools: `list_nodes`, `list_processes`, `describe_process`,
-`search_logs(service?, node?, since, query?, level?, limit<=500)`,
-`get_metrics_summary`.
-
-Write tools: `start_process`, `stop_process`, `restart_process`,
-`rollback_release`.
-
-Rules: every response bounded; log tools default to errors-first and a short
-window; every write call is audited.
+An MCP server was planned and shelved (`docs/plans/milestone-4.md`); revisit it
+when an agent without a shell needs the cluster, or when limits must be enforced
+by the head rather than asked for.
 
 ## 10. Head state (cheap to lose)
 
 - Workers are the source of truth for their own desired state (persisted
   locally) and keep running without the head.
 - Head registry = cache rebuilt from worker reports on reconnect.
-- Losing the head loses: MCP/API tokens (re-issue) and anything since the last
+- Losing the head loses: API tokens (re-issue) and anything since the last
   offload. Nightly, the head copies each closed day's `logs-YYYY-MM-DD.db` and
   the audit log to GCS/S3, so log history survives losing the head.
 - Must be backed up: the internal CA private key (else every node re-joins).

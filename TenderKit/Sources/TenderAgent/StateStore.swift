@@ -101,6 +101,15 @@ public struct StateStore: Sendable {
                 );
                 """)
         }
+        // Before this, a `--log-path` was only recorded as stdout with no stderr. Rows that
+        // look like that are taken as overrides: if the job's own paths were the same, the
+        // override is the same thing, and export then just names it.
+        migrator.registerMigration("v4-adopted-log-path") { db in
+            try db.execute(sql: """
+                ALTER TABLE adopted_jobs ADD COLUMN log_path TEXT;
+                UPDATE adopted_jobs SET log_path = stdout_path WHERE stderr_path IS NULL AND stdout_path IS NOT NULL;
+                """)
+        }
         return migrator
     }
 
@@ -241,11 +250,11 @@ public struct StateStore: Sendable {
     public func saveAdopted(_ job: AdoptedJob) throws {
         try pool.write { db in
             try db.execute(sql: """
-                INSERT INTO adopted_jobs (label, domain, plist_path, stdout_path, stderr_path, adopted_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO adopted_jobs (label, domain, plist_path, stdout_path, stderr_path, log_path, adopted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (label) DO UPDATE SET domain = excluded.domain, plist_path = excluded.plist_path,
-                    stdout_path = excluded.stdout_path, stderr_path = excluded.stderr_path
-                """, arguments: [job.label, job.domain, job.plistPath, job.stdoutPath, job.stderrPath,
+                    stdout_path = excluded.stdout_path, stderr_path = excluded.stderr_path, log_path = excluded.log_path
+                """, arguments: [job.label, job.domain, job.plistPath, job.stdoutPath, job.stderrPath, job.logPath,
                                  Date().timeIntervalSince1970])
         }
     }
@@ -299,7 +308,7 @@ public struct StateStore: Sendable {
 
     private static func adoptedJob(_ row: Row) -> AdoptedJob {
         AdoptedJob(label: row["label"], domain: row["domain"], plistPath: row["plist_path"],
-                   stdoutPath: row["stdout_path"], stderrPath: row["stderr_path"])
+                   stdoutPath: row["stdout_path"], stderrPath: row["stderr_path"], logPath: row["log_path"])
     }
 
     private static func serviceRecord(_ row: Row) throws -> ServiceRecord {

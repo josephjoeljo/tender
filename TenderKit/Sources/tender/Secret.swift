@@ -11,6 +11,8 @@ extension Tender {
                 Reference a secret from a service's environment or arguments with ${secret:NAME} \
                 (that service's own) or ${secret:shared/NAME}, for example \
                 tender start api --env 'MONGO_URL=mongodb://app:${secret:MONGO_PASSWORD}@db/olympsis' -- ./api. \
+                ${secret:gcp:NAME}, ${secret:gcp:NAME@4} and ${secret:gcp:projects/P/secrets/S[@4]} come from \
+                GCP Secret Manager, fetched and cached by the node. \
                 Values stay on the node that runs the service and no command ever prints one.
                 """,
             subcommands: [Set.self, List.self, Delete.self]
@@ -73,15 +75,30 @@ extension Tender {
                                  formatter.string(from: secret.updatedAt),
                                  secret.usedBy.isEmpty ? "-" : secret.usedBy.joined(separator: ",")])
                 }
-                let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
-                var lines = rows.map { row in
-                    row.enumerated().map { index, cell in
-                        index == row.count - 1 ? cell : cell.padding(toLength: widths[index] + 2, withPad: " ", startingAt: 0)
-                    }.joined()
+                var lines = list.secrets.isEmpty && !list.gcp.isEmpty ? [] : table(rows)
+                if !list.gcp.isEmpty {
+                    var gcp = [["GCP SECRET", "NODE", "VERSION", "REV", "CHECKED", "USED BY", "STATUS"]]
+                    for secret in list.gcp {
+                        let status = secret.stale ? "stale: \(secret.fetchError ?? "")"
+                            : secret.cached ? "ok" : "not fetched: \(secret.fetchError ?? "pending")"
+                        gcp.append([secret.name, secret.node.rawValue, secret.version ?? "-", String(secret.revision),
+                                    secret.checkedAt.map(formatter.string(from:)) ?? "-",
+                                    secret.usedBy.isEmpty ? "-" : secret.usedBy.joined(separator: ","), status])
+                    }
+                    lines += [""] + table(gcp)
                 }
                 for missing in list.missing { lines.append("missing: \(missing)") }
                 for node in list.unreachableNodes { lines.append("unreachable: \(node)") }
                 return lines.joined(separator: "\n")
+            }
+
+            private static func table(_ rows: [[String]]) -> [String] {
+                let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
+                return rows.map { row in
+                    row.enumerated().map { index, cell in
+                        index == row.count - 1 ? cell : cell.padding(toLength: widths[index] + 2, withPad: " ", startingAt: 0)
+                    }.joined()
+                }
             }
         }
 

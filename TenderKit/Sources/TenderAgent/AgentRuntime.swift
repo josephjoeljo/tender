@@ -92,18 +92,21 @@ public struct AgentRuntime: Sendable {
         defer { close(lock) }
 
         let store = try StateStore(environment: environment)
-        let vault = SecretVault(secrets: secrets, store: store)
+        let cloud = CloudServices(environment: environment, secrets: secrets)
+        let vault = SecretVault(secrets: secrets, store: store, gcpProject: { cloud.defaultSecretsProject() })
+        let gcp = GCPSecretSync(vault: vault, source: { try cloud.secretSource() })
         let reconciler = Reconciler(environment: environment, store: store, launchd: launchd,
-                                    vault: vault, execPath: execPath)
+                                    vault: vault, gcp: gcp, execPath: execPath)
         let releases = ReleaseManager(environment: environment, store: store, reconciler: reconciler)
         let identities = ClusterIdentityStore(environment: environment, secrets: secrets)
         let controller = ProcessController(environment: environment, store: store, reconciler: reconciler,
                                            releases: releases,
                                            adoption: Adoption(environment: environment, store: store, launchd: launchd),
                                            identities: identities,
-                                           cloud: CloudServices(environment: environment, secrets: secrets),
+                                           cloud: cloud,
                                            releaseSourceOverride: releaseSource,
-                                           vault: vault)
+                                           vault: vault,
+                                           gcp: gcp)
         let socketPath = environment.socketPath.path(percentEncoded: false)
         let logger = self.logger
 

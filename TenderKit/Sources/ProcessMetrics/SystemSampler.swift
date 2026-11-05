@@ -172,10 +172,12 @@ public actor SystemSampler {
         return result
     }
 
-    static func sysctl<T>(_ name: String, _ initial: T) -> T? {
+    /// `BitwiseCopyable`: the kernel writes raw bytes into `value`.
+    static func sysctl<T: BitwiseCopyable>(_ name: String, _ initial: T) -> T? {
         var value = initial
         var size = MemoryLayout<T>.size
-        guard sysctlbyname(name, &value, &size, nil, 0) == 0 else { return nil }
+        let status = withUnsafeMutableBytes(of: &value) { sysctlbyname(name, $0.baseAddress, &size, nil, 0) }
+        guard status == 0 else { return nil }
         return value
     }
 }

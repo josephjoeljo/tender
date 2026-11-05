@@ -287,7 +287,8 @@ struct ClusterLink: Service {
                 try await registry.heartbeat(Heartbeat(
                     node: config.nodeID, nodeClock: Date(), processes: list.processes, orphans: list.orphans,
                     previousRoundTrip: roundTrip, spoolBacklog: (try? spool.backlog()) ?? 0,
-                    spoolDropped: (try? spool.droppedTotal()) ?? 0, stats: stats))
+                    spoolDropped: (try? spool.droppedTotal()) ?? 0, stats: stats,
+                    secretFetchErrors: await controller.gcp?.fetchErrors ?? 0))
                 let elapsed = (ContinuousClock.now - start).components
                 roundTrip = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
             } catch {

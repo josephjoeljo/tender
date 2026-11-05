@@ -128,5 +128,9 @@ import Testing
     #expect(sampler.sample() == nil) // the first reading is only a baseline
     try await Task.sleep(for: .milliseconds(300))
     let power = try #require(sampler.sample())
-    #expect((power.stats.cpu ?? 0) > 0)
+    // On an M3 Max every mJ channel ("CPU Energy", EACC/PACC, ANE, DRAM) reads 0, even
+    // over 1.5 s under load; only the nJ "GPU Energy" channel moves.
+    withKnownIssue("CPU energy channels read 0 on some chips") {
+        #expect((power.stats.cpu ?? 0) > 0)
+    }
 }

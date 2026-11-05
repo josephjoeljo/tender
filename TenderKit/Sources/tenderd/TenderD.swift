@@ -109,10 +109,11 @@ struct Exec: ParsableCommand {
     @Option(help: "Service name, for error messages.") var service: String
     @Option(help: "Instance number, for error messages.") var instance = 0
     @Option(help: "The service's secrets file.") var secrets: String
+    @Option(name: .customLong("secret-file"), help: "A secret to write as a file, as <path>=<ref>. Repeatable.") var secretFiles: [String] = []
     @Argument(parsing: .postTerminator, help: "Program and arguments, after `--`.") var command: [String] = []
 
     func run() throws {
-        SecretExec.run(service: "\(service).\(instance)", secretsFile: URL(filePath: secrets), command: command)
+        SecretExec.run(service: "\(service).\(instance)", secretsFile: URL(filePath: secrets), files: secretFiles, command: command)
     }
 }
 
@@ -127,9 +128,10 @@ struct SecretsExport: AsyncParsableCommand {
         let environment = environmentOptions.environment
         let store = environment.makeSecretStore()
         var values: [String: Data] = [:]
-        // Services' secrets too: they live in the same Keychain, under the same binary.
-        let services = try SecretVault(secrets: store, store: StateStore(environment: environment)).live()
-        for name in ClusterSecrets.all + services.map(\.name.itemName) {
+        // Services' secrets and cached GCP values too: they live in the same Keychain,
+        // under the same binary.
+        let vault = SecretVault(secrets: store, store: try StateStore(environment: environment))
+        for name in ClusterSecrets.all + (try vault.live()).map(\.name.itemName) + (try vault.cachedGCPItems()) {
             if let value = try store.read(name) { values[name] = value }
         }
         guard FileManager.default.createFile(atPath: to, contents: nil, attributes: [.posixPermissions: 0o600]) else {

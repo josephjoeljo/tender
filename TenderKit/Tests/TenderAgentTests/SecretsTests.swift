@@ -248,16 +248,227 @@ private func withSecretsDaemon(_ body: (TenderClient, TenderEnvironment) async t
     }
 }
 
+// MARK: Secret files
+
+/// A directory outside the test environment's root, as secret files must be.
+private func makeFilesDirectory() throws -> URL {
+    let directory = URL(filePath: "/private/tmp/tender-test-files-\(UUID().uuidString.prefix(8))")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    return directory
+}
+
+@Test func secretFilesGoInThePlistAsPathsAndReferences() async throws {
+    let env = try makeTestEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let (vault, store) = try makeVault(env)
+    let reconciler = Reconciler(environment: env, store: store, launchd: MemoryLaunchd(), vault: vault, execPath: fakeTenderd)
+    let spec = ServiceSpec(name: "web", program: .executable("/bin/sleep"), arguments: ["1"],
+                           secretFiles: ["/opt/web/z.pem": "shared/TLS", "/opt/web/gcp.json": "GCP_KEY"])
+    let first = try plist(try await reconciler.renderPlist(spec: spec, instance: 0))
+    #expect(first["ProgramArguments"] as? [String] == [
+        fakeTenderd, "exec", "--service", "web", "--instance", "0",
+        "--secrets", env.serviceSecretsFile(service: "web").path(percentEncoded: false),
+        "--secret-file", "/opt/web/gcp.json=GCP_KEY", "--secret-file", "/opt/web/z.pem=shared/TLS",
+        "--", "/bin/sleep", "1",
+    ])
+    #expect((first["EnvironmentVariables"] as? [String: String])?["TENDER_SECRETS_REV"] == "0.0")
+
+    // A file's secret is part of the revision, so rotating it restarts the service.
+    try vault.set(SecretName(service: "web", name: "GCP_KEY"), value: Data(password.utf8))
+    let rotated = try await reconciler.renderPlist(spec: spec, instance: 0)
+    #expect((try plist(rotated)["EnvironmentVariables"] as? [String: String])?["TENDER_SECRETS_REV"] != "0.0")
+    #expect(!String(decoding: rotated, as: UTF8.self).contains(password))
+    try store.upsert(spec)
+    #expect(try await reconciler.reconcile().failures.isEmpty)
+    #expect(try SecretExec.loadSecrets(file: env.serviceSecretsFile(service: "web")) == ["GCP_KEY": password])
+}
+
+@Test func execWritesSecretFilesPrivatelyAndNeverThroughASymlink() throws {
+    let directory = try makeFilesDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let victim = directory.appending(path: "victim")
+    try Data("untouched".utf8).write(to: victim)
+    let target = directory.appending(path: "key.json").path(percentEncoded: false)
+    #expect(symlink(victim.path(percentEncoded: false), target) == 0)
+    let nested = directory.appending(path: "new/dir/tls.pem").path(percentEncoded: false)
+
+    let files = [(path: target, ref: SecretRef(name: "KEY")), (path: nested, ref: SecretRef(name: "TLS", shared: true))]
+    try SecretExec.writeFiles(files, secrets: ["KEY": password, "shared/TLS": "pem"])
+    #expect(try String(contentsOf: victim, encoding: .utf8) == "untouched")
+    let attributes = try FileManager.default.attributesOfItem(atPath: target)
+    #expect(attributes[.type] as? FileAttributeType == .typeRegular)
+    #expect(attributes[.posixPermissions] as? Int == 0o400)
+    #expect(try String(contentsOfFile: target, encoding: .utf8) == password)
+    #expect(try String(contentsOfFile: nested, encoding: .utf8) == "pem")
+    // Writing again replaces a 0400 file.
+    try SecretExec.writeFiles(files, secrets: ["KEY": "rotated", "shared/TLS": "pem"])
+    #expect(try String(contentsOfFile: target, encoding: .utf8) == "rotated")
+    let leftovers = try FileManager.default.contentsOfDirectory(atPath: directory.path(percentEncoded: false)).filter { $0.hasPrefix(".") }
+    #expect(leftovers.isEmpty)
+
+    // A missing secret writes nothing, removes its stale file, and names it.
+    #expect(throws: SecretTemplateError.missing(SecretRef(name: "TLS", shared: true))) {
+        try SecretExec.writeFiles(files, secrets: ["KEY": "third"])
+    }
+    #expect(try String(contentsOfFile: target, encoding: .utf8) == "rotated")
+    #expect(!FileManager.default.fileExists(atPath: nested))
+
+    #expect(SecretExec.parseFile("/opt/a=b/key=shared/TLS")?.path == "/opt/a=b/key")
+    #expect(SecretExec.parseFile("/opt/a=b/key=shared/TLS")?.ref == SecretRef(name: "TLS", shared: true))
+    #expect(SecretExec.parseFile("relative=KEY") == nil)
+    #expect(SecretExec.parseFile("/opt/key=bad-name") == nil)
+}
+
+@Test func theCleanerOnlyRemovesWhatExecWrote() throws {
+    let directory = try makeFilesDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let path = { (name: String) in directory.appending(path: name).path(percentEncoded: false) }
+    try SecretExec.writeFiles([(path("written"), SecretRef(name: "K"))], secrets: ["K": "v"])
+    try Data("mine".utf8).write(to: URL(filePath: path("not-0400")))
+    // Reached through /tmp, a symlink root owns in a directory only root can change.
+    let throughTmp = "/tmp/" + directory.lastPathComponent + "/written"
+
+    SecretFileCleaner.remove(path("not-0400"), owner: getuid())
+    SecretFileCleaner.remove(path("written"), owner: getuid() + 1)
+    #expect(FileManager.default.fileExists(atPath: path("not-0400")))
+    #expect(FileManager.default.fileExists(atPath: path("written")))
+    SecretFileCleaner.remove(throughTmp, owner: getuid())
+    #expect(!FileManager.default.fileExists(atPath: path("written")))
+
+    // A symlinked directory the user controls stops it.
+    let elsewhere = directory.appending(path: "elsewhere")
+    try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+    try SecretExec.writeFiles([(elsewhere.appending(path: "key").path(percentEncoded: false), SecretRef(name: "K"))], secrets: ["K": "v"])
+    #expect(symlink(elsewhere.path(percentEncoded: false), path("link")) == 0)
+    SecretFileCleaner.remove(path("link") + "/key", owner: getuid())
+    #expect(FileManager.default.fileExists(atPath: elsewhere.appending(path: "key").path(percentEncoded: false)))
+}
+
+@Test func secretFilePathsAreCheckedAndCleanedUpOverTheSocket() async throws {
+    try await withSecretsDaemon { client, env async throws in
+        let directory = try makeFilesDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let keep = directory.appending(path: "keep.json").path(percentEncoded: false)
+        let drop = directory.appending(path: "drop.json").path(percentEncoded: false)
+        var spec = ServiceSpec(name: "files", program: .executable("/bin/sleep"), arguments: ["1000"],
+                               secretFiles: [keep: "KEY", drop: "shared/OTHER"])
+
+        for bad in ["relative/key", "/opt/../etc/key", "/opt//key", env.root.appending(path: "bin/x").path(percentEncoded: false),
+                    env.plistDirectory.appending(path: "x.plist").path(percentEncoded: false),
+                    "/tmp/" + env.root.lastPathComponent + "/state.db"] {
+            var invalid = spec
+            invalid.secretFiles = [bad: "KEY"]
+            do {
+                _ = try await client.start(invalid)
+                Issue.record("expected \(bad) to be refused")
+            } catch let error as TenderClientError {
+                #expect(error.code == "invalid_secret_file", "\(bad)")
+            }
+        }
+        var malformed = spec
+        malformed.secretFiles = [keep: "${secret:KEY}"]
+        do {
+            _ = try await client.start(malformed)
+            Issue.record("expected a malformed file reference to be refused")
+        } catch let error as TenderClientError {
+            #expect(error.code == "invalid_secret_ref")
+        }
+
+        _ = try await client.start(spec)
+        #expect(try await client.secrets().missing == ["files: KEY", "files: shared/OTHER"])
+        // What `tenderd exec` would have written; MemoryLaunchd runs nothing.
+        try SecretExec.writeFiles([(keep, SecretRef(name: "KEY")), (drop, SecretRef(name: "OTHER", shared: true))],
+                                  secrets: ["KEY": "k", "shared/OTHER": "o"])
+        spec.secretFiles = [keep: "KEY"]
+        _ = try await client.start(spec)
+        #expect(FileManager.default.fileExists(atPath: keep))
+        #expect(!FileManager.default.fileExists(atPath: drop))
+        _ = try await client.delete(service: "files")
+        #expect(!FileManager.default.fileExists(atPath: keep))
+    }
+}
+
+/// What `tender apply` replaces or prunes loses the secret files it no longer has.
+@Test func applyRemovesTheSecretFilesOfReplacedAndPrunedSpecs() async throws {
+    try await withSecretsDaemon { client, _ async throws in
+        let directory = try makeFilesDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let keep = directory.appending(path: "keep.json").path(percentEncoded: false)
+        let drop = directory.appending(path: "drop.json").path(percentEncoded: false)
+        var spec = ServiceSpec(name: "files", program: .executable("/bin/sleep"), arguments: ["1000"],
+                               secretFiles: [keep: "KEY", drop: "shared/OTHER"])
+        let other = ServiceSpec(name: "other", program: .executable("/bin/sleep"), arguments: ["2000"])
+        #expect(try await client.apply(ApplyRequest(items: [.service(spec), .service(other)])).succeeded)
+        // What `tenderd exec` would have written; MemoryLaunchd runs nothing.
+        try SecretExec.writeFiles([(keep, SecretRef(name: "KEY")), (drop, SecretRef(name: "OTHER", shared: true))],
+                                  secrets: ["KEY": "k", "shared/OTHER": "o"])
+
+        spec.secretFiles = [keep: "KEY"]
+        let replaced = try await client.apply(ApplyRequest(items: [.service(spec), .service(other)]))
+        #expect(replaced.succeeded, "\(replaced)")
+        #expect(replaced.diff.changes.map(\.action) == [.update, .unchanged])
+        #expect(FileManager.default.fileExists(atPath: keep))
+        #expect(!FileManager.default.fileExists(atPath: drop))
+
+        let pruned = try await client.apply(ApplyRequest(items: [.service(other)], prune: true))
+        #expect(pruned.succeeded, "\(pruned)")
+        #expect(pruned.diff.changes.map(\.action) == [.unchanged, .prune])
+        #expect(!FileManager.default.fileExists(atPath: keep))
+    }
+}
+
+@Test func gcpReferencesNeedAProjectAndAFirstFetch() async throws {
+    try await withSecretsDaemon { client, env async throws in
+        var spec = ServiceSpec(name: "gcp", program: .executable("/bin/sleep"), arguments: ["1000"],
+                               environment: ["P": "${secret:gcp:MONGO_PASSWORD}"])
+        do {
+            _ = try await client.start(spec)
+            Issue.record("expected a reference without a project to be refused")
+        } catch let error as TenderClientError {
+            #expect(error.code == "invalid_secret_ref")
+            #expect(error.description.contains("secrets.project"))
+        }
+        // No credentials on this node, so it can never be fetched: the spec isn't stored.
+        spec.environment["P"] = "${secret:gcp:projects/olympsis-prod/secrets/MONGO_PASSWORD@2}"
+        do {
+            _ = try await client.start(spec)
+            Issue.record("expected a secret never fetched to stop the start")
+        } catch let error as TenderClientError {
+            #expect(error.code == "secret_fetch_failed")
+            #expect(error.description.contains("projects/olympsis-prod/secrets/MONGO_PASSWORD@2"))
+            #expect(error.description.contains("roles/secretmanager.secretAccessor"))
+            #expect(error.description.contains("tender credentials set"))
+        }
+        #expect(try await client.list().processes.isEmpty)
+
+        try FileManager.default.createDirectory(at: env.configDirectory, withIntermediateDirectories: true)
+        try Data(#"{"secrets":{"project":"olympsis-prod"}}"#.utf8).write(to: env.configDirectory.appending(path: "cloud.json"))
+        spec.environment["P"] = "${secret:gcp:MONGO_PASSWORD}"
+        do {
+            _ = try await client.start(spec)
+            Issue.record("expected a secret never fetched to stop the start")
+        } catch let error as TenderClientError {
+            #expect(error.code == "secret_fetch_failed")
+            #expect(error.description.contains("projects/olympsis-prod/secrets/MONGO_PASSWORD@latest"))
+        }
+    }
+}
+
 // MARK: Real launchd
 
-/// The `tenderd` that `swift build` made, next to this package's tests.
+/// The `tenderd` that `swift build` made: beside the test bundle, which also finds it
+/// under `--scratch-path`, or in this package's `.build`.
 private let builtTenderd: String? = {
     let package = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-    let path = package.appending(path: ".build/debug/tenderd").path(percentEncoded: false)
-    return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+    // The test bundle is a loaded image, whoever hosts it.
+    let besideTests = (0..<_dyld_image_count()).compactMap { _dyld_get_image_name($0).map { String(cString: $0) } }
+        .compactMap { image in image.range(of: ".xctest/").map { String(image[..<$0.lowerBound]) + ".xctest" } }
+        .map { URL(filePath: $0).deletingLastPathComponent().appending(path: "tenderd").path(percentEncoded: false) }
+    let candidates = besideTests + [package.appending(path: ".build/debug/tenderd").path(percentEncoded: false)]
+    return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
 }()
 
-@Test(.enabled(if: builtTenderd != nil, "needs .build/debug/tenderd"))
+@Test(.enabled(if: builtTenderd != nil, "needs a built tenderd"))
 func aRealJobSeesItsSecretThroughTenderdExec() async throws {
     let env = try makeTestEnvironment()
     let (vault, store) = try makeVault(env)
@@ -275,12 +486,17 @@ func aRealJobSeesItsSecretThroughTenderdExec() async throws {
         try? FileManager.default.removeItem(at: env.root)
     }
     let output = env.root.appending(path: "seen.txt")
+    let files = try makeFilesDirectory()
+    defer { try? FileManager.default.removeItem(at: files) }
+    let keyFile = files.appending(path: "key.txt").path(percentEncoded: false)
     try store.upsert(ServiceSpec(
         name: "echo", program: .executable("/bin/sh"),
-        arguments: ["-c", "printf %s \"$TOKEN\" > \(output.path(percentEncoded: false)); exec /bin/sleep 1000"],
-        environment: ["TOKEN": "t=${secret:TOKEN}"]
+        arguments: ["-c", "printf '%s|%s' \"$TOKEN\" \"$(cat \(keyFile))\" > \(output.path(percentEncoded: false)); exec /bin/sleep 1000"],
+        environment: ["TOKEN": "t=${secret:TOKEN}"],
+        secretFiles: [keyFile: "KEY"]
     ))
     try vault.set(SecretName(service: "echo", name: "TOKEN"), value: Data("first".utf8))
+    try vault.set(SecretName(service: "echo", name: "KEY"), value: Data("file-first".utf8))
     #expect(try await reconciler.reconcile().failures.isEmpty)
 
     func seen(_ expected: String) async throws -> Bool {
@@ -290,17 +506,22 @@ func aRealJobSeesItsSecretThroughTenderdExec() async throws {
         }
         return false
     }
-    #expect(try await seen("t=first"))
+    #expect(try await seen("t=first|file-first"))
+    #expect(try FileManager.default.attributesOfItem(atPath: keyFile)[.posixPermissions] as? Int == 0o400)
     let pid = try await launchctl.print(label: label)?.pid
     #expect(pid != nil)
 
+    try vault.set(SecretName(service: "echo", name: "KEY"), value: Data("file-second".utf8))
+    #expect(try await reconciler.reconcile().failures.isEmpty)
+    #expect(try await seen("t=first|file-second"))
     try vault.set(SecretName(service: "echo", name: "TOKEN"), value: Data("second".utf8))
     #expect(try await reconciler.reconcile().failures.isEmpty)
-    #expect(try await seen("t=second"))
+    #expect(try await seen("t=second|file-second"))
     let plistData = try Data(contentsOf: env.plistPath(label: label))
     #expect(!String(decoding: plistData, as: UTF8.self).contains("second"))
 
-    try vault.delete(SecretName(service: "echo", name: "TOKEN"))
+    // A deleted file secret takes its file with it.
+    try vault.delete(SecretName(service: "echo", name: "KEY"))
     #expect(try await reconciler.reconcile().failures.isEmpty)
     var exitCode: Int?
     for _ in 0..<100 {
@@ -309,6 +530,7 @@ func aRealJobSeesItsSecretThroughTenderdExec() async throws {
         try await Task.sleep(for: .milliseconds(100))
     }
     #expect(exitCode == Int(SecretExec.configurationError))
+    #expect(!FileManager.default.fileExists(atPath: keyFile))
 
     try store.deleteService("echo")
     #expect(try await reconciler.reconcile().failures.isEmpty)

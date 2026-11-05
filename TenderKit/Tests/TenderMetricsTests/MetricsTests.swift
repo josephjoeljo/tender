@@ -5,7 +5,8 @@ import TenderCore
 
 @Test func rendersEveryDesignedMetric() {
     let node = NodeSummary(info: NodeInfo(id: NodeID("mac-2"), version: "1", macOS: "x", hardware: "y"), up: true,
-                           lastHeartbeatAge: 1.5, instanceCount: 1, crashedCount: 0, clockSkew: 0.25, spoolBacklog: 7, spoolDropped: 3)
+                           lastHeartbeatAge: 1.5, instanceCount: 1, crashedCount: 0, clockSkew: 0.25, spoolBacklog: 7, spoolDropped: 3,
+                           secretFetchErrors: 5)
     let process = InstanceStatus(service: "api", instance: 0, node: NodeID("mac-2"), state: .running, pid: 99, restarts: 2,
                                  cpu: 5, rss: 1024, cpuSeconds: 9.5)
     let text = MetricsRenderer.render(MetricsSnapshot(
@@ -22,6 +23,7 @@ import TenderCore
         #"tender_log_lines_ingested_total{node="mac-2"} 42.0"#,
         #"tender_log_spool_backlog{node="mac-2"} 7.0"#,
         #"tender_log_spool_dropped_total{node="mac-2"} 3.0"#,
+        #"tender_secret_fetch_errors_total{node="mac-2"} 5.0"#,
         #"tender_release_deploys_total{service="api",result="success"} 1.0"#,
         "# TYPE tender_process_restarts_total counter",
         "# TYPE tender_node_up gauge",

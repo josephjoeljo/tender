@@ -87,7 +87,17 @@ distributed actor NodeAgent: NodeAgentProtocol {
 
     distributed func listSecrets() async throws -> SecretList {
         let controller = self.controller
-        return try await translating { try controller.listSecrets() }
+        return try await translating { try await controller.listSecrets() }
+    }
+
+    distributed func specs() async throws -> NodeSpecs {
+        let controller = self.controller
+        return try await translating { try await controller.specs() }
+    }
+
+    distributed func applyManifest(_ request: ApplyRequest) async throws -> ApplyResponse {
+        let controller = self.controller
+        return try await translating { try await controller.applyManifest(request) }
     }
 
     distributed func forgetAdopted(label: String) async throws -> ProcessList {

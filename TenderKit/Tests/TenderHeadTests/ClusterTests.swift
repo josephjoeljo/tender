@@ -13,7 +13,12 @@ import TenderProtocol
 
 actor MemoryLaunchd: LaunchdControlling {
     var loaded: Set<String> = []
-    func bootstrap(plistURL: URL) async throws { loaded.insert(plistURL.deletingPathExtension().lastPathComponent) }
+    /// Every start, so that tests can tell an untouched job from a restarted one.
+    var bootstraps = 0
+    func bootstrap(plistURL: URL) async throws {
+        bootstraps += 1
+        loaded.insert(plistURL.deletingPathExtension().lastPathComponent)
+    }
     func bootout(label: String) async throws {
         guard loaded.remove(label) != nil else { throw LaunchctlError.notFound(label) }
     }
@@ -112,7 +117,7 @@ final class Daemon: @unchecked Sendable {
 private let sleeper = ServiceSpec(name: "api", program: .executable("/bin/sleep"), arguments: ["1000"])
 
 /// Starts a head and a joined worker.
-private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async throws {
+func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async throws {
     let head = try Daemon(node: "head", head: true)
     let worker = try Daemon(node: "worker", head: false)
     try await head.start()
@@ -546,7 +551,7 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     }
 }
 
-@Test func skewAndSpoolStatsReachTheSummary() async throws {
+@Test func skewSpoolAndSecretFetchStatsReachTheSummary() async throws {
     let store = try makeEnvironment()
     defer { try? FileManager.default.removeItem(at: store.root) }
     let summaryState = RegistryState(store: nil)
@@ -554,12 +559,13 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     try await summaryState.register(info)
     let now = Date()
     _ = await summaryState.heartbeat(Heartbeat(node: NodeID("n"), nodeClock: now.addingTimeInterval(-5), processes: [],
-                                               previousRoundTrip: 2, spoolBacklog: 3, spoolDropped: 4),
+                                               previousRoundTrip: 2, spoolBacklog: 3, spoolDropped: 4, secretFetchErrors: 6),
                                      registeredThisRun: true, now: now)
     let summary = try #require(await summaryState.summaries(now: now).first)
     #expect(abs((summary.clockSkew ?? 0) - 4) < 0.001)
     #expect(summary.spoolBacklog == 3)
     #expect(summary.spoolDropped == 4)
+    #expect(summary.secretFetchErrors == 6)
 }
 
 @Test func nodeHistoryIsServedBoundedAndPerNode() async throws {

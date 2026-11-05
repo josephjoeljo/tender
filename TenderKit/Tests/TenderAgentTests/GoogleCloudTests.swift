@@ -225,3 +225,257 @@ private struct Harness {
     #expect(try await h.manager.list(service: "api").releases.isEmpty)
     #expect(try h.store.service("api")?.spec.program == .executable("/bin/sleep"))
 }
+
+// MARK: GCP Secret Manager
+
+private let secretVersion = GCPSecretVersion(project: "olympsis-prod", secret: "MONGO_PASSWORD", version: "latest")
+
+private func accessResponse(_ value: String, version: Int, crc: UInt32? = nil, project: String = "123456") -> Data {
+    let data = Data(value.utf8)
+    return try! JSONSerialization.data(withJSONObject: [
+        "name": "projects/\(project)/secrets/MONGO_PASSWORD/versions/\(version)",
+        "payload": ["data": data.base64EncodedString(), "dataCrc32c": String(crc ?? CRC32C.checksum(data))],
+    ])
+}
+
+private func secretRoute(_ value: String, version: Int, path: String = "secrets/MONGO_PASSWORD/versions/latest:access",
+                         status: Int = 200, crc: UInt32? = nil) -> (match: String, data: Data, status: Int) {
+    (path, accessResponse(value, version: version, crc: crc), status)
+}
+
+@Test func crc32cIsCastagnoli() {
+    #expect(CRC32C.checksum(Data("123456789".utf8)) == 0xE306_9283)
+    #expect(CRC32C.checksum(Data()) == 0)
+    #expect(CRC32C.checksum(Data(repeating: 0, count: 32)) == 0x8A91_36AA)
+}
+
+@Test func secretSourceReadsAVersionAndVerifiesItsChecksum() async throws {
+    let fetcher = FakeFetcher()
+    fetcher.responses = [tokenResponse, secretRoute("hunter2", version: 7)]
+    let source = GCPSecretSource(tokens: try provider(fetcher), fetcher: fetcher)
+    let fetched = try await source.access(secretVersion)
+    #expect(fetched.value == Data("hunter2".utf8))
+    #expect(fetched.version == "7")
+    let request = try #require(fetcher.requests.last)
+    #expect(request.url?.absoluteString
+        == "https://secretmanager.googleapis.com/v1/projects/olympsis-prod/secrets/MONGO_PASSWORD/versions/latest:access")
+    #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer T0K")
+    #expect(request.timeoutInterval <= 10)
+    let scope = String(decoding: try #require(fetcher.requests.first?.httpBody), as: UTF8.self)
+    #expect(scope.contains("assertion="))
+}
+
+@Test func secretSourceRefusesACorruptedPayload() async throws {
+    let fetcher = FakeFetcher()
+    fetcher.responses = [tokenResponse, secretRoute("hunter2", version: 7, crc: 12345)]
+    let source = GCPSecretSource(tokens: try provider(fetcher), fetcher: fetcher)
+    await #expect(throws: SecretFetchError.checksumMismatch(secretVersion)) { try await source.access(secretVersion) }
+
+    let noChecksum = try JSONSerialization.data(withJSONObject: ["name": "projects/1/secrets/MONGO_PASSWORD/versions/1",
+                                                                 "payload": ["data": Data("x".utf8).base64EncodedString()]])
+    fetcher.responses = [tokenResponse, ("secretmanager", noChecksum, 200)]
+    await #expect(throws: SecretFetchError.invalidResponse(secretVersion, "no dataCrc32c")) { try await source.access(secretVersion) }
+}
+
+@Test func deniedAndMissingSecretsNameTheSecretAndTheRole() async throws {
+    let fetcher = FakeFetcher()
+    let source = GCPSecretSource(tokens: try provider(fetcher), fetcher: fetcher)
+    // The body of an error is never repeated: for an access call, a body can be the value.
+    fetcher.responses = [tokenResponse, ("secretmanager", Data(#"{"error":{"message":"hunter2"}}"#.utf8), 403)]
+    do {
+        _ = try await source.access(secretVersion)
+        Issue.record("expected a 403 to throw")
+    } catch let error as SecretFetchError {
+        #expect(error == .denied(secretVersion, account: "ci@p.iam.gserviceaccount.com"))
+        #expect(error.description.contains("roles/secretmanager.secretAccessor"))
+        #expect(error.description.contains("projects/olympsis-prod/secrets/MONGO_PASSWORD@latest"))
+        #expect(error.description.contains("ci@p.iam.gserviceaccount.com"))
+        #expect(!error.description.contains("hunter2"))
+    }
+    fetcher.responses = [tokenResponse, ("secretmanager", Data(), 404)]
+    do {
+        _ = try await source.access(secretVersion)
+        Issue.record("expected a 404 to throw")
+    } catch let error as SecretFetchError {
+        #expect(error == .notFound(secretVersion))
+        #expect(error.description.contains("roles/secretmanager.secretAccessor"))
+    }
+    fetcher.responses = [tokenResponse, ("secretmanager", Data(), 503)]
+    await #expect(throws: SecretFetchError.http(secretVersion, status: 503)) { try await source.access(secretVersion) }
+}
+
+private struct GCPFixture {
+    let env: TenderEnvironment
+    let store: StateStore
+    let vault: SecretVault
+    let sync: GCPSecretSync
+    let fetcher: FakeFetcher
+
+    init(project: String? = "olympsis-prod") throws {
+        env = try makeTestEnvironment()
+        store = try StateStore(environment: env)
+        vault = SecretVault(secrets: env.makeSecretStore(), store: store, gcpProject: { project })
+        let fetcher = FakeFetcher()
+        let tokens = try provider(fetcher)
+        sync = GCPSecretSync(vault: vault, source: { GCPSecretSource(tokens: tokens, fetcher: fetcher) })
+        self.fetcher = fetcher
+    }
+
+    func accesses() -> Int { fetcher.requests.filter { $0.url?.host == "secretmanager.googleapis.com" }.count }
+}
+
+private let gcpSpec = ServiceSpec(
+    name: "api", program: .executable("/bin/sleep"), arguments: ["--pin=${secret:gcp:projects/other/secrets/PIN@3}"],
+    environment: ["MONGO_URL": "mongodb://app:${secret:gcp:MONGO_PASSWORD}@db"]
+)
+
+@Test func latestIsRecheckedAndANewValueBumpsTheRevision() async throws {
+    let fixture = try GCPFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.env.root) }
+    fixture.fetcher.responses = [tokenResponse, secretRoute("first", version: 1),
+                                 secretRoute("pin", version: 3, path: "projects/other/secrets/PIN/versions/3:access")]
+    let start = Date()
+    #expect(await fixture.sync.refresh([gcpSpec], now: start).isEmpty)
+    #expect(fixture.accesses() == 2)
+    let first = try fixture.vault.revisionTag(for: gcpSpec)
+    #expect(try fixture.vault.missing(for: gcpSpec).isEmpty)
+
+    // Within five minutes nothing is fetched again, and a pinned version never is.
+    await fixture.sync.refresh([gcpSpec], now: start.addingTimeInterval(60))
+    #expect(fixture.accesses() == 2)
+    await fixture.sync.refresh([gcpSpec], force: true, now: start.addingTimeInterval(61))
+    #expect(fixture.accesses() == 3, "a start re-checks latest, not the pinned version")
+
+    // The same value under a new version changes nothing.
+    fixture.fetcher.responses[1] = secretRoute("first", version: 2)
+    await fixture.sync.refresh([gcpSpec], now: start.addingTimeInterval(400))
+    #expect(try fixture.vault.revisionTag(for: gcpSpec) == first)
+
+    fixture.fetcher.responses[1] = secretRoute("second", version: 3)
+    await fixture.sync.refresh([gcpSpec], now: start.addingTimeInterval(800))
+    #expect(fixture.accesses() == 5)
+    let second = try fixture.vault.revisionTag(for: gcpSpec)
+    #expect(second != first)
+    #expect(try fixture.vault.value(item: secretVersion.itemName) == "second")
+
+    let infos = await fixture.sync.infos(for: [gcpSpec], node: NodeID("mac-1"))
+    #expect(infos.map(\.name) == ["projects/olympsis-prod/secrets/MONGO_PASSWORD@latest", "projects/other/secrets/PIN@3"])
+    #expect(infos.first?.version == "3")
+    #expect(infos.allSatisfy { $0.cached && !$0.stale && $0.usedBy == ["api"] })
+}
+
+@Test func anOutageServesTheCacheAndReportsItStale() async throws {
+    let fixture = try GCPFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.env.root) }
+    let spec = ServiceSpec(name: "api", program: .executable("/bin/sleep"), environment: ["P": "${secret:gcp:MONGO_PASSWORD}"])
+    fixture.fetcher.responses = [tokenResponse, secretRoute("s3cr3t-value", version: 1)]
+    let start = Date()
+    #expect(await fixture.sync.refresh([spec], now: start).isEmpty)
+    let revision = try fixture.vault.revisionTag(for: spec)
+
+    fixture.fetcher.responses = [tokenResponse, ("secretmanager", Data(), 503)]
+    let failures = await fixture.sync.refresh([spec], force: true, now: start.addingTimeInterval(10))
+    #expect(failures[secretVersion] == .http(secretVersion, status: 503))
+    #expect(await fixture.sync.fetchErrors == 1)
+    #expect(try fixture.vault.revisionTag(for: spec) == revision, "an outage doesn't restart anything")
+
+    // Instances still start from the cache.
+    try SecretMaterializer(environment: fixture.env, vault: fixture.vault).materialize(spec)
+    #expect(try SecretExec.loadSecrets(file: fixture.env.serviceSecretsFile(service: "api")) == ["gcp:MONGO_PASSWORD": "s3cr3t-value"])
+    let info = try #require(await fixture.sync.infos(for: [spec], node: NodeID("n")).first)
+    #expect(info.stale && info.cached)
+    #expect(info.fetchError == "Google Cloud returned HTTP 503 for projects/olympsis-prod/secrets/MONGO_PASSWORD@latest.")
+    #expect(!String(decoding: try JSONEncoder().encode(info), as: UTF8.self).contains("s3cr3t-value"), "no value in the list")
+
+    // Failures back off instead of hitting Google on every sweep.
+    await fixture.sync.refresh([spec], now: start.addingTimeInterval(400))
+    await fixture.sync.refresh([spec], now: start.addingTimeInterval(405))
+    #expect(await fixture.sync.fetchErrors == 2)
+
+    fixture.fetcher.responses = [tokenResponse, secretRoute("s3cr3t-value", version: 1)]
+    await fixture.sync.refresh([spec], now: start.addingTimeInterval(800))
+    #expect(await fixture.sync.infos(for: [spec], node: NodeID("n")).first?.stale == false)
+}
+
+@Test func aSecretNeverFetchedIsMissingAndPrunedWhenUnused() async throws {
+    let fixture = try GCPFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.env.root) }
+    let spec = ServiceSpec(name: "api", program: .executable("/bin/sleep"), environment: ["P": "${secret:gcp:MONGO_PASSWORD}"])
+    fixture.fetcher.responses = [tokenResponse]
+    let start = Date()
+    #expect(await fixture.sync.refresh([spec], now: start)[secretVersion] == .notFound(secretVersion))
+    #expect(try fixture.vault.missing(for: spec).map(\.description) == ["gcp:MONGO_PASSWORD"])
+    try SecretMaterializer(environment: fixture.env, vault: fixture.vault).materialize(spec)
+    #expect(try SecretExec.loadSecrets(file: fixture.env.serviceSecretsFile(service: "api")).isEmpty)
+    let info = try #require(await fixture.sync.infos(for: [spec], node: NodeID("n")).first)
+    #expect(!info.cached && !info.stale && info.fetchError?.contains("roles/secretmanager.secretAccessor") == true)
+
+    fixture.fetcher.responses = [tokenResponse, secretRoute("v", version: 1)]
+    await fixture.sync.refresh([spec], now: start.addingTimeInterval(5))
+    #expect(fixture.accesses() == 1, "a sweep inside the retry interval leaves it")
+    #expect(await fixture.sync.refresh([spec], force: true, now: start.addingTimeInterval(6)).isEmpty)
+    #expect(try fixture.vault.cachedGCPItems() == [secretVersion.itemName])
+
+    // Recently fetched values survive a prune, for a start that hasn't stored its spec yet.
+    await fixture.sync.prune(keeping: [], now: start.addingTimeInterval(60))
+    #expect(try fixture.vault.cachedGCPItems() == [secretVersion.itemName])
+    await fixture.sync.prune(keeping: [spec], now: start.addingTimeInterval(3600))
+    #expect(try fixture.vault.cachedGCPItems() == [secretVersion.itemName])
+    await fixture.sync.prune(keeping: [], now: start.addingTimeInterval(3600))
+    #expect(try fixture.vault.cachedGCPItems().isEmpty)
+}
+
+/// `tender apply` fetches before it stores, like a start: a reference never fetched fails
+/// its item, and the spec isn't stored, so no instance is left exiting 78.
+@Test func applyingASecretNeverFetchedFailsTheItemAndStoresNothing() async throws {
+    let fixture = try GCPFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.env.root) }
+    let launchd = MemoryLaunchd()
+    let reconciler = Reconciler(environment: fixture.env, store: fixture.store, launchd: launchd,
+                                vault: fixture.vault, gcp: fixture.sync, execPath: "/opt/tender/libexec/tenderd")
+    let controller = ProcessController(
+        environment: fixture.env, store: fixture.store, reconciler: reconciler,
+        releases: ReleaseManager(environment: fixture.env, store: fixture.store, reconciler: reconciler),
+        adoption: Adoption(environment: fixture.env, store: fixture.store, launchd: launchd),
+        vault: fixture.vault, gcp: fixture.sync)
+    let spec = ServiceSpec(name: "api", program: .executable("/bin/sleep"), environment: ["P": "${secret:gcp:MONGO_PASSWORD}"])
+    let request = ApplyRequest(items: [.service(spec)])
+    fixture.fetcher.responses = [tokenResponse, ("secretmanager", Data(#"{"error":{"message":"hunter2"}}"#.utf8), 403)]
+
+    let failed = try await controller.applyManifest(request)
+    #expect(failed.diff.changes.map(\.action) == [.create])
+    let error = try #require(failed.results.first?.error)
+    #expect(error.contains("has never been fetched"))
+    #expect(error.contains("projects/olympsis-prod/secrets/MONGO_PASSWORD@latest"))
+    #expect(error.contains("roles/secretmanager.secretAccessor"))
+    #expect(!error.contains("hunter2"))
+    #expect(try fixture.store.services().isEmpty)
+    #expect(await launchd.loaded.isEmpty)
+
+    fixture.fetcher.responses = [tokenResponse, secretRoute("s3cr3t-value", version: 1)]
+    let applied = try await controller.applyManifest(request)
+    #expect(applied.succeeded, "\(applied)")
+    #expect(try fixture.store.services().map(\.spec.name) == ["api"])
+}
+
+@Test func withoutCredentialsEveryReferenceFailsWithTheSetupStep() async throws {
+    let env = try makeTestEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let store = try StateStore(environment: env)
+    let vault = SecretVault(secrets: env.makeSecretStore(), store: store, gcpProject: { "p" })
+    let cloud = CloudServices(environment: env, secrets: env.makeSecretStore(), fetcher: FakeFetcher())
+    let sync = GCPSecretSync(vault: vault, source: { try cloud.secretSource() })
+    let failures = await sync.refresh([gcpSpec])
+    #expect(failures.count == 2)
+    #expect(failures.values.allSatisfy { $0.description.contains("tender credentials set") })
+}
+
+@Test func cloudConfigReadsTheDefaultSecretsProject() throws {
+    let env = try makeTestEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    try FileManager.default.createDirectory(at: env.configDirectory, withIntermediateDirectories: true)
+    try Data(#"{"secrets":{"project":"olympsis-prod"}}"#.utf8).write(to: env.configDirectory.appending(path: "cloud.json"))
+    let cloud = CloudServices(environment: env, secrets: env.makeSecretStore())
+    #expect(cloud.defaultSecretsProject() == "olympsis-prod")
+    #expect(CloudConfig.load(environment: env).releases == nil)
+}

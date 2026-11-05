@@ -16,6 +16,40 @@ Things about how Tender works that may not be what you'd assume.
 - **Unknown names:** `stop` and `restart` return an error, since it's probably a typo.
   `delete` succeeds, since the service is already gone.
 
+## Service files
+
+- **Unchanged means untouched:** `tender apply` leaves a service whose spec didn't change
+  completely alone: no restart, and a service someone stopped stays stopped. A service whose
+  spec changed is replaced and started, even if it was stopped.
+- **`binary:` keeps the node's release:** it means "whichever release this node runs", so a
+  rollback survives the next apply. A new service gets the node's newest release, and fails
+  with `no release` if `bin/<service>/` never had a binary. `binary` must be the service's own
+  name, because releases are kept per service.
+- **`env_file` is read by the CLI:** its values are merged into the spec, so the node never
+  sees the file, and `tender export` prints them inline under `env:`, as literal values. Keep
+  credentials in `${secret:…}` references, which stay references everywhere.
+- **The diff hides environment values:** it says a variable was added, removed or changed.
+  The audit log records the file's hash and the diff's counts and names, never values.
+- **`--prune` abandons adopted jobs** the file doesn't list, leaving them running, and
+  deletes services the file doesn't list, but only on the nodes the file names: each item's
+  `node:`, and the head (or the local node) for items without one. A file that names only
+  `mac-1` never prunes `mac-2`. `--prune-all` (`pruneAll` in the API) prunes every node
+  that's up; a node that's down is reported and not pruned. The diff starts with
+  `Pruning on <nodes>`.
+- **Reading specs remotely takes a `write` token:** `GET /v1/specs` (`tender export`)
+  returns environments as stored, which can include literal credentials.
+- **Removing `log_path`** from an adopted job re-adopts it with the job's own log paths,
+  which needs the job to be loaded.
+- **Setting `log_path` takes the local socket:** like `tender adopt --log-path`, it makes
+  the daemon (root) read that file. Through the head with `--remote`, a file may keep an
+  adopted job's current `log_path` (so an export applies) but not set a new one: that's a
+  403. Run `tender apply` on the job's node instead.
+- **`type` is the app's icon:** `kind` names the document (`Service`, `Adopted`), so a
+  service's process kind (`server`, `database`, `cache`, …) is `type`. Left out, the app
+  guesses it from the name. Changing it replaces the service, like any other field.
+- **5c keys:** `health`, `rollout`, `replicas` and `placement` are rejected with "not
+  supported yet" rather than ignored.
+
 ## Releases
 
 - **Rollback:** it holds even with a newer binary still in `bin/`. Only a change to that
@@ -58,8 +92,8 @@ Things about how Tender works that may not be what you'd assume.
 - **Changing a secret restarts its users:** the plist carries `TENDER_SECRETS_REV`, one
   revision number per reference. Setting or deleting a secret changes it, and the
   reconciler replaces those jobs. Revisions never repeat, even after a delete.
-- **Upgrades:** service secrets are in the same Keychain as the node's keys, so
-  `tender daemon install --system` carries them across with `secrets-export`.
+- **Upgrades:** service secrets and cached GCP values are in the same Keychain as the
+  node's keys, so `tender daemon install --system` carries them across with `secrets-export`.
 - **No service may be named `shared`:** `shared/NAME` always means the shared scope.
 - **Deleting a service keeps its secrets:** `tender delete api` leaves `api/*` on the node,
   so redeploying by delete and start needs no new secrets, and a new service named `api`
@@ -67,6 +101,34 @@ Things about how Tender works that may not be what you'd assume.
   removes one.
 - **A stopped service with an unwritable secrets file** still stops and deletes; only
   its running jobs are left as they were.
+- **Secret files are written by the service's user, never by root:** `tenderd exec` runs
+  after launchd has switched to the service's user, and writes each `secret_files` entry
+  before `execve`: a fresh temp name in the target's directory, created with
+  `O_CREAT | O_EXCL | O_NOFOLLOW`, `0400`, then renamed over the target. A symlink at the
+  target is replaced, not followed, and a path the user controls can only make it write
+  where that user could anyway. Missing parent directories are created `0700`. The plist
+  carries paths and references, never values, so changing either restarts the service.
+- **Secret file paths:** absolute, without `.`, `..` or empty components, at most 32 per
+  service, and not inside Tender's root, logs, config or plist directories (checked as
+  written and with symlinks resolved).
+- **A missing file secret** removes that file, writes none of the others and exits 78, so
+  deleting a secret also removes its file at the next start.
+- **Stale secret files:** when a spec drops a path, or the service is deleted, `tenderd`
+  removes the file, walking the path with `openat` and `O_NOFOLLOW` and removing only a
+  regular `0400` file owned by the service's user. It follows a symlink only when root owns
+  it in a directory only root can change (`/tmp`, `/var`, `/etc`). Not removed: files whose
+  path went through any other symlink, files the service rewrote with another mode, and
+  files of a service that was stopped rather than deleted.
+- **GCP Secret Manager references** (`${secret:gcp:…}`) are fetched by the node when a
+  service starts and by the sweep, cached in the same store as local secrets, and delivered
+  the same way. `latest` is re-checked every 5 minutes and a new value restarts the
+  services using it; a pinned version is fetched once. With GCP unreachable, instances
+  start from the cache and `tender secret list` marks the reference `stale`; a reference
+  never fetched fails `tender start` with the secret's name and the IAM role it needs.
+  Payloads are checked against their CRC32C. See [ops/gcp-secrets.md](ops/gcp-secrets.md).
+- **Default GCP project:** `${secret:gcp:NAME}` uses `secrets.project` in `cloud.json`.
+  Without one, a start with such a reference is refused. Changing it restarts the services
+  that use unqualified references, since they now name other secrets.
 
 ## Orphans
 
@@ -92,8 +154,10 @@ Things about how Tender works that may not be what you'd assume.
 - **Write tokens can read secrets:** values never leave a node through the API, but a
   `write` token can start a process that prints any secret on that node, and logs are
   readable with `read` scope. Guard `write` tokens as you would the secrets themselves.
-- **Protocol version 3:** secrets changed the head↔worker protocol. Upgrade a worker before
-  it rejoins a version 3 head; a mismatched node is refused at the handshake.
+- **Protocol version 4:** service files (`specs`, `applyManifest`) and GCP secrets (heartbeats
+  carry the fetch error count, secret lists the GCP references) changed the head↔worker
+  protocol, as secrets did for version 3. Upgrade the head and workers together; a mismatched
+  node is refused at the handshake.
 - **Socket-only:** `tender adopt`, join and API tokens, CA export and cloud credentials work
   over the local socket only, never with `--remote`.
 - **Certificates expire** after 2 years and aren't renewed automatically yet. The head reissues

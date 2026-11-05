@@ -5,14 +5,13 @@ import PackageDescription
 //   0 Foundation  → TenderCore, TenderProtocol
 //   1 Platform    → LaunchdKit, ProcessMetrics, FileWatch, LogTail   (no networking)
 //   2 Features    → TenderActorSystem, TenderAgent, TenderLogStore, TenderPKI, TenderScheduler,
-//                   TenderMetrics, TenderMCP, TenderClient, TenderHead
+//                   TenderMetrics, TenderClient, TenderHead
 //   3 Executables → tenderd, tender
 //
 // TenderApp is a separate Xcode project (App/) on top of this package. It imports only TenderClient and TenderCore.
 //
 // Hummingbird and AsyncHTTPClient carry the local HTTP/JSON API (Unix socket).
-// Other networking deps (swift-nio-ssl, MCP swift-sdk, swift-prometheus) are
-// added in milestone 2. Head<->worker traffic uses Swift
+// swift-nio-ssl carries mTLS. Head<->worker traffic uses Swift
 // distributed actors over our own TenderActorSystem (no grpc-swift).
 
 let package = Package(
@@ -36,6 +35,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.5.0"),
+        // Service files. TenderClient only: the app and the daemons never parse YAML.
+        .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2"),
     ],
     targets: [
         // MARK: 0 — Foundation
@@ -94,11 +95,11 @@ let package = Package(
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
             .product(name: "NIOCore", package: "swift-nio"),
             .product(name: "NIOHTTP1", package: "swift-nio"),
+            .product(name: "Yams", package: "Yams"),
         ]),
-        .target(name: "TenderMCP", dependencies: ["TenderCore", "TenderClient"]),
         .target(name: "TenderHead", dependencies: [
             "TenderCore", "TenderProtocol", "TenderActorSystem", "TenderAgent", "TenderLogStore", "TenderPKI",
-            "TenderScheduler", "TenderMetrics", "TenderMCP",
+            "TenderScheduler", "TenderMetrics",
             .product(name: "GRDB", package: "GRDB.swift"),
             .product(name: "Hummingbird", package: "hummingbird"),
             .product(name: "HummingbirdTLS", package: "hummingbird"),
@@ -127,6 +128,8 @@ let package = Package(
         .testTarget(name: "TenderHeadTests", dependencies: [
             "TenderHead", "TenderAgent", "TenderClient", "TenderCore", "TenderPKI", "TenderActorSystem", "TenderProtocol", "LaunchdKit", "TenderLogStore",
             .product(name: "Crypto", package: "swift-crypto"),
+            .product(name: "AsyncHTTPClient", package: "async-http-client"),
+            .product(name: "GRDB", package: "GRDB.swift"),
         ]),
         .testTarget(name: "TenderLogStoreTests", dependencies: ["TenderLogStore", "TenderCore"]),
         .testTarget(name: "TenderMetricsTests", dependencies: ["TenderMetrics", "TenderCore"]),
@@ -138,6 +141,7 @@ let package = Package(
         .testTarget(name: "ProcessMetricsTests", dependencies: ["ProcessMetrics"]),
         .testTarget(name: "LogTailTests", dependencies: ["LogTail", "LaunchdKit"]),
         .testTarget(name: "TenderCoreTests", dependencies: ["TenderCore"]),
+        .testTarget(name: "TenderClientTests", dependencies: ["TenderClient", "TenderCore"]),
         .testTarget(name: "TenderAgentTests", dependencies: [
             "TenderAgent", "TenderClient", "TenderCore", "LaunchdKit", "LogTail", "FileWatch",
             .product(name: "Crypto", package: "swift-crypto"),
