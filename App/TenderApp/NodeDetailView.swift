@@ -3,7 +3,7 @@ import SwiftUI
 import TenderClient
 import TenderCore
 
-/// One node: its current stats on top, then charts of what the app has seen since it opened.
+/// One node: its current stats on top, then charts of the head's history plus the app's polls.
 struct NodeDetailView: View {
     let model: ClusterModel
     let nodeID: String
@@ -23,26 +23,29 @@ struct NodeDetailView: View {
                             Text("5 min").tag(300.0)
                             Text("15 min").tag(900.0)
                             Text("1 hour").tag(3600.0)
+                            Text("6 hours").tag(21600.0)
+                            Text("24 hours").tag(86400.0)
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
                         .fixedSize()
                     }
                     if samples.count < 2 {
-                        Label("History builds up while the app is open, one sample every 5 seconds.", systemImage: "clock")
+                        Label("No history yet. The head records one point per heartbeat, from when it started.", systemImage: "clock")
                             .font(.app(.caption))
                             .foregroundStyle(.secondary)
                     }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 360), spacing: 16, alignment: .top)], spacing: 16) {
                         charts(samples, node: node, span: now.addingTimeInterval(-window)...now)
                     }
-                    Text("Recorded by this app while it's open; the last hour is kept.")
+                    Text("From the head's memory (up to 24 hours, per-minute beyond the last hour), then this app's 5-second polls.")
                         .font(.app(.caption))
                         .foregroundStyle(.secondary)
                 }
                 .padding(16)
             }
             .navigationTitle(node.info.id.rawValue)
+            .task(id: "\(nodeID) \(window)") { await model.loadHistory(nodeID: nodeID, window: window) }
         } else {
             ContentUnavailableView("Node not found", systemImage: "desktopcomputer",
                                    description: Text("\(nodeID) is no longer part of this cluster."))

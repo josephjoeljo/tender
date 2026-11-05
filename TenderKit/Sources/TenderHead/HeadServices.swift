@@ -475,6 +475,16 @@ public final class HeadServices: Sendable {
         router.get("/v1/nodes") { [self] _, _ in
             await respond { NodeList(nodes: await state.summaries()) }
         }
+        router.get("/v1/nodes/:id/history") { [self] request, context in
+            await respond {
+                let node = NodeID(try context.parameters.requireDecoded("id"))
+                let (since, limit) = try historyQuery(from: request)
+                guard let history = await state.history(of: node, since: since, limit: limit) else {
+                    throw NodeCallError(code: "node_not_found", message: "No node named '\(node)'.", httpStatus: 404)
+                }
+                return history
+            }
+        }
         router.get("/v1/processes") { [self] _, _ in
             await respond { await clusterStatus() }
         }
@@ -537,6 +547,26 @@ public final class HeadServices: Sendable {
                 return await clusterStatus()
             }
         }
+    }
+
+    /// `since` in Unix seconds, `limit` up to `NodeStatsHistory.maxLimit` points.
+    private func historyQuery(from request: Request) throws -> (since: Date?, limit: Int) {
+        let parameters = request.uri.queryParameters
+        var since: Date?
+        if let raw = parameters.get("since") {
+            guard let seconds = Double(raw) else {
+                throw NodeCallError(code: "invalid_query", message: "since must be Unix seconds.", httpStatus: 400)
+            }
+            since = Date(timeIntervalSince1970: seconds)
+        }
+        var limit = NodeStatsHistory.defaultLimit
+        if let raw = parameters.get("limit") {
+            guard let parsed = Int(raw), parsed > 0 else {
+                throw NodeCallError(code: "invalid_query", message: "limit must be a positive integer.", httpStatus: 400)
+            }
+            limit = min(parsed, NodeStatsHistory.maxLimit)
+        }
+        return (since, limit)
     }
 
     private func logQuery(from request: Request) throws -> LogQuery {

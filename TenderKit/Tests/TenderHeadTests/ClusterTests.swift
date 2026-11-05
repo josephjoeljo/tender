@@ -562,6 +562,28 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     #expect(summary.spoolDropped == 4)
 }
 
+@Test func nodeHistoryIsServedBoundedAndPerNode() async throws {
+    try await withCluster { head, _ async throws in
+        let history = try #require(try await eventually { () -> NodeStatsHistory? in
+            let history = try await head.client.nodeHistory(node: "worker")
+            return history.points.count >= 5 ? history : nil
+        })
+        #expect(history.node == NodeID("worker"))
+        #expect(history.points.map(\.date) == history.points.map(\.date).sorted())
+        #expect(try await head.client.nodeHistory(node: "worker", limit: 2).points.count == 2)
+        let later = try #require(history.points.last?.date)
+        #expect(try await head.client.nodeHistory(node: "worker", since: later).points.allSatisfy { $0.date >= later })
+        for (node, limit, code) in [("nope", nil, "node_not_found"), ("worker", 0, "invalid_query")] as [(String, Int?, String)] {
+            do {
+                _ = try await head.client.nodeHistory(node: node, limit: limit)
+                Issue.record("expected \(code)")
+            } catch let error as TenderClientError {
+                #expect(error.code == code)
+            }
+        }
+    }
+}
+
 // MARK: Security
 
 @Test func aWorkerCantCommandAnotherNode() async throws {

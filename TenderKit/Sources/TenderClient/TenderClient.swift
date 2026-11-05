@@ -97,6 +97,16 @@ public struct TenderClient: Sendable {
         try await send(.GET, "/v1/nodes")
     }
 
+    /// The head's in-memory stats for one node: up to a day, at most `limit` points
+    /// (the head caps it), oldest first. A worker's daemon answers `http_404`.
+    public func nodeHistory(node: String, since: Date? = nil, limit: Int? = nil) async throws -> NodeStatsHistory {
+        var items: [String] = []
+        if let since { items.append("since=\(since.timeIntervalSince1970)") }
+        if let limit { items.append("limit=\(limit)") }
+        let query = items.isEmpty ? "" : "?" + items.joined(separator: "&")
+        return try await send(.GET, "/v1/nodes/\(try escaped(node))/history\(query)")
+    }
+
     public func createJoinToken(ttlSeconds: Int? = nil) async throws -> JoinTokenResponse {
         try await send(.POST, "/v1/tokens", body: try JSONEncoder().encode(JoinTokenRequest(ttlSeconds: ttlSeconds)))
     }
