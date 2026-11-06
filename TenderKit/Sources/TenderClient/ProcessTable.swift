@@ -3,17 +3,21 @@ import TenderCore
 
 /// Human-readable rendering of `ProcessList`, shared by the CLI and other clients.
 public enum ProcessTable {
-    public static func render(_ list: ProcessList) -> String {
+    /// `names` maps node IDs to hostnames (from `tender nodes`); a node missing from it
+    /// shows a short form of its ID.
+    public static func render(_ list: ProcessList, names: [NodeID: String] = [:]) -> String {
+        func name(_ node: NodeID) -> String { names[node] ?? shortID(node) }
         var output: String
         if list.processes.isEmpty {
             output = "No processes."
         } else {
             let rows = [["SERVICE", "NODE", "INST", "STATE", "PID", "UPTIME", "CPU", "RSS", "RESTARTS", "RELEASE"]]
-                + list.processes.map(row)
+                + list.processes.map { row($0, node: name($0.node)) }
             output = aligned(rows)
         }
         if !list.unreachableNodes.isEmpty {
-            output += "\n\nNot reachable, so their processes aren't listed: " + list.unreachableNodes.joined(separator: ", ")
+            output += "\n\nNot reachable, so their processes aren't listed: "
+                + list.unreachableNodes.map { id in names[NodeID(id)].map { "\($0) (\(id))" } ?? id }.joined(separator: ", ")
         }
         if !list.orphans.isEmpty {
             output += "\n\nOrphaned launchd jobs (not in desired state):\n"
@@ -68,10 +72,10 @@ public enum ProcessTable {
         }.joined(separator: "\n")
     }
 
-    private static func row(_ status: InstanceStatus) -> [String] {
+    private static func row(_ status: InstanceStatus, node: String) -> [String] {
         [
             status.service,
-            shortID(status.node),
+            node,
             String(status.instance),
             status.state.rawValue,
             status.pid.map(String.init) ?? "-",
@@ -84,6 +88,12 @@ public enum ProcessTable {
     }
 
     /// A UUID node ID is shortened to its first group (use `tender nodes` for the rest).
+    /// Hostnames by node ID. Only the head lists nodes, so this is empty for a worker's socket.
+    public static func names(_ nodes: NodeList?) -> [NodeID: String] {
+        Dictionary((nodes?.nodes ?? []).compactMap { node in node.info.hostname.map { (node.info.id, $0) } },
+                   uniquingKeysWith: { first, _ in first })
+    }
+
     static func shortID(_ node: NodeID) -> String {
         UUID(uuidString: node.rawValue) != nil ? String(node.rawValue.prefix(8)) : node.rawValue
     }
