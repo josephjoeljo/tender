@@ -62,7 +62,8 @@ public actor RegistryState {
         entry.processes = heartbeat.processes
         entry.orphans = heartbeat.orphans
         entry.skew = Self.skew(now: now, nodeClock: heartbeat.nodeClock, roundTrip: heartbeat.previousRoundTrip)
-        entry.history.record(NodeStatsPoint(heartbeat, skew: entry.skew, gap: gap, at: now))
+        let closed = entry.history.record(NodeStatsPoint(heartbeat, skew: entry.skew, gap: gap, at: now))
+        save(closed, node: heartbeat.node, now: now)
         entry.spoolBacklog = heartbeat.spoolBacklog
         entry.spoolDropped = heartbeat.spoolDropped
         entry.secretFetchErrors = heartbeat.secretFetchErrors
@@ -71,16 +72,45 @@ public actor RegistryState {
         return true
     }
 
-    public func remove(_ node: NodeID) { entries[node] = nil }
+    public func remove(_ node: NodeID) {
+        entries[node] = nil
+        try? store?.deleteStats(node: node)
+    }
+
+    /// History is a convenience: a failed write loses a point, never a heartbeat.
+    private func save(_ closed: [(tier: StatsTier, point: NodeStatsPoint)], node: NodeID, now: Date) {
+        guard let store, !closed.isEmpty else { return }
+        for (tier, point) in closed { try? store.saveStats(node: node, tier: tier, point: point) }
+        if closed.contains(where: { $0.tier == .hour }) { try? store.pruneStats(node: node, now: now) }
+    }
 
     public func knows(_ node: NodeID) -> Bool { entries[node] != nil }
 
     /// Nil for a node the head doesn't know.
     public func history(of node: NodeID, since: Date?, limit: Int) -> NodeStatsHistory? {
         guard let entry = entries[node] else { return nil }
-        let points = entry.history.points(since: since)
-        return NodeStatsHistory(node: node, points: NodeStatsPoint.downsampled(points, to: limit),
+        let points = stitched(entry.history.points(since: since), node: node, since: since)
+        guard let first = points.first, let last = points.last else {
+            return NodeStatsHistory(node: node, points: [])
+        }
+        let span = min(since ?? first.date, first.date)...max(last.date, first.date)
+        return NodeStatsHistory(node: node, points: NodeStatsPoint.downsampled(points, to: limit, over: span),
                                 downsampled: points.count > limit)
+    }
+
+    /// The finest points that cover each stretch: stored hours, then quarter hours, then
+    /// minutes, each up to where the next finer one starts, then what's in memory.
+    private func stitched(_ memory: [NodeStatsPoint], node: NodeID, since: Date?) -> [NodeStatsPoint] {
+        guard let store else { return memory }
+        var points = memory
+        var start = memory.first?.date ?? .distantFuture
+        for tier in [StatsTier.minute, .quarterHour, .hour] {
+            let stored = ((try? store.stats(node: node, tier: tier, since: since)) ?? []).filter { $0.date < start }
+            guard let first = stored.first else { continue }
+            points = stored + points
+            start = first.date
+        }
+        return points
     }
 
     public func isUp(_ node: NodeID, now: Date = Date()) -> Bool {

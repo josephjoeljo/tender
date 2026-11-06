@@ -23,6 +23,16 @@ public struct HeadStore: Sendable {
                 CREATE TABLE nodes (id TEXT PRIMARY KEY, info TEXT NOT NULL);
                 """)
         }
+        migrator.registerMigration("v2") { db in
+            // A node's stats history at a few resolutions (`StatsTier`); `ts` is the bucket's
+            // last heartbeat, in Unix seconds.
+            try db.execute(sql: """
+                CREATE TABLE node_stats (
+                    node TEXT NOT NULL, tier INTEGER NOT NULL, ts REAL NOT NULL, point TEXT NOT NULL,
+                    PRIMARY KEY (node, tier, ts)
+                ) WITHOUT ROWID;
+                """)
+        }
         try migrator.migrate(pool)
     }
 
@@ -118,6 +128,41 @@ public struct HeadStore: Sendable {
         let json = String(decoding: try JSONEncoder().encode(info), as: UTF8.self)
         try pool.write { db in
             try db.execute(sql: "INSERT OR REPLACE INTO nodes (id, info) VALUES (?, ?)", arguments: [info.id.rawValue, json])
+        }
+    }
+
+    // MARK: Stats history
+
+    public func saveStats(node: NodeID, tier: StatsTier, point: NodeStatsPoint) throws {
+        let json = String(decoding: try JSONEncoder().encode(point), as: UTF8.self)
+        try pool.write { db in
+            try db.execute(sql: "INSERT OR REPLACE INTO node_stats (node, tier, ts, point) VALUES (?, ?, ?, ?)",
+                           arguments: [node.rawValue, tier.rawValue, point.date.timeIntervalSince1970, json])
+        }
+    }
+
+    /// Oldest first, from `since` on.
+    public func stats(node: NodeID, tier: StatsTier, since: Date?) throws -> [NodeStatsPoint] {
+        try pool.read { db in
+            try String.fetchAll(db, sql: "SELECT point FROM node_stats WHERE node = ? AND tier = ? AND ts >= ? ORDER BY ts",
+                                arguments: [node.rawValue, tier.rawValue, since?.timeIntervalSince1970 ?? 0])
+                .compactMap { try? JSONDecoder().decode(NodeStatsPoint.self, from: Data($0.utf8)) }
+        }
+    }
+
+    /// Drops each tier's points older than its retention.
+    public func pruneStats(node: NodeID, now: Date = Date()) throws {
+        try pool.write { db in
+            for tier in StatsTier.allCases {
+                try db.execute(sql: "DELETE FROM node_stats WHERE node = ? AND tier = ? AND ts < ?",
+                               arguments: [node.rawValue, tier.rawValue, now.timeIntervalSince1970 - tier.retention])
+            }
+        }
+    }
+
+    public func deleteStats(node: NodeID) throws {
+        try pool.write { db in
+            try db.execute(sql: "DELETE FROM node_stats WHERE node = ?", arguments: [node.rawValue])
         }
     }
 

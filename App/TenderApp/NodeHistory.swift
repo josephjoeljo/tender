@@ -68,7 +68,7 @@ struct NodeSample: Identifiable {
 
 struct NodeHistory {
     /// As far back as the head keeps.
-    static let kept: TimeInterval = 24 * 3600
+    static let kept: TimeInterval = 190 * 86400
 
     private(set) var samples: [String: [NodeSample]] = [:]
 

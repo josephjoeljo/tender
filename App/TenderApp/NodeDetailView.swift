@@ -9,6 +9,13 @@ struct NodeDetailView: View {
     let nodeID: String
     @AppStorage("nodeHistoryWindow") private var window: Double = 900
 
+    /// Up to 24 hours the head serves heartbeats and minutes; beyond that, quarter hours
+    /// (7 and 30 days) and hours (6 months), kept in its database.
+    static let windows: [(label: String, seconds: Double)] = [
+        ("5m", 300), ("15m", 900), ("1h", 3600), ("6h", 6 * 3600), ("24h", 86400),
+        ("7d", 7 * 86400), ("30d", 30 * 86400), ("6mo", 182 * 86400),
+    ]
+
     var body: some View {
         if let node = model.nodes.first(where: { $0.id == nodeID }) {
             let now = Date()
@@ -20,25 +27,21 @@ struct NodeDetailView: View {
                         Text("History").font(.title3)
                         Spacer()
                         Picker("Window", selection: $window) {
-                            Text("5 min").tag(300.0)
-                            Text("15 min").tag(900.0)
-                            Text("1 hour").tag(3600.0)
-                            Text("6 hours").tag(21600.0)
-                            Text("24 hours").tag(86400.0)
+                            ForEach(Self.windows, id: \.seconds) { Text($0.label).tag($0.seconds) }
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
                         .fixedSize()
                     }
                     if samples.count < 2 {
-                        Label("No history yet. The head records one point per heartbeat, from when it started.", systemImage: "clock")
+                        Label("No history yet. The head records a node from its first heartbeat and keeps up to 6 months.", systemImage: "clock")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 360), spacing: 16, alignment: .top)], spacing: 16) {
                         charts(samples, node: node, span: now.addingTimeInterval(-window)...now)
                     }
-                    Text("From the head's memory (up to 24 hours, per-minute beyond the last hour), then this app's 5-second polls.")
+                    Text("From the head: every heartbeat for the last hour, then per minute, per 15 minutes beyond 2 days, and per hour beyond 35 days, up to 6 months. Then this app's 5-second polls.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

@@ -84,8 +84,34 @@ public struct NodeStatsPoint: Codable, Sendable, Equatable {
     }
 }
 
-/// A node's recent stats, from `GET /v1/nodes/:id/history`. Kept in the head's memory
-/// only, so it starts empty whenever the head restarts.
+extension NodeStatsPoint {
+    /// At most `limit` points, merging those in equal slices of time. Unlike
+    /// `downsampled(_:to:)`, a stretch with many fine points doesn't crowd out a longer one
+    /// with fewer coarse points. Oldest first in and out.
+    public static func downsampled(_ points: [NodeStatsPoint], to limit: Int, over span: ClosedRange<Date>) -> [NodeStatsPoint] {
+        guard limit > 0 else { return [] }
+        guard points.count > limit else { return points }
+        let slice = max(span.upperBound.timeIntervalSince(span.lowerBound) / Double(limit), 1)
+        var result: [NodeStatsPoint] = []
+        var run: [NodeStatsPoint] = []
+        var runSlice: Double?
+        for point in points {
+            // The newest point would start a slice of its own; it belongs to the last one.
+            let index = min((point.date.timeIntervalSince(span.lowerBound) / slice).rounded(.down), Double(limit - 1))
+            if let runSlice, runSlice != index, let merged = merged(run) {
+                result.append(merged)
+                run = []
+            }
+            runSlice = index
+            run.append(point)
+        }
+        if let merged = merged(run) { result.append(merged) }
+        return result
+    }
+}
+
+/// A node's stats, from `GET /v1/nodes/:id/history`: the last hour from memory, older
+/// stretches from the head's database at coarser resolutions, up to about 6 months.
 public struct NodeStatsHistory: Codable, Sendable, Equatable {
     public var node: NodeID
     /// Oldest first.
