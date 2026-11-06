@@ -173,6 +173,11 @@ Things about how Tender works that may not be what you'd assume.
   would lock it out. If an upgrade stops partway, `secrets-handoff.json` stays in the run
   directory with the secrets in plaintext, and installing again is refused until they're imported.
 - **Half a CA:** a head missing either `ca.crt` or `ca.key` refuses to start rather than creating a new CA.
+- **Node stats history:** the head keeps every heartbeat for the last hour in memory, and
+  per-minute (2 days), per-15-minute (35 days) and hourly (190 days) points in `head.db`, so
+  history survives a head restart. A bucket still open when the head stops is lost. Removing or
+  revoking a node deletes its history. `GET /v1/nodes/:id/history` returns at most 2000 points,
+  merged in equal slices of time.
 
 ## Cluster logs
 
