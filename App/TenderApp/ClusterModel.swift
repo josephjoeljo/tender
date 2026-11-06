@@ -11,6 +11,10 @@ final class ClusterModel {
     private(set) var nodes: [NodeSummary] = []
     private(set) var processes: [InstanceStatus] = []
     private(set) var history = NodeHistory()
+    /// Every node's service specs, for the process inspector's config. Nil until loaded.
+    private(set) var specs: SpecList?
+    /// Why the specs couldn't be read, such as a read-only token.
+    private(set) var specsError: String?
     private(set) var head: String?
     private(set) var connections = ConnectionList()
     private(set) var connectionStatus: [UUID: ConnectionStatus] = [:]
@@ -52,6 +56,7 @@ final class ClusterModel {
         self.processes = processes
         history = .preview(nodes)
         head = nodes.isEmpty ? nil : "mac-1:7071"
+        specs = .preview(processes)
     }
     #endif
 
@@ -107,6 +112,8 @@ final class ClusterModel {
         nodes = []
         processes = []
         history = NodeHistory()
+        specs = nil
+        specsError = nil
         health = .notConfigured
         savedConnectionError = nil
         do {
@@ -185,6 +192,32 @@ final class ClusterModel {
         guard let fetched = try? await client.nodeHistory(node: nodeID, since: Date().addingTimeInterval(-window)),
               requested == connections.activeID else { return }
         history.seed(nodeID, with: fetched.points)
+    }
+
+    /// Reads every node's specs. Needs a write token, since specs can hold literal values
+    /// from an `env_file`; with a read-only one this leaves the reason in `specsError`.
+    func loadSpecs() async {
+        guard let client else { return }
+        let requested = connections.activeID
+        do {
+            let fetched = try await client.specs()
+            guard requested == connections.activeID else { return }
+            specs = fetched
+            specsError = nil
+        } catch {
+            guard requested == connections.activeID else { return }
+            specsError = "\(error)"
+        }
+    }
+
+    /// The spec a process was started from, or nil for an adopted job or one not found.
+    func spec(for process: InstanceStatus) -> ServiceSpec? {
+        specs?.nodes.first { $0.node == process.node }?.services.first { $0.name == process.service }
+    }
+
+    /// The adopted-job entry for a process Tender didn't create.
+    func adoptedItem(for process: InstanceStatus) -> AdoptedItem? {
+        specs?.nodes.first { $0.node == process.node }?.adopted.first { $0.label == process.service }
     }
 
     func searchLogs(_ query: LogQuery) async throws -> LogSearchResult? {

@@ -201,8 +201,11 @@ extension InstanceStatus {
 struct ProcessTrackRow: View {
     let process: InstanceStatus
     let model: ClusterModel
+    @Environment(\.openWindow) private var openWindow
     /// Show the instance number, for services that run more than one.
     var showsInstance = false
+    /// Fewer trailing columns, for when the inspector takes up room beside the list.
+    var compact = false
 
     var body: some View {
         let kind = process.resolvedKind
@@ -212,7 +215,8 @@ struct ProcessTrackRow: View {
         } badges: {
             if process.adopted { RowBadge("ADOPTED") }
         } subtitle: {
-            Text("\(kind.title) – \(model.name(of: process.node)) · ")
+            // The list groups processes by node, so the node isn't repeated here.
+            Text("\(kind.title) · ")
             Text(process.state.rawValue)
                 .foregroundStyle(process.state == .crashed ? .red : .secondary)
             if process.restarts > 0 {
@@ -222,12 +226,27 @@ struct ProcessTrackRow: View {
         } trailing: {
             Text(StatFormat.percent(process.cpu)).frame(width: 52, alignment: .trailing).help("CPU")
             Text(StatFormat.bytes(process.stats?.footprint ?? process.rss)).frame(width: 70, alignment: .trailing).help("Memory")
-            Text(StatFormat.duration(process.uptime)).frame(width: 64, alignment: .trailing).help("Uptime")
+            if !compact {
+                Text(StatFormat.duration(process.uptime)).frame(width: 64, alignment: .trailing).help("Uptime")
+            }
+            HStack(spacing: 12) {
+                if process.state == .running {
+                    Button("Stop", systemImage: "stop.fill") { perform(.stop) }.help("Stop")
+                } else {
+                    Button("Start", systemImage: "play.fill") { perform(.start) }.help("Start")
+                }
+                Button("Restart", systemImage: "arrow.clockwise") { perform(.restart) }.help("Restart")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .frame(width: 44)
         } actions: {
             Button("Start", systemImage: "play.fill") { perform(.start) }.disabled(process.state == .running)
             Button("Stop", systemImage: "stop.fill") { perform(.stop) }.disabled(process.state == .stopped)
             Button("Restart", systemImage: "arrow.clockwise") { perform(.restart) }
             Divider()
+            Button("Open in New Window", systemImage: "arrow.up.forward.app") { openWindow(id: "process", value: ProcessRef(process)) }
             Button("Copy Name") { copy(process.service) }
         }
     }

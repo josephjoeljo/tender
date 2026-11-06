@@ -19,9 +19,20 @@ struct DashboardView: View {
             case .settings: "gearshape"
             }
         }
+
+        /// The page TENDER_APP_OPEN names, in debug builds.
+        static var atLaunch: Section? {
+            #if DEBUG
+            ProcessInfo.processInfo.environment["TENDER_APP_OPEN"].flatMap { name in
+                allCases.first { $0.rawValue.lowercased() == name.lowercased() }
+            }
+            #else
+            nil
+            #endif
+        }
     }
 
-    @State private var selection: Section? = .nodes
+    @State private var selection: Section? = Section.atLaunch ?? .nodes
 
     var body: some View {
         NavigationSplitView {
@@ -34,7 +45,11 @@ struct DashboardView: View {
                 }
             }
             .font(.body)
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .padding(.horizontal, 6)
+            .background { FloatingSidebarPanel() }
+            .navigationSplitViewColumnWidth(min: 190, ideal: 210)
         } detail: {
             if selection == .settings {
                 SettingsView(model: model, fixedWidth: false)
@@ -52,6 +67,26 @@ struct DashboardView: View {
                 }
             }
         }
+    }
+}
+
+/// The sidebar as a raised pane of glass, inset from the window's edges, with the window's
+/// own material around it.
+private struct FloatingSidebarPanel: View {
+    private let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+
+    var body: some View {
+        Group {
+            if #available(macOS 26, *) {
+                Color.clear.glassEffect(.regular, in: shape)
+            } else {
+                shape.fill(.regularMaterial)
+            }
+        }
+        .overlay { shape.strokeBorder(.white.opacity(0.12), lineWidth: 0.5) }
+        .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+        .padding(8)
+        .ignoresSafeArea()
     }
 }
 
@@ -119,24 +154,110 @@ extension InstanceStatus: @retroactive Identifiable {
     public var id: String { rowID }
 }
 
-/// Click a row to drop down the process's CPU, memory, storage, GPU, Neural Engine and energy use.
+/// Processes grouped by node, with the selected one in the inspector beside the list.
+/// Double-click a process, or use the inspector's button, to open it in its own window.
 struct ProcessesView: View {
     let model: ClusterModel
-    @State private var expanded: Set<String> = []
+    @State private var selection: String?
+    @State private var showsInspector = true
+    @State private var collapsed: Set<String> = []
+    @AppStorage("processInspectorTab") private var tab: InspectorTab = .details
+    @Environment(\.openWindow) private var openWindow
+
+    private var selected: InstanceStatus? { model.processes.first { $0.id == selection } }
+
+    /// Nodes in the order the Nodes page shows them, each with its processes.
+    private var groups: [(node: NodeID, processes: [InstanceStatus])] {
+        let byNode = Dictionary(grouping: model.processes, by: \.node)
+        let order = model.nodes.map(\.info.id) + byNode.keys.filter { id in !model.nodes.contains { $0.info.id == id } }
+            .sorted { $0.rawValue < $1.rawValue }
+        return order.compactMap { node in
+            byNode[node].map { (node, $0.sorted { ($0.service, $0.instance) < ($1.service, $1.instance) }) }
+        }
+    }
 
     var body: some View {
         let counts = Dictionary(model.processes.map { ("\($0.node.rawValue)/\($0.service)", 1) }, uniquingKeysWith: +)
-        List(model.processes) { process in
-            ExpandableRow(isExpanded: expanded.contains(process.id), toggle: { expanded.toggle(process.id) }) {
-                ProcessTrackRow(process: process, model: model,
-                                showsInstance: counts["\(process.node.rawValue)/\(process.service)", default: 0] > 1)
-            } detail: {
-                ProcessStatsPanel(process: process, node: model.nodes.first { $0.info.id == process.node })
+        let compact = showsInspector
+        List(selection: $selection) {
+            ForEach(groups, id: \.node) { group in
+                DisclosureGroup(isExpanded: Binding(get: { !collapsed.contains(group.node.rawValue) },
+                                                    set: { if $0 { collapsed.remove(group.node.rawValue) } else { collapsed.insert(group.node.rawValue) } })) {
+                    ForEach(group.processes) { process in
+                        ProcessTrackRow(process: process, model: model,
+                                        showsInstance: counts["\(process.node.rawValue)/\(process.service)", default: 0] > 1,
+                                        compact: compact)
+                            .tag(process.id)
+                    }
+                } label: {
+                    NodeGroupLabel(node: model.nodes.first { $0.info.id == group.node },
+                                   name: model.name(of: group.node), processes: group.processes)
+                }
             }
-            .alignmentGuide(.listRowSeparatorLeading) { _ in RowLayout.textLeading }
         }
         .listStyle(.inset)
+        // Lets the window's material through, so the list sits on the same glass as the sidebar.
+        .scrollContentBackground(.hidden)
+        .contextMenu(forSelectionType: String.self) { _ in
+        } primaryAction: { ids in
+            for id in ids {
+                if let process = model.processes.first(where: { $0.id == id }) { openWindow(id: "process", value: ProcessRef(process)) }
+            }
+        }
+        .overlay {
+            if model.processes.isEmpty {
+                ContentUnavailableView("No Processes", systemImage: "gearshape.2",
+                                       description: Text("Start one with tender start, or apply a service file."))
+            }
+        }
         .navigationTitle("Processes")
+        .navigationSubtitle("\(model.processes.filter { $0.state == .running }.count) running")
+        .inspector(isPresented: $showsInspector) {
+            Group {
+                if let selected {
+                    let ref = ProcessRef(selected)
+                    ProcessInspector(model: model, ref: ref, tab: $tab) { openWindow(id: "process", value: ref) }
+                } else {
+                    ContentUnavailableView("No Selection", systemImage: "sidebar.trailing",
+                                           description: Text("Pick a process to see its details, config and logs."))
+                }
+            }
+            .inspectorColumnWidth(min: 320, ideal: 380, max: 560)
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Inspector", systemImage: "sidebar.trailing") { showsInspector.toggle() }
+                    .help(showsInspector ? "Hide the inspector" : "Show the inspector")
+            }
+        }
+        .onAppear {
+            if selection == nil { selection = groups.first?.processes.first?.id }
+        }
+    }
+}
+
+/// The row a node's processes fold under, like a compose project in a container app.
+private struct NodeGroupLabel: View {
+    let node: NodeSummary?
+    let name: String
+    let processes: [InstanceStatus]
+
+    var body: some View {
+        let running = processes.filter { $0.state == .running }.count
+        let crashed = processes.filter { $0.state == .crashed }.count
+        HStack(spacing: 10) {
+            Image(systemName: node?.info.isHead == true ? "crown.fill" : "desktopcomputer")
+                .foregroundStyle(node?.up == false ? Color.secondary : node?.info.isHead == true ? .orange : .blue)
+                .frame(width: 20)
+            Text(name).font(.headline)
+            if node?.up == false { RowBadge("DOWN", tint: .red) }
+            if crashed > 0 { RowBadge("\(crashed) CRASHED", tint: .red) }
+            Spacer()
+            Text("\(running) of \(processes.count) running")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -362,5 +483,5 @@ struct ReleasesView: View {
 
 #if DEBUG
 #Preview("Nodes") { NodesView(model: .previewDegraded).frame(width: 1000, height: 500) }
-#Preview("Processes") { ProcessesView(model: .previewHealthy).frame(width: 900, height: 500) }
+#Preview("Processes") { NavigationStack { ProcessesView(model: .previewHealthy) }.frame(width: 1000, height: 600) }
 #endif
