@@ -266,3 +266,24 @@ private func tempPins() -> (PeerPins, URL) {
         try await check.verify(certificateNode: NodeID("n1"), remoteIP: "100.1.1.1")
     }
 }
+
+// MARK: The Tailscale app's LocalAPI
+
+@Test func localAPIEndpointComesFromTheAppsFiles() throws {
+    let directory = URL(filePath: "/tmp/tender-ts-\(UUID().uuidString.prefix(8))")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    #expect(TailscaleLocalAPI.endpoint(directory: directory) == nil)
+
+    try FileManager.default.createSymbolicLink(atPath: directory.appending(path: "ipnport").path(percentEncoded: false),
+                                               withDestinationPath: "49375")
+    #expect(TailscaleLocalAPI.endpoint(directory: directory) == nil, "no token file yet")
+    try Data("sekrit-token-123456\n".utf8).write(to: directory.appending(path: "sameuserproof-49375"))
+    let endpoint = try #require(TailscaleLocalAPI.endpoint(directory: directory))
+    #expect(endpoint == TailscaleLocalAPI.Endpoint(port: 49375, token: "sekrit-token-123456"))
+
+    let request = try #require(TailscaleLocalAPI.request(ip: "100.104.24.40", endpoint: endpoint))
+    #expect(request.url?.absoluteString == "http://127.0.0.1:49375/localapi/v0/whois?addr=100.104.24.40")
+    #expect(request.value(forHTTPHeaderField: "Sec-Tailscale") == "localapi")
+    #expect(request.value(forHTTPHeaderField: "Authorization") == "Basic " + Data(":sekrit-token-123456".utf8).base64EncodedString())
+}

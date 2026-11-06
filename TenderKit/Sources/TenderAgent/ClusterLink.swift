@@ -106,15 +106,25 @@ public struct ClusterIdentityStore: Sendable {
 public struct NodePeerVerifier: PeerVerifier {
     private let identity: TailscaleIdentityCheck
     private let additional: (any PeerVerifier)?
+    private let onReject: @Sendable (NodeID, String?, any Error) -> Void
 
-    public init(identity: TailscaleIdentityCheck, additional: (any PeerVerifier)? = nil) {
+    /// `onReject` hears every peer that is refused, so that a node that can't connect
+    /// leaves a reason in the log.
+    public init(identity: TailscaleIdentityCheck, additional: (any PeerVerifier)? = nil,
+                onReject: @escaping @Sendable (NodeID, String?, any Error) -> Void = { _, _, _ in }) {
         self.identity = identity
         self.additional = additional
+        self.onReject = onReject
     }
 
     public func verify(certificateNode: NodeID, remoteIP: String?) async throws {
-        try await additional?.verify(certificateNode: certificateNode, remoteIP: remoteIP)
-        try await identity.verify(certificateNode: certificateNode, remoteIP: remoteIP ?? "")
+        do {
+            try await additional?.verify(certificateNode: certificateNode, remoteIP: remoteIP)
+            try await identity.verify(certificateNode: certificateNode, remoteIP: remoteIP ?? "")
+        } catch {
+            onReject(certificateNode, remoteIP, error)
+            throw error
+        }
     }
 }
 
@@ -190,7 +200,9 @@ struct ClusterLink: Service {
             localNode: config.nodeID,
             tls: tls,
             resolver: hooks?.resolver ?? StaticNodeResolver([config.headNode: NodeAddress(host: host, port: port)]),
-            verifier: NodePeerVerifier(identity: check, additional: hooks?.verifier)
+            verifier: NodePeerVerifier(identity: check, additional: hooks?.verifier) { node, ip, error in
+                logger.warning("refused a peer", metadata: ["node": "\(node)", "ip": "\(ip ?? "?")", "error": "\(error)"])
+            }
         )
         let agent = TenderActorSystem.$wellKnownName.withValue(ActorNames.agent) {
             NodeAgent(controller: controller, headNode: config.headNode, actorSystem: system)
@@ -290,6 +302,8 @@ struct ClusterLink: Service {
     private func heartbeats(config: ClusterConfig, system: TenderActorSystem, spool: LogSpool) async {
         var registered = false
         var roundTrip: TimeInterval?
+        var lastFailure: String?
+        var failures = 0
         var info = await nodeInfo(config: config)
         let machine = SystemSampler(experimentalPower: options.experimentalPower)
         while !Task.isCancelled {
@@ -304,6 +318,8 @@ struct ClusterLink: Service {
                 if !registered {
                     try await registry.register(info)
                     registered = true
+                    lastFailure = nil
+                    failures = 0
                     logger.info("registered with head", metadata: ["head": "\(config.headNode)"])
                 }
                 let list = try await controller.list()
@@ -319,7 +335,13 @@ struct ClusterLink: Service {
             } catch {
                 // The head restarted, or is away. Re-registering on reconnect rebuilds its registry.
                 registered = false
-                logger.debug("heartbeat failed", metadata: ["error": "\(error)"])
+                // Warn when the reason changes, and now and then while it persists, so a node
+                // that can't reach its head says why without filling the log.
+                failures += 1
+                if "\(error)" != lastFailure || failures % 60 == 0 {
+                    logger.warning("can't reach the head", metadata: ["error": "\(error)", "failures": "\(failures)"])
+                    lastFailure = "\(error)"
+                }
             }
             try? await Task.sleep(for: options.heartbeatInterval)
         }
