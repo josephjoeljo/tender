@@ -60,11 +60,18 @@ struct CommonOptions: ParsableArguments {
 
     func execute(_ call: (TenderClient) async throws -> ProcessList) async throws {
         do {
-            let list = try await call(try makeClient())
-            print(json ? try encode(list) : ProcessTable.render(list))
+            let client = try makeClient()
+            let list = try await call(client)
+            print(json ? try encode(list) : await table(list, client: client))
         } catch let error as TenderClientError {
             try fail(error)
         }
+    }
+
+    /// The process table with hostnames, when the daemon can list nodes (only the head can).
+    func table(_ list: ProcessList, client: TenderClient) async -> String {
+        guard !list.processes.isEmpty || !list.unreachableNodes.isEmpty else { return ProcessTable.render(list) }
+        return ProcessTable.render(list, names: ProcessTable.names(try? await client.nodes()))
     }
 
     func encode(_ value: some Encodable) throws -> String {

@@ -248,3 +248,22 @@ private func apiErrorCode(_ call: () async throws -> ProcessList) async -> Strin
     #expect(table.contains("com.olympsis.tender.svc.ghost.0"))
     #expect(ProcessTable.render(ProcessList(processes: [])) == "No processes.")
 }
+
+@Test func tableNamesNodesByHostnameWhenItKnowsThem() {
+    let head = NodeID("88e68331-3a92-4a5e-88eb-1992d20c4763")
+    let worker = NodeID("7b556fd5-dbe2-49a8-ba92-40482b8ff96d")
+    let list = ProcessList(processes: [InstanceStatus(service: "zomboid", instance: 0, node: head, state: .running)],
+                           unreachableNodes: [worker.rawValue])
+    let nodes = NodeList(nodes: [
+        NodeSummary(info: NodeInfo(id: head, version: "1", macOS: "x", hardware: "y", hostname: "mac-mini"),
+                    up: true, lastHeartbeatAge: 1, instanceCount: 1, crashedCount: 0),
+        NodeSummary(info: NodeInfo(id: worker, version: "1", macOS: "x", hardware: "y", hostname: "mac-mini-2"),
+                    up: false, lastHeartbeatAge: nil, instanceCount: 0, crashedCount: 0),
+    ])
+    let named = ProcessTable.render(list, names: ProcessTable.names(nodes))
+    #expect(named.split(separator: "\n")[1].split(separator: " ")[1] == "mac-mini")
+    #expect(named.contains("Not reachable, so their processes aren't listed: mac-mini-2 (\(worker.rawValue))"))
+    // Without the node list (a worker's socket), the short ID.
+    #expect(ProcessTable.render(list).split(separator: "\n")[1].split(separator: " ")[1] == "88e68331")
+    #expect(ProcessTable.names(nil).isEmpty)
+}
