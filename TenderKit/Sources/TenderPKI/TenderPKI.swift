@@ -363,7 +363,15 @@ public struct TailscaleCLI: TailscaleRunning {
         candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
+    /// The app's LocalAPI first, because the app's CLI refuses to run from a LaunchDaemon
+    /// ("The Tailscale GUI failed to start"), which is where `tenderd` runs. Then the CLI,
+    /// for a `tailscaled` install that has no such files.
     public func whois(ip: String) async throws -> Data {
+        if let endpoint = TailscaleLocalAPI.endpoint() {
+            do { return try await TailscaleLocalAPI.whois(ip: ip, endpoint: endpoint) } catch {
+                guard Self.executable() != nil else { throw error }
+            }
+        }
         guard let executable = Self.executable() else { throw CLIError.notInstalled }
         return try await Self.run(executable: executable, arguments: ["whois", "--json", ip])
     }
@@ -423,5 +431,52 @@ public struct TailscaleCLI: TailscaleRunning {
                 continuation.resume(throwing: error)
             }
         }
+    }
+}
+
+/// The macOS Tailscale app's LocalAPI: a localhost port, found through `ipnport`, with a token
+/// in `sameuserproof-<port>` (readable by root and admins). It works without the app's CLI,
+/// which needs a GUI session.
+public enum TailscaleLocalAPI {
+    public struct Endpoint: Equatable, Sendable {
+        public var port: Int
+        public var token: String
+    }
+
+    public static let directory = URL(filePath: "/Library/Tailscale")
+
+    public static func endpoint(directory: URL = TailscaleLocalAPI.directory) -> Endpoint? {
+        guard let target = try? FileManager.default.destinationOfSymbolicLink(
+                atPath: directory.appending(path: "ipnport").path(percentEncoded: false)),
+              let port = Int(target),
+              let proof = try? String(contentsOf: directory.appending(path: "sameuserproof-\(port)"), encoding: .utf8)
+        else { return nil }
+        let token = proof.trimmingCharacters(in: .whitespacesAndNewlines)
+        return token.isEmpty ? nil : Endpoint(port: port, token: token)
+    }
+
+    static func request(ip: String, endpoint: Endpoint) -> URLRequest? {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = endpoint.port
+        components.path = "/localapi/v0/whois"
+        components.queryItems = [URLQueryItem(name: "addr", value: ip)]
+        guard let url = components.url else { return nil }
+        var request = URLRequest(url: url, timeoutInterval: 5)
+        request.setValue("localapi", forHTTPHeaderField: "Sec-Tailscale")
+        request.setValue("Basic " + Data(":\(endpoint.token)".utf8).base64EncodedString(), forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    public static func whois(ip: String, endpoint: Endpoint) async throws -> Data {
+        guard let request = request(ip: ip, endpoint: endpoint) else {
+            throw TailscaleCLI.CLIError.failed("can't build a LocalAPI request for \(ip)")
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw TailscaleCLI.CLIError.failed("Tailscale LocalAPI answered \((response as? HTTPURLResponse)?.statusCode ?? 0) for \(ip)")
+        }
+        return data
     }
 }
