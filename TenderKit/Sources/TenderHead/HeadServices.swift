@@ -441,6 +441,31 @@ public final class HeadServices: Sendable {
         system?.disconnect(node)
     }
 
+    /// Deletes a node's records: its registry entry, its saved info, its log progress and its
+    /// Tailscale pin (and its stored log lines, with `purgeLogs`). The certificate is revoked
+    /// too, or the node would just register again. A node that's up must be removed with
+    /// `force`, since it was probably meant to leave instead.
+    func remove(node: NodeID, force: Bool, purgeLogs: Bool) async throws -> Int {
+        guard node != options.nodeID else {
+            throw NodeCallError(code: "invalid_node", message: "The head can't remove itself.", httpStatus: 409)
+        }
+        let known = await state.knows(node)
+        let stored = try store.knows(node: node)
+        guard known || stored else {
+            throw NodeCallError(code: "unknown_node", message: "No node '\(node)'. See `tender nodes`.", httpStatus: 404)
+        }
+        if !force, await state.isUp(node) {
+            throw NodeCallError(code: "node_up",
+                                message: "Node '\(node)' is up. Run `tender leave` on it, or pass --force to remove it anyway.",
+                                httpStatus: 409)
+        }
+        try await revoke(node: node)
+        PeerPins.standard(environment).forget(node)
+        let purged = try await logs.forget(node: node, purgeLines: purgeLogs)
+        logger.notice("node removed", metadata: ["node": "\(node)", "logLinesPurged": "\(purged)"])
+        return purged
+    }
+
     func createAPIToken(_ request: APITokenCreateRequest) throws -> APITokenCreated {
         guard !request.name.isEmpty else {
             throw NodeCallError(code: "invalid_name", message: "A token needs a name.", httpStatus: 400)
@@ -668,6 +693,14 @@ public final class HeadServices: Sendable {
         router.post("/v1/nodes/:id/revoke") { [self] _, context in
             await respond {
                 try await revoke(node: await resolve(node: try context.parameters.requireDecoded("id")))
+                return NodeList(nodes: await state.summaries())
+            }
+        }
+        router.delete("/v1/nodes/:id") { [self] request, context in
+            await respond {
+                let query = request.uri.queryParameters
+                _ = try await remove(node: await resolve(node: try context.parameters.requireDecoded("id")),
+                                     force: query.get("force") == "true", purgeLogs: query.get("purge_logs") == "true")
                 return NodeList(nodes: await state.summaries())
             }
         }

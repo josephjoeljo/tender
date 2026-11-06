@@ -66,6 +66,8 @@ public actor RegistryState {
 
     public func remove(_ node: NodeID) { entries[node] = nil }
 
+    public func knows(_ node: NodeID) -> Bool { entries[node] != nil }
+
     public func isUp(_ node: NodeID, now: Date = Date()) -> Bool {
         guard let last = entries[node]?.lastHeartbeat else { return false }
         return now.timeIntervalSince(last) < downAfter

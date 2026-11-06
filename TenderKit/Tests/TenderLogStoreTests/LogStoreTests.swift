@@ -188,3 +188,22 @@ private let day1 = Date(timeIntervalSince1970: 1_700_000_000)
     print("log store search: \(searchTime)")
     #expect(searchTime < .seconds(2))
 }
+
+@Test func forgettingANodeClearsItsProgressAndCanPurgeItsLines() async throws {
+    let (store, directory) = try makeStore()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let other = NodeID("other")
+    _ = try await store.ingest(LogBatch(node: node, previousSeq: 0, records: [record(1, "timeout here"), record(2, "fine")]), now: day1)
+    _ = try await store.ingest(LogBatch(node: other, previousSeq: 0, records: [record(1, "timeout there")]), now: day1)
+
+    // Keeping the lines: only the progress goes, so a node that takes the ID starts clean.
+    #expect(try await store.forget(node: node, purgeLines: false) == 0)
+    #expect(await store.ingestedLines()[node] == nil)
+    #expect(try await store.search(LogQuery()).entries.count == 3)
+
+    #expect(try await store.forget(node: node, purgeLines: true) == 2)
+    #expect(try await store.search(LogQuery()).entries.map(\.node) == [other])
+    // Search by text no longer finds the purged lines (the FTS index was cleaned too).
+    #expect(try await store.search(LogQuery(text: "timeout")).entries.map(\.line) == ["timeout there"])
+    #expect(await store.ingestedLines()[other] == 1)
+}

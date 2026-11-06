@@ -152,6 +152,30 @@ public actor LogStore {
 
     public func ingestedLines() -> [NodeID: UInt64] { ingested }
 
+    /// Forgets a removed node's ingest progress, so a node that later takes the ID starts
+    /// clean. With `purgeLines`, also deletes its stored lines and gaps from every day file
+    /// still on disk (days already offloaded are left alone). Returns the lines deleted.
+    @discardableResult
+    public func forget(node: NodeID, purgeLines: Bool) throws -> Int {
+        acked[node] = nil
+        ingested[node] = nil
+        try meta.write { db in try db.execute(sql: "DELETE FROM node_progress WHERE node = ?", arguments: [node.rawValue]) }
+        guard purgeLines else { return 0 }
+        var deleted = 0
+        for day in try dayFiles() {
+            try database(day: day).write { db in
+                // The FTS table indexes `logs` without storing the text, so its entries go first.
+                try db.execute(sql: """
+                    INSERT INTO logs_fts (logs_fts, rowid, line) SELECT 'delete', id, line FROM logs WHERE node = ?
+                    """, arguments: [node.rawValue])
+                try db.execute(sql: "DELETE FROM logs WHERE node = ?", arguments: [node.rawValue])
+                deleted += db.changesCount
+                try db.execute(sql: "DELETE FROM gaps WHERE node = ?", arguments: [node.rawValue])
+            }
+        }
+        return deleted
+    }
+
     // MARK: Reading
 
     public func dayFiles() throws -> [String] {

@@ -120,6 +120,14 @@ public struct TenderClient: Sendable {
         try await send(.POST, "/v1/nodes/\(try escaped(id))/revoke")
     }
 
+    /// Deletes the node's records on the head. Only over the socket.
+    public func removeNode(_ id: String, force: Bool = false, purgeLogs: Bool = false) async throws -> NodeList {
+        var query: [String] = []
+        if force { query.append("force=true") }
+        if purgeLogs { query.append("purge_logs=true") }
+        return try await send(.DELETE, "/v1/nodes/\(try escaped(id))" + (query.isEmpty ? "" : "?" + query.joined(separator: "&")))
+    }
+
     public func exportCA() async throws -> CertificateExport {
         try await send(.GET, "/v1/ca/export")
     }

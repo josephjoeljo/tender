@@ -107,7 +107,7 @@ extension Tender {
     }
 
     struct Node: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Manage a node.", subcommands: [Revoke.self])
+        static let configuration = CommandConfiguration(abstract: "Manage a node.", subcommands: [Revoke.self, Remove.self])
 
         struct Revoke: AsyncParsableCommand {
             static let configuration = CommandConfiguration(abstract: "Refuse a node's certificate from now on.")
@@ -116,6 +116,19 @@ extension Tender {
 
             func run() async throws {
                 try await options.run({ try await $0.revokeNode(id) }) { _ in "Revoked \(id)" }
+            }
+        }
+
+        struct Remove: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Delete a node's records on the head, such as a stale one, and revoke its certificate.")
+            @Argument(help: "Node ID (a UUID), or its hostname if only one node has it. See `tender nodes`.") var id: String
+            @Flag(help: "Remove the node even though it is up.") var force = false
+            @Flag(help: "Also delete its stored log lines. They are kept by default.") var purgeLogs = false
+            @OptionGroup var options: CommonOptions
+
+            func run() async throws {
+                try await options.run({ try await $0.removeNode(id, force: force, purgeLogs: purgeLogs) }) { _ in "Removed \(id)" }
             }
         }
     }

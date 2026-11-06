@@ -340,6 +340,33 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     }
 }
 
+@Test func removingANodeDeletesItsRecordsAndRefusesLiveOnesWithoutForce() async throws {
+    try await withCluster { head, worker async throws in
+        // Up, so it needs --force.
+        do {
+            _ = try await head.client.removeNode("worker")
+            Issue.record("an up node must not be removed without force")
+        } catch let error as TenderClientError {
+            #expect(error.code == "node_up")
+        }
+        #expect(try await head.client.nodes().nodes.count == 2)
+
+        _ = try await head.client.removeNode("worker", force: true, purgeLogs: true)
+        #expect(try await head.client.nodes().nodes.map(\.info.id) == [NodeID("head")])
+
+        // Unknown IDs and the head itself are refused. A repeat removal is fine: it is revoked, so still known.
+        for (id, code) in [("nope", "unknown_node"), ("head", "invalid_node")] {
+            do {
+                _ = try await head.client.removeNode(id, force: true)
+                Issue.record("\(id) must be refused")
+            } catch let error as TenderClientError {
+                #expect(error.code == code)
+            }
+        }
+        _ = try await head.client.removeNode("worker", force: true)
+    }
+}
+
 // MARK: Public API
 
 @Test func publicAPIRequiresTokensAndHonorsScopes() async throws {

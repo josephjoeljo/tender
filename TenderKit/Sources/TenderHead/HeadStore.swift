@@ -92,6 +92,15 @@ public struct HeadStore: Sendable {
         }
     }
 
+    /// Whether the head has any record of the node: registered, or revoked earlier.
+    public func knows(node: NodeID) throws -> Bool {
+        try pool.read { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT EXISTS (SELECT 1 FROM nodes WHERE id = ?1 UNION ALL SELECT 1 FROM revoked_nodes WHERE node = ?1)
+                """, arguments: [node.rawValue]) == true
+        }
+    }
+
     /// A join token minted after the revocation is an admin letting the node back in.
     public func clearRevocation(node: NodeID) throws {
         try pool.write { db in
