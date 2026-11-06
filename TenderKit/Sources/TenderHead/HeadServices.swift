@@ -868,7 +868,8 @@ struct AddressBoundServer: Service {
         try await cancelWhenGracefulShutdown {
             while !Task.isCancelled {
                 // No timeout: the transport (ClusterLink) is what gives up, and exits the process.
-                guard let host = try await monitor.waitForHost(timeout: nil, logger: logger) else { return }
+                // Silent: the transport already logs each retry.
+                guard let host = try await monitor.waitForHost(timeout: nil, logger: nil) else { return }
                 var failed = false
                 do {
                     let group = ServiceGroup(services: [try await build(host)], gracefulShutdownSignals: [], logger: logger)

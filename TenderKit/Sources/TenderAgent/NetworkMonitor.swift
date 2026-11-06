@@ -49,7 +49,7 @@ public final class NetworkMonitor: Sendable {
 
     /// Polls with backoff until there is an address, logging each retry. With a `timeout`,
     /// throws `NetworkWaitError` if there is still none. Returns nil only if cancelled.
-    public func waitForHost(timeout: Duration?, logger: Logger) async throws -> String? {
+    public func waitForHost(timeout: Duration?, logger: Logger?) async throws -> String? {
         let clock = ContinuousClock()
         let start = clock.now
         var delay: Duration = .seconds(1)
@@ -59,7 +59,7 @@ public final class NetworkMonitor: Sendable {
             let waited = clock.now - start
             if let timeout, waited >= timeout { throw NetworkWaitError(waited: waited) }
             attempt += 1
-            logger.warning("waiting for a Tailscale address", metadata: [
+            logger?.warning("waiting for a Tailscale address", metadata: [
                 "attempt": "\(attempt)", "waited": "\(waited.components.seconds)s", "retryIn": "\(delay.components.seconds)s",
             ])
             do { try await Task.sleep(for: delay) } catch { return nil }
