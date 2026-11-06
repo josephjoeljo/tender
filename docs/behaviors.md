@@ -83,8 +83,17 @@ Things about how Tender works that may not be what you'd assume.
 
 ## Cluster
 
-- **Node names:** a node's ID must match its Tailscale machine name, or the transport refuses
-  it. A name already in use can't be joined until `tender node revoke` frees it.
+- **Node IDs:** a node's ID is a UUID made on first run and kept in `/opt/tender/node-id`
+  (`--node-id` overrides it). The hostname is only a label, so renaming a Mac changes nothing.
+  An ID already in use can't be joined until `tender node revoke` or `tender node remove` frees it.
+- **Tailscale pinning:** the first Tailscale machine a node ID connects from is remembered in
+  `peer-pins.json` (trust on first use), and later connections must come from the same machine,
+  whatever either is called. After moving a node to new hardware, `tender node remove` it first.
+- **Waiting for Tailscale:** `tenderd` doesn't listen for peers until Tailscale has an address
+  (it never falls back to loopback). It retries with backoff, exits after `--tailscale-wait`
+  seconds (default 300) so launchd restarts it, and rebinds if the address changes.
+  `tender status` shows where it stands. The plist's `ThrottleInterval` applies after a
+  reinstall (`tender daemon install --system`).
 - **Commands flow from the head:** a node only takes commands from its head. Workers can't
   command each other, even with valid certificates.
 - **Write tokens run code:** an API token with `write` scope can start any executable on any
@@ -97,7 +106,7 @@ Things about how Tender works that may not be what you'd assume.
 - **Socket-only:** `tender adopt`, join and API tokens, CA export and cloud credentials work
   over the local socket only, never with `--remote`.
 - **Certificates expire** after 2 years and aren't renewed automatically yet. The head reissues
-  its own at each start, but a worker needs `tender node revoke` on the head, then `tender leave` and `tender join`.
+  its own at each start, but a worker needs `tender node remove` on the head, then `tender leave` and `tender join`.
 - **Upgrades:** Keychain items trust the binary that wrote them, so `tender daemon install
   --system` moves secrets from the old `tenderd` to the new one. Replacing the binary by hand
   would lock it out. If an upgrade stops partway, `secrets-handoff.json` stays in the run

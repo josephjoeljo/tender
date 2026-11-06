@@ -162,7 +162,7 @@ sudo tender daemon install --system --role head
 
 ### Add workers
 
-Each node's Tailscale machine name must match its Tender node ID, and your tailnet needs the ACL in [`docs/ops/cluster.md`](docs/ops/cluster.md#tailscale-acl).
+Nodes are identified by a UUID, not their Tailscale name, and your tailnet needs the ACL in [`docs/ops/cluster.md`](docs/ops/cluster.md#tailscale-acl).
 
 On the head, create a join token. It works once and expires after 15 minutes:
 
