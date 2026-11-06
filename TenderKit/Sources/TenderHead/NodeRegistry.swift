@@ -16,6 +16,7 @@ public actor RegistryState {
         var spoolBacklog = 0
         var spoolDropped = 0
         var secretFetchErrors = 0
+        var stats: NodeStats?
     }
 
     public static func skew(now: Date, nodeClock: Date, roundTrip: TimeInterval?) -> TimeInterval {
@@ -37,6 +38,13 @@ public actor RegistryState {
         entries = loaded
     }
 
+    /// The node with this ID, else the only one with this hostname.
+    public func resolve(_ reference: String) -> NodeID? {
+        if entries[NodeID(reference)] != nil { return NodeID(reference) }
+        let named = entries.values.filter { $0.info.hostname?.lowercased() == reference.lowercased() }
+        return named.count == 1 ? named[0].info.id : nil
+    }
+
     public func register(_ info: NodeInfo) throws {
         var entry = entries[info.id] ?? Entry(info: info)
         entry.info = info
@@ -55,11 +63,14 @@ public actor RegistryState {
         entry.spoolBacklog = heartbeat.spoolBacklog
         entry.spoolDropped = heartbeat.spoolDropped
         entry.secretFetchErrors = heartbeat.secretFetchErrors
+        entry.stats = heartbeat.stats
         entries[heartbeat.node] = entry
         return true
     }
 
     public func remove(_ node: NodeID) { entries[node] = nil }
+
+    public func knows(_ node: NodeID) -> Bool { entries[node] != nil }
 
     public func isUp(_ node: NodeID, now: Date = Date()) -> Bool {
         guard let last = entries[node]?.lastHeartbeat else { return false }
@@ -84,7 +95,8 @@ public actor RegistryState {
                 clockSkew: entry.skew,
                 spoolBacklog: entry.spoolBacklog,
                 spoolDropped: entry.spoolDropped,
-                secretFetchErrors: entry.secretFetchErrors
+                secretFetchErrors: entry.secretFetchErrors,
+                stats: entry.stats
             )
         }.sorted { $0.info.id.rawValue < $1.info.id.rawValue }
     }

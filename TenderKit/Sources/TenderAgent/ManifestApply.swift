@@ -5,7 +5,7 @@ import TenderCore
 /// diffs and applies its own part, against its own state, which is the source of truth.
 extension ProcessController {
     func localNode() throws -> NodeID {
-        try identities?.config()?.nodeID ?? NodeID(defaultNodeID())
+        try identities?.config()?.nodeID ?? NodeIdentity.current(environment: environment)
     }
 
     func specs() async throws -> NodeSpecs {

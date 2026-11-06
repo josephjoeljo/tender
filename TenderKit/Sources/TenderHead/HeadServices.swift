@@ -64,10 +64,14 @@ public final class HeadServices: Sendable {
     private let secrets: any SecretStore
     private let authority: CertificateAuthority
     private let holder = NIOLockedValueBox<(system: TenderActorSystem?, registry: HeadRegistry?)>((nil, nil))
+    private let issuedFor = NIOLockedValueBox<String?>(nil)
     private let logger: Logger
+    /// Where the head listens. Share it with the agent's `ClusterOptions.network`.
+    public let network: NetworkMonitor
 
     public init(environment: TenderEnvironment, secrets: any SecretStore, options: HeadOptions,
-                logger: Logger = Logger(label: "tender.head")) throws {
+                network: NetworkMonitor? = nil, logger: Logger = Logger(label: "tender.head")) throws {
+        self.network = network ?? NetworkMonitor(explicitHost: options.apiHost)
         self.environment = environment
         self.secrets = secrets
         self.options = options
@@ -77,7 +81,7 @@ public final class HeadServices: Sendable {
         logs = try LogStore(directory: environment.root.appending(path: "logstore"))
         audit = try AuditLog(directory: environment.root.appending(path: "logstore"))
         authority = try Self.loadOrCreateAuthority(secrets: secrets)
-        try Self.issueOwnIdentity(environment: environment, secrets: secrets, authority: authority, options: options)
+        try refreshIdentity(host: options.apiHost)
     }
 
     /// Creates the CA on first start. Losing it means every node has to re-join, so
@@ -123,28 +127,43 @@ public final class HeadServices: Sendable {
         return backup
     }
 
-    /// The head is a node too. Its certificate is reissued at each start so that it
-    /// always names the current addresses, while its key stays the same.
-    private static func issueOwnIdentity(environment: TenderEnvironment, secrets: any SecretStore,
-                                         authority: CertificateAuthority, options: HeadOptions) throws {
-        let key: NodeKey
-        if let existing = try secrets.read(ClusterSecrets.nodeKey) {
-            key = NodeKey(privateKeyPEM: String(decoding: existing, as: UTF8.self))
-        } else {
-            key = .generate()
-            try secrets.write(ClusterSecrets.nodeKey, Data(key.privateKeyPEM.utf8))
+    /// The head is a node too. Its certificate is reissued at each start, and again when
+    /// its address appears or changes, so that it always names the current addresses.
+    /// Its key stays the same.
+    private func refreshIdentity(host: String?) throws {
+        try issuedFor.withLockedValue { issued in
+            let key: NodeKey
+            if let existing = try secrets.read(ClusterSecrets.nodeKey) {
+                key = NodeKey(privateKeyPEM: String(decoding: existing, as: UTF8.self))
+            } else {
+                key = .generate()
+                try secrets.write(ClusterSecrets.nodeKey, Data(key.privateKeyPEM.utf8))
+            }
+            var names = options.advertisedNames
+            if let host { names.append(host) }
+            names.append("127.0.0.1")
+            let ips = names.filter { $0.first?.isNumber == true || $0.contains(":") }
+            let dns = names.filter { !ips.contains($0) }
+            let certificate = try authority.sign(csrPEM: try key.makeCSR(nodeID: options.nodeID), nodeID: options.nodeID,
+                                                 dnsNames: dns, ipAddresses: ips)
+            try secrets.write(ClusterSecrets.nodeCertificate, Data(certificate.utf8))
+            let reach = options.advertisedNames.first ?? host ?? "127.0.0.1"
+            try ClusterIdentityStore(environment: environment, secrets: secrets).save(
+                ClusterConfig(nodeID: options.nodeID, headNode: options.nodeID, headAgentAddress: "\(reach):\(options.agentPort)"))
+            issued = host
         }
-        var names = options.advertisedNames
-        if let host = options.apiHost { names.append(host) }
-        names.append("127.0.0.1")
-        let ips = names.filter { $0.first?.isNumber == true || $0.contains(":") }
-        let dns = names.filter { !ips.contains($0) }
-        let certificate = try authority.sign(csrPEM: try key.makeCSR(nodeID: options.nodeID), nodeID: options.nodeID,
-                                             dnsNames: dns, ipAddresses: ips)
-        try secrets.write(ClusterSecrets.nodeCertificate, Data(certificate.utf8))
-        let host = options.advertisedNames.first ?? options.apiHost ?? "127.0.0.1"
-        try ClusterIdentityStore(environment: environment, secrets: secrets).save(
-            ClusterConfig(nodeID: options.nodeID, headNode: options.nodeID, headAgentAddress: "\(host):\(options.agentPort)"))
+    }
+
+    /// Called before the transport binds to `host`. Does nothing if the certificate
+    /// already names it.
+    func addressReady(_ host: String) {
+        if issuedFor.withLockedValue({ $0 }) == host { return }
+        do {
+            try refreshIdentity(host: host)
+            logger.info("reissued the head certificate", metadata: ["address": "\(host)"])
+        } catch {
+            logger.error("couldn't reissue the head certificate", metadata: ["error": "\(error)"])
+        }
     }
 
     public var caFingerprint: String { authority.fingerprint }
@@ -165,13 +184,17 @@ public final class HeadServices: Sendable {
             services: { [self] in
                 let cloud = CloudServices(environment: environment, secrets: secrets)
                 var services: [any Service] = [
-                    try makePublicAPI(),
+                    AddressBoundServer(name: "public API", monitor: network, logger: logger) { [self] host in
+                        addressReady(host)
+                        return try makePublicAPI(host: host)
+                    },
                     LogRetentionService(logs: logs, logger: logger),
                     NightlyOffload(logs: logs, audit: audit, uploader: { try cloud.uploader() }),
                 ]
                 if let metrics = makeMetricsServer() { services.append(metrics) }
                 return services
-            }
+            },
+            addressReady: { [self] host in addressReady(host) }
         )
     }
 
@@ -179,7 +202,12 @@ public final class HeadServices: Sendable {
 
     private func agent(on node: NodeID) throws -> $NodeAgentProtocol<TenderActorSystem> {
         guard let system else {
-            throw NodeCallError(code: "not_ready", message: "The cluster transport isn't up yet.", httpStatus: 503)
+            let state = network.state
+            throw NodeCallError(code: "not_ready",
+                                message: state.kind == .waitingForTailscale
+                                    ? "The cluster transport isn't up: \(state.summary)."
+                                    : "The cluster transport isn't up yet.",
+                                httpStatus: 503)
         }
         return try $NodeAgentProtocol.resolve(id: ActorIdentity(node: node, name: ActorNames.agent), using: system)
     }
@@ -212,9 +240,21 @@ public final class HeadServices: Sendable {
         return combined
     }
 
+    /// A node by ID, or by hostname when exactly one node goes by it (hostnames are only
+    /// labels, and two Macs can share one). Anything else is taken as an ID.
+    func resolve(node reference: String) async -> NodeID {
+        await state.resolve(reference) ?? NodeID(reference)
+    }
+
+    /// The `?node=` of a request, defaulting to the head.
+    private func resolve(query request: Request) async -> NodeID {
+        guard let reference = request.uri.queryParameters.get("node") else { return options.nodeID }
+        return await resolve(node: String(reference))
+    }
+
     /// Which nodes a by-name command means: the one asked for, or everywhere the service runs.
     private func targets(service: String, node: String?) async -> [NodeID] {
-        if let node { return [NodeID(node)] }
+        if let node { return [await resolve(node: node)] }
         let running = await state.nodes(running: service)
         return running.isEmpty ? [options.nodeID] : running
     }
@@ -231,7 +271,7 @@ public final class HeadServices: Sendable {
     /// A service's secret goes where the service runs, like other by-name commands. A
     /// shared one has no such place, so it needs a node or every node.
     private func secretTargets(scope: String, node: String?, all: Bool) async throws -> [NodeID] {
-        if let node { return [NodeID(node)] }
+        if let node { return [await resolve(node: node)] }
         if all { return Set(await state.upNodes() + [options.nodeID]).sorted { $0.rawValue < $1.rawValue } }
         guard scope != "shared" else {
             throw NodeCallError(code: "node_required", message: "A shared secret needs a node, or all nodes.", httpStatus: 400)
@@ -306,6 +346,11 @@ public final class HeadServices: Sendable {
     /// node that fails is reported and the others go ahead; nothing is rolled back. `prune`
     /// prunes the nodes the file names; `pruneAll` also asks every other node that's up.
     func apply(_ request: ApplyRequest) async throws -> ApplyResponse {
+        // A file can name a node by hostname; the rest works in IDs.
+        var request = request
+        for index in request.items.indices {
+            if let node = request.items[index].node { request.items[index].node = await resolve(node: node.rawValue) }
+        }
         let known = Set(await state.summaries().map(\.info.id) + [options.nodeID])
         do {
             try Manifest(items: request.items).validate(knownNodes: known, defaultNode: options.nodeID)
@@ -432,14 +477,16 @@ public final class HeadServices: Sendable {
     /// address, and Tailscale ACLs decide who reaches it. It carries no log lines or secrets.
     func makeMetricsServer() -> (any Service)? {
         guard let port = options.metricsPort else { return nil }
-        let router = Router()
-        router.get("/metrics") { [self] _, _ in
-            Response(status: .ok, headers: [.contentType: "text/plain; version=0.0.4"],
-                     body: ResponseBody(byteBuffer: ByteBuffer(string: await metricsText())))
+        return AddressBoundServer(name: "metrics", monitor: network, logger: logger) { [self] host in
+            let router = Router()
+            router.get("/metrics") { [self] _, _ in
+                Response(status: .ok, headers: [.contentType: "text/plain; version=0.0.4"],
+                         body: ResponseBody(byteBuffer: ByteBuffer(string: await metricsText())))
+            }
+            return Application(router: router,
+                               configuration: .init(address: .hostname(host, port: port), serverName: nil),
+                               logger: logger)
         }
-        return Application(router: router,
-                           configuration: .init(address: .hostname(options.apiHost ?? "127.0.0.1", port: port), serverName: nil),
-                           logger: logger)
     }
 
     func metricsText() async -> String {
@@ -470,7 +517,7 @@ public final class HeadServices: Sendable {
         // the head answers to, or take over a node that already exists.
         guard request.nodeID != options.nodeID,
               !options.advertisedNames.contains(request.nodeID.rawValue),
-              options.apiHost != request.nodeID.rawValue,
+              network.state.address != request.nodeID.rawValue,
               request.nodeID.rawValue != "127.0.0.1", request.nodeID.rawValue.lowercased() != "localhost" else {
             throw NodeCallError(code: "invalid_node", message: "'\(request.nodeID)' is a name of the head.", httpStatus: 409)
         }
@@ -490,7 +537,7 @@ public final class HeadServices: Sendable {
             throw NodeCallError(code: "invalid_token", message: "That join token is expired or already used.", httpStatus: 401)
         }
         try store.clearRevocation(node: request.nodeID)
-        let host = options.advertisedNames.first ?? options.apiHost ?? "127.0.0.1"
+        let host = options.advertisedNames.first ?? network.state.address ?? "127.0.0.1"
         logger.info("node joined", metadata: ["node": "\(request.nodeID)"])
         return JoinResponse(certificatePEM: certificate, caPEM: authority.certificatePEM, headNode: options.nodeID,
                             headAgentAddress: "\(host):\(options.agentPort)")
@@ -503,6 +550,31 @@ public final class HeadServices: Sendable {
         try store.revoke(node: node)
         await state.remove(node)
         system?.disconnect(node)
+    }
+
+    /// Deletes a node's records: its registry entry, its saved info, its log progress and its
+    /// Tailscale pin (and its stored log lines, with `purgeLogs`). The certificate is revoked
+    /// too, or the node would just register again. A node that's up must be removed with
+    /// `force`, since it was probably meant to leave instead.
+    func remove(node: NodeID, force: Bool, purgeLogs: Bool) async throws -> Int {
+        guard node != options.nodeID else {
+            throw NodeCallError(code: "invalid_node", message: "The head can't remove itself.", httpStatus: 409)
+        }
+        let known = await state.knows(node)
+        let stored = try store.knows(node: node)
+        guard known || stored else {
+            throw NodeCallError(code: "unknown_node", message: "No node '\(node)'. See `tender nodes`.", httpStatus: 404)
+        }
+        if !force, await state.isUp(node) {
+            throw NodeCallError(code: "node_up",
+                                message: "Node '\(node)' is up. Run `tender leave` on it, or pass --force to remove it anyway.",
+                                httpStatus: 409)
+        }
+        try await revoke(node: node)
+        PeerPins.standard(environment).forget(node)
+        let purged = try await logs.forget(node: node, purgeLines: purgeLogs)
+        logger.notice("node removed", metadata: ["node": "\(node)", "logLinesPurged": "\(purged)"])
+        return purged
     }
 
     func createAPIToken(_ request: APITokenCreateRequest) throws -> APITokenCreated {
@@ -551,7 +623,7 @@ public final class HeadServices: Sendable {
             }
         }
         router.get("/v1/secrets") { [self] request, _ in
-            await respond { await clusterSecrets(nodes: request.uri.queryParameters.get("node").map { [NodeID($0)] }) }
+            await respond { await clusterSecrets(nodes: await request.uri.queryParameters.get("node").asyncMap { [await resolve(node: String($0))] }) }
         }
         // The audit log records the path, so the name, but never the body.
         router.put("/v1/secrets/:scope/:name") { [self] request, context in
@@ -627,7 +699,7 @@ public final class HeadServices: Sendable {
         }
         router.get("/v1/releases/:service") { [self] request, context in
             await respond {
-                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                let target = await resolve(query: request)
                 let service = try context.parameters.requireDecoded("service")
                 return try await translatingTransport(target) { try await agent(on: target).releases(service: service) }
             }
@@ -652,7 +724,7 @@ public final class HeadServices: Sendable {
         }
         router.post("/v1/gc") { [self] request, _ in
             await respond {
-                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                let target = await resolve(query: request)
                 _ = try await translatingTransport(target) { try await agent(on: target).apply(.collectGarbage) }
                 return await clusterStatus()
             }
@@ -746,7 +818,7 @@ public final class HeadServices: Sendable {
         router.post("/v1/adopt") { [self] request, _ in
             await respond {
                 let adopt = try await decode(AdoptRequest.self, from: request)
-                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                let target = await resolve(query: request)
                 _ = try await translatingTransport(target) { try await agent(on: target).adopt(adopt) }
                 return await clusterStatus()
             }
@@ -763,7 +835,15 @@ public final class HeadServices: Sendable {
         }
         router.post("/v1/nodes/:id/revoke") { [self] _, context in
             await respond {
-                try await revoke(node: NodeID(try context.parameters.requireDecoded("id")))
+                try await revoke(node: await resolve(node: try context.parameters.requireDecoded("id")))
+                return NodeList(nodes: await state.summaries())
+            }
+        }
+        router.delete("/v1/nodes/:id") { [self] request, context in
+            await respond {
+                let query = request.uri.queryParameters
+                _ = try await remove(node: await resolve(node: try context.parameters.requireDecoded("id")),
+                                     force: query.get("force") == "true", purgeLogs: query.get("purge_logs") == "true")
                 return NodeList(nodes: await state.summaries())
             }
         }
@@ -806,16 +886,24 @@ public final class HeadServices: Sendable {
         router.post("/v1/join") { [self] request, _ in
             await respond { try await handleJoin(try await decode(JoinRequest.self, from: request)) }
         }
+        // For the app's Remove button. A write token can already run code on any node, so it can
+        // remove one. Purging log history stays on the socket.
+        router.delete("/v1/nodes/:id") { [self] request, context in
+            await respond {
+                _ = try await remove(node: await resolve(node: try context.parameters.requireDecoded("id")),
+                                     force: request.uri.queryParameters.get("force") == "true", purgeLogs: false)
+                return NodeList(nodes: await state.summaries())
+            }
+        }
         installClusterRoutes(on: router, remote: true)
         return router
     }
 
-    func makePublicAPI() throws -> any Service {
+    func makePublicAPI(host: String) throws -> any Service {
         guard let certificate = try secrets.read(ClusterSecrets.nodeCertificate),
               let key = try secrets.read(ClusterSecrets.nodeKey) else {
             throw NodeCallError(code: "not_ready", message: "The head has no certificate.")
         }
-        let host = options.apiHost ?? "127.0.0.1"
         let tls = TLSConfiguration.makeServerConfiguration(
             certificateChain: try NIOSSLCertificate.fromPEMBytes(Array(certificate)).map { .certificate($0) },
             privateKey: .privateKey(try NIOSSLPrivateKey(bytes: Array(key), format: .pem))
@@ -884,6 +972,13 @@ struct WriteScopeMiddleware: RouterMiddleware {
     }
 }
 
+extension Optional {
+    func asyncMap<T>(_ transform: (Wrapped) async -> T) async -> T? {
+        guard let self else { return nil }
+        return await transform(self)
+    }
+}
+
 func decode<T: Decodable>(_ type: T.Type, from request: Request, limit: Int = 1 << 20) async throws -> T {
     var request = request
     let body = try await request.collectBody(upTo: limit)
@@ -939,6 +1034,52 @@ struct LogRetentionService: Service {
                     logger.error("log retention failed", metadata: ["error": "\(error)"])
                 }
                 try? await Task.sleep(for: .seconds(300))
+            }
+        }
+    }
+}
+
+/// Runs a server that listens on the node's address: it starts once there is one, and
+/// restarts on the new address when it changes. `build` is called for each address.
+struct AddressBoundServer: Service {
+    let name: String
+    let monitor: NetworkMonitor
+    let logger: Logger
+    let build: @Sendable (String) async throws -> any Service
+
+    func run() async throws {
+        try await cancelWhenGracefulShutdown {
+            while !Task.isCancelled {
+                // No timeout: the transport (ClusterLink) is what gives up, and exits the process.
+                // Silent: the transport already logs each retry.
+                guard let host = try await monitor.waitForHost(timeout: nil, logger: nil) else { return }
+                var failed = false
+                do {
+                    let group = ServiceGroup(services: [try await build(host)], gracefulShutdownSignals: [], logger: logger)
+                    await withTaskGroup(of: Bool.self) { tasks in
+                        tasks.addTask {
+                            do { try await group.run() } catch {
+                                logger.error("\(name) stopped", metadata: ["error": "\(error)", "address": "\(host)"])
+                                return true
+                            }
+                            return false
+                        }
+                        tasks.addTask {
+                            _ = await monitor.waitForChange(from: host)
+                            await group.triggerGracefulShutdown()
+                            return false
+                        }
+                        failed = await tasks.next() ?? false
+                        await group.triggerGracefulShutdown()
+                        tasks.cancelAll()
+                        await tasks.waitForAll()
+                    }
+                } catch {
+                    logger.error("couldn't start the \(name)", metadata: ["error": "\(error)"])
+                    failed = true
+                }
+                // Backs off after a failure (a port in use, say) rather than spinning.
+                if failed { try? await Task.sleep(for: .seconds(5)) }
             }
         }
     }

@@ -50,11 +50,14 @@ struct Run: AsyncParsableCommand {
 
     @OptionGroup var environmentOptions: EnvironmentOptions
 
-    @Option(help: "This node's ID. It must match its Tailscale machine name. Defaults to the hostname.")
+    @Option(help: "This node's ID. Defaults to a UUID made on first run and kept in <root>/node-id; use this only to override it.")
     var nodeId: String?
 
-    @Option(help: "Address to listen on. Defaults to the Tailscale IP.")
+    @Option(help: "Address to listen on. Defaults to the Tailscale IP, waited for if Tailscale isn't up yet.")
     var listen: String?
+
+    @Option(help: "Seconds to wait for a Tailscale address at start before exiting (launchd restarts it). 0 waits forever.")
+    var tailscaleWait = 300
 
     @Option(help: "Address other nodes use to reach this one. Defaults to the listen address.")
     var advertise: String?
@@ -71,6 +74,9 @@ struct Run: AsyncParsableCommand {
     @Option(help: "Seconds between heartbeats.")
     var heartbeatInterval = 5
 
+    @Flag(help: "EXPERIMENTAL: report CPU, GPU, Neural Engine and DRAM power, read through a private macOS API.")
+    var experimentalPower = false
+
     func run() async throws {
         let env = environmentOptions.environment
         guard let mode = IdentityMode(rawValue: identityMode) else {
@@ -78,17 +84,24 @@ struct Run: AsyncParsableCommand {
         }
         print("tenderd starting: role=\(role.rawValue) mode=\(env.mode.rawValue) root=\(env.root.path())")
 
-        var host = listen
-        if host == nil { host = await TailscaleCLI.localIPv4() }
-        let cluster = ClusterOptions(listenHost: host, advertiseHost: advertise, agentPort: agentPort,
-                                     identityMode: mode, heartbeatInterval: .seconds(heartbeatInterval))
+        // Tailscale may not have an address yet (at boot). Nothing is resolved here: the
+        // listeners wait for one, and the unix socket serves the local CLI meanwhile.
+        let network = NetworkMonitor(explicitHost: listen)
+        // The ID is a UUID kept on disk, not the hostname, so renaming the Mac changes nothing.
+        let nodeID = try NodeIdentity.load(environment: env)
+        if let nodeId { NodeIdentity.override(NodeID(nodeId), environment: env) }
+        print("node id: \(nodeId ?? nodeID.rawValue) hostname: \(NodeIdentity.hostname())")
+        let cluster = ClusterOptions(listenHost: listen, advertiseHost: advertise, agentPort: agentPort,
+                                     identityMode: mode, heartbeatInterval: .seconds(heartbeatInterval),
+                                     experimentalPower: experimentalPower, network: network,
+                                     addressTimeout: tailscaleWait > 0 ? .seconds(tailscaleWait) : nil)
         let secrets = env.makeSecretStore()
         var hooks: ClusterHooks?
         if role == .head {
-            let names = [advertise, host].compactMap { $0 }
-            let options = HeadOptions(nodeID: NodeID(nodeId ?? defaultNodeID()), apiHost: host, apiPort: apiPort,
+            let names = [advertise, listen].compactMap { $0 }
+            let options = HeadOptions(nodeID: NodeID(nodeId ?? nodeID.rawValue), apiHost: listen, apiPort: apiPort,
                                       agentPort: agentPort, advertisedNames: names)
-            hooks = try HeadServices(environment: env, secrets: secrets, options: options).hooks()
+            hooks = try HeadServices(environment: env, secrets: secrets, options: options, network: network).hooks()
         }
         try await AgentRuntime(environment: env, secrets: secrets, cluster: cluster, hooks: hooks).run()
     }
@@ -145,7 +158,13 @@ struct SecretsImport: AsyncParsableCommand {
     func run() async throws {
         let store = environmentOptions.environment.makeSecretStore()
         let values = try JSONDecoder().decode([String: Data].self, from: Data(contentsOf: URL(filePath: from)))
-        for (name, value) in values { try store.write(name, value) }
+        // Delete first: updating an existing Keychain item in place keeps its old access
+        // list, which trusts the previous tenderd and not this one. The values are already
+        // in the file, which is kept until every write has succeeded.
+        for (name, value) in values {
+            try store.delete(name)
+            try store.write(name, value)
+        }
         try FileManager.default.removeItem(atPath: from)
     }
 }

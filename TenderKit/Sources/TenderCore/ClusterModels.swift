@@ -32,9 +32,15 @@ public struct NodeInfo: Codable, Sendable, Equatable {
     public var hardware: String
     public var address: String?
     public var labels: [String: String]
+    /// Whether the node is listening for peers. Nil from nodes running an older tenderd.
+    public var network: NetworkState?
+    /// What people call the machine. A label only: the ID is what identifies the node.
+    public var hostname: String?
 
     public init(id: NodeID, version: String, macOS: String, hardware: String,
-                address: String? = nil, labels: [String: String] = [:]) {
+                address: String? = nil, labels: [String: String] = [:], network: NetworkState? = nil, hostname: String? = nil) {
+        self.hostname = hostname
+        self.network = network
         self.id = id
         self.version = version
         self.macOS = macOS
@@ -45,6 +51,9 @@ public struct NodeInfo: Codable, Sendable, Equatable {
 
     public static let roleLabel = "role"
     public static let headRole = "head"
+
+    /// The hostname if there is one, else the ID.
+    public var displayName: String { hostname ?? id.rawValue }
 
     public var isHead: Bool { labels[Self.roleLabel] == Self.headRole }
 }
@@ -63,9 +72,13 @@ public struct NodeSummary: Codable, Sendable, Equatable {
     public var spoolDropped: Int
     /// Failed GCP Secret Manager fetches since the node's daemon started.
     public var secretFetchErrors: Int
+    /// From the latest heartbeat. Nil from nodes running an older tenderd.
+    public var stats: NodeStats?
 
     public init(info: NodeInfo, up: Bool, lastHeartbeatAge: TimeInterval?, instanceCount: Int, crashedCount: Int,
-                clockSkew: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0, secretFetchErrors: Int = 0) {
+                clockSkew: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0, secretFetchErrors: Int = 0,
+                stats: NodeStats? = nil) {
+        self.stats = stats
         self.secretFetchErrors = secretFetchErrors
         self.clockSkew = clockSkew
         self.spoolBacklog = spoolBacklog

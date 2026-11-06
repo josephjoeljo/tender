@@ -24,8 +24,9 @@ public enum ProcessTable {
 
     public static func render(_ list: NodeList) -> String {
         guard !list.nodes.isEmpty else { return "No nodes." }
-        let rows = [["NODE", "STATE", "ADDRESS", "PROCESSES", "CRASHED", "LAST SEEN", "SKEW", "VERSION"]] + list.nodes.map { node in
+        let rows = [["NODE", "ID", "STATE", "ADDRESS", "PROCESSES", "CRASHED", "LAST SEEN", "SKEW", "VERSION"]] + list.nodes.map { node in
             [
+                node.info.displayName,
                 node.info.id.rawValue,
                 node.up ? "up" : "down",
                 node.info.address ?? "-",
@@ -40,10 +41,10 @@ public enum ProcessTable {
         let skewed = list.nodes.filter { abs($0.clockSkew ?? 0) > 1 }
         for node in skewed {
             output += String(format: "\nwarning: %@'s clock is off by %.1f s, so its log times are unreliable.",
-                             node.info.id.rawValue, node.clockSkew ?? 0)
+                             node.info.displayName, node.clockSkew ?? 0)
         }
         for node in list.nodes where node.spoolDropped > 0 {
-            output += "\nwarning: \(node.info.id) has dropped \(node.spoolDropped) log lines."
+            output += "\nwarning: \(node.info.displayName) has dropped \(node.spoolDropped) log lines."
         }
         return output
     }
@@ -70,7 +71,7 @@ public enum ProcessTable {
     private static func row(_ status: InstanceStatus) -> [String] {
         [
             status.service,
-            status.node.rawValue,
+            shortID(status.node),
             String(status.instance),
             status.state.rawValue,
             status.pid.map(String.init) ?? "-",
@@ -80,6 +81,11 @@ public enum ProcessTable {
             String(status.restarts),
             status.release ?? "-",
         ]
+    }
+
+    /// A UUID node ID is shortened to its first group (use `tender nodes` for the rest).
+    static func shortID(_ node: NodeID) -> String {
+        UUID(uuidString: node.rawValue) != nil ? String(node.rawValue.prefix(8)) : node.rawValue
     }
 
     static func duration(_ seconds: TimeInterval) -> String {

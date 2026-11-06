@@ -211,3 +211,58 @@ func keychainSecretStoreRoundTrip() throws {
     #expect(!TailscaleCLI.isTailnetIPv4("192.168.1.10"))
     #expect(!TailscaleCLI.isTailnetIPv4("The Tailscale GUI failed to start"))
 }
+
+// MARK: Pinning a node ID to a Tailscale machine
+
+private func whois(name: String, stable: String?) -> Data {
+    var node: [String: Any] = ["ComputedName": name]
+    if let stable { node["StableID"] = stable }
+    return try! JSONSerialization.data(withJSONObject: ["Node": node])
+}
+
+private func tempPins() -> (PeerPins, URL) {
+    let url = URL(filePath: "/tmp/tender-pins-\(UUID().uuidString.prefix(8)).json")
+    return (PeerPins.at(url), url)
+}
+
+@Test func whoisReadsTheStableID() {
+    let json = #"{"Node":{"ComputedName":"mac-2","StableID":"nABC123CNTRL"}}"#
+    #expect(WhoisResult(json: Data(json.utf8))?.stableID == "nABC123CNTRL")
+}
+
+@Test func aUUIDNodeIsPinnedToItsFirstMachineAndSurvivesARename() async throws {
+    let (pins, url) = tempPins()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let node = NodeID("0b6f1c9e-0000-4000-8000-000000000001")
+    func check(_ name: String, _ stable: String) -> TailscaleIdentityCheck {
+        TailscaleIdentityCheck(mode: .enforce, runner: FakeTailscale(output: .success(whois(name: name, stable: stable))), pins: pins)
+    }
+    try await check("joels-mac-mini", "nAAA").verify(certificateNode: node, remoteIP: "100.1.1.1")
+    // Renamed in Tailscale: same machine, so still accepted.
+    try await check("mac-mini", "nAAA").verify(certificateNode: node, remoteIP: "100.1.1.1")
+    // The same certificate from another machine is not.
+    await #expect(throws: IdentityCheckError.pinMismatch(node: node.rawValue, tailscale: "attacker")) {
+        try await check("attacker", "nBBB").verify(certificateNode: node, remoteIP: "100.1.1.2")
+    }
+}
+
+@Test func pinsSurviveARestartAndCanBeForgotten() throws {
+    let (pins, url) = tempPins()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let node = NodeID("n1")
+    #expect(pins.pinOrCheck(node: node, stableID: "nAAA"))
+    let file = try Data(contentsOf: url)
+    #expect(try JSONDecoder().decode([String: String].self, from: file) == ["n1": "nAAA"])
+    pins.forget(node)
+    #expect(pins.pinned(node) == nil)
+    #expect(pins.pinOrCheck(node: node, stableID: "nBBB"))
+}
+
+@Test func pinnedChecksNeedAStableID() async throws {
+    let (pins, url) = tempPins()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let check = TailscaleIdentityCheck(mode: .enforce, runner: FakeTailscale(output: .success(whois(name: "x", stable: nil))), pins: pins)
+    await #expect(throws: IdentityCheckError.self) {
+        try await check.verify(certificateNode: NodeID("n1"), remoteIP: "100.1.1.1")
+    }
+}

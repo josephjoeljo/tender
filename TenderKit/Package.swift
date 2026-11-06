@@ -138,7 +138,7 @@ let package = Package(
             .product(name: "Crypto", package: "swift-crypto"),
             .product(name: "X509", package: "swift-certificates"),
         ]),
-        .testTarget(name: "ProcessMetricsTests", dependencies: ["ProcessMetrics"]),
+        .testTarget(name: "ProcessMetricsTests", dependencies: ["ProcessMetrics", "TenderCore"]),
         .testTarget(name: "LogTailTests", dependencies: ["LogTail", "LaunchdKit"]),
         .testTarget(name: "TenderCoreTests", dependencies: ["TenderCore"]),
         .testTarget(name: "TenderClientTests", dependencies: ["TenderClient", "TenderCore"]),

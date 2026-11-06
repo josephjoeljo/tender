@@ -9,7 +9,7 @@ struct Tender: AsyncParsableCommand {
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
         subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Abandon.self, Apply.self, Export.self, Secret.self, Gc.self, Version.self, Daemon.self,
-                      Deploy.self, Credentials.self, Token.self, Join.self, Leave.self, Nodes.self, Node.self, CA.self, ApiToken.self, Context.self]
+                      Deploy.self, Credentials.self, Token.self, Join.self, Leave.self, Nodes.self, Status.self, Node.self, CA.self, ApiToken.self, Context.self]
     )
 }
 
@@ -102,6 +102,9 @@ extension Tender {
         @Option(name: .customLong("secret-file"), help: "A secret written as a file before each start, as PATH=REF, for example /opt/api/gcp.json=GCP_KEY. Repeatable.")
         var secretFiles: [String] = []
 
+        @Option(help: "What it is, for the app's icon: \(ProcessKind.allCases.map(\.rawValue).joined(separator: ", ")). Guessed from the name by default.")
+        var kind: ProcessKind?
+
         @OptionGroup var options: CommonOptions
 
         @Argument(parsing: .postTerminator, help: "Command to run, after `--`.")
@@ -121,7 +124,8 @@ extension Tender {
                 instances: instances,
                 node: node.map { NodeID($0) },
                 user: user,
-                secretFiles: try Self.parse(secretFiles, option: "--secret-file", as: "PATH=REF", splitAtLast: true)
+                secretFiles: try Self.parse(secretFiles, option: "--secret-file", as: "PATH=REF", splitAtLast: true),
+                kind: kind
             )
             try await options.execute { try await $0.start(spec) }
         }
@@ -391,3 +395,5 @@ extension Tender {
         }
     }
 }
+
+extension ProcessKind: ExpressibleByArgument {}

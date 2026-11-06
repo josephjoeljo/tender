@@ -2,6 +2,7 @@ import Distributed
 import Foundation
 import Logging
 import LogTail
+import ProcessMetrics
 import ServiceLifecycle
 import TenderActorSystem
 import TenderCore
@@ -37,10 +38,21 @@ public struct ClusterOptions: Sendable {
     public var identityMode: IdentityMode
     public var requiredTags: [String]
     public var heartbeatInterval: Duration
+    /// Adds IOReport power readings (CPU, GPU, Neural Engine, DRAM) to heartbeats. Private API.
+    public var experimentalPower: Bool
+    /// Finds the address to listen on and notices when it changes. Share one with the head.
+    public var network: NetworkMonitor
+    /// How long to wait for a Tailscale address at start before exiting, so launchd restarts
+    /// the daemon. Nil waits forever.
+    public var addressTimeout: Duration?
 
     public init(listenHost: String? = nil, advertiseHost: String? = nil, agentPort: Int = 7070,
                 identityMode: IdentityMode = .enforce, requiredTags: [String] = [],
-                heartbeatInterval: Duration = .seconds(5)) {
+                heartbeatInterval: Duration = .seconds(5), experimentalPower: Bool = false,
+                network: NetworkMonitor? = nil, addressTimeout: Duration? = .seconds(300)) {
+        self.network = network ?? NetworkMonitor(explicitHost: listenHost)
+        self.addressTimeout = addressTimeout
+        self.experimentalPower = experimentalPower
         self.listenHost = listenHost
         self.advertiseHost = advertiseHost
         self.agentPort = agentPort
@@ -123,41 +135,55 @@ struct ClusterLink: Service {
     let logger: Logger
 
     func run() async throws {
-        await cancelWhenGracefulShutdown {
-            var system: TenderActorSystem?
-            var agent: NodeAgent?
-            while !Task.isCancelled, system == nil {
+        let monitor = options.network
+        try await cancelWhenGracefulShutdown {
+            var openSpool: LogSpool?
+            var timeout = options.addressTimeout
+            while !Task.isCancelled {
+                guard (try? identities.tls()) != nil, let config = try? identities.config() else {
+                    try? await Task.sleep(for: .seconds(1))
+                    continue
+                }
+                // Nothing binds until there's a real address: falling back to loopback would
+                // leave the node unreachable with no sign of it. Past the first address, a lost
+                // one is waited for without giving up: the listeners rebind when it returns.
+                guard let host = try await monitor.waitForHost(timeout: timeout, logger: logger) else { return }
+                timeout = nil
+                await hooks?.addressReady(host)
                 do {
-                    if let tls = try identities.tls(), let config = try identities.config() {
-                        (system, agent) = try await start(config: config, tls: tls)
-                        guard let system, agent != nil else { continue }
-                        let spool = try LogSpool(directory: identities.environment.spoolDirectory)
-                        await withTaskGroup(of: Void.self) { group in
-                            group.addTask { await heartbeats(config: config, system: system, spool: spool) }
-                            group.addTask { await tailLogs(spool: spool) }
-                            group.addTask { await shipLogs(config: config, system: system, spool: spool) }
-                            await group.waitForAll()
-                        }
-                        await system.shutdown()
-                        return
+                    guard let tls = try identities.tls() else {
+                        try? await Task.sleep(for: .seconds(1))
+                        continue
                     }
+                    let (system, _) = try await start(config: config, tls: tls, host: host)
+                    let spool = try openSpool ?? LogSpool(directory: identities.environment.spoolDirectory)
+                    openSpool = spool
+                    await withTaskGroup(of: Void.self) { group in
+                        group.addTask { await heartbeats(config: config, system: system, spool: spool) }
+                        group.addTask { await tailLogs(spool: spool) }
+                        group.addTask { await shipLogs(config: config, system: system, spool: spool) }
+                        // The workers only end when cancelled, so this finishing first means
+                        // the address changed (or we're shutting down).
+                        group.addTask { _ = await monitor.waitForChange(from: host) }
+                        _ = await group.next()
+                        group.cancelAll()
+                        await group.waitForAll()
+                    }
+                    await system.shutdown()
+                    if !Task.isCancelled { logger.notice("tailnet address changed, rebinding listeners", metadata: ["was": "\(host)"]) }
                 } catch {
                     logger.error("cluster link failed to start", metadata: ["error": "\(error)"])
+                    try? await Task.sleep(for: .seconds(1))
                 }
-                try? await Task.sleep(for: .seconds(1))
             }
         }
     }
 
-    private func listenHost() async -> String? {
-        if let host = options.listenHost { return host }
-        return await TailscaleCLI.localIPv4()
-    }
-
-    private func start(config: ClusterConfig, tls: TransportTLS) async throws -> (TenderActorSystem, NodeAgent) {
+    private func start(config: ClusterConfig, tls: TransportTLS, host listen: String) async throws -> (TenderActorSystem, NodeAgent) {
         let (host, port) = splitHostPort(config.headAgentAddress, defaultPort: options.agentPort)
         let logger = self.logger
-        let check = TailscaleIdentityCheck(mode: options.identityMode, requiredTags: options.requiredTags) { message in
+        let check = TailscaleIdentityCheck(mode: options.identityMode, requiredTags: options.requiredTags,
+                                           pins: PeerPins.standard(identities.environment)) { message in
             logger.warning("\(message)")
         }
         let system = TenderActorSystem(
@@ -170,10 +196,6 @@ struct ClusterLink: Service {
             NodeAgent(controller: controller, headNode: config.headNode, actorSystem: system)
         }
         hooks?.systemReady(system)
-        guard let listen = await listenHost() else {
-            logger.error("no address to listen on: Tailscale isn't up and --listen wasn't given")
-            return (system, agent)
-        }
         let bound = try await system.listen(host: listen, port: options.agentPort)
         logger.info("cluster transport listening", metadata: ["node": "\(config.nodeID)", "address": "\(listen):\(bound)"])
         return (system, agent)
@@ -191,13 +213,15 @@ struct ClusterLink: Service {
             macOS: process.operatingSystemVersionString,
             hardware: String(decoding: hardware.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self),
             address: advertised.map { "\($0):\(options.agentPort)" },
-            labels: config.nodeID == config.headNode ? [NodeInfo.roleLabel: NodeInfo.headRole] : [:]
+            labels: config.nodeID == config.headNode ? [NodeInfo.roleLabel: NodeInfo.headRole] : [:],
+            network: options.network.state,
+            hostname: NodeIdentity.hostname()
         )
     }
 
     private func advertisedHost() async -> String? {
         if let host = options.advertiseHost { return host }
-        return await listenHost()
+        return await options.network.resolve()
     }
 
     /// Copies new lines from log files into the spool, with their offsets in one transaction.
@@ -266,23 +290,30 @@ struct ClusterLink: Service {
     private func heartbeats(config: ClusterConfig, system: TenderActorSystem, spool: LogSpool) async {
         var registered = false
         var roundTrip: TimeInterval?
-        let info = await nodeInfo(config: config)
+        var info = await nodeInfo(config: config)
+        let machine = SystemSampler(experimentalPower: options.experimentalPower)
         while !Task.isCancelled {
             do {
                 let registry = try $HeadRegistryProtocol.resolve(
                     id: ActorIdentity(node: config.headNode, name: ActorNames.registry), using: system)
+                // The head learns of a change in the node's network (waiting, loopback, listening).
+                if info.network != options.network.state || info.hostname != NodeIdentity.hostname() {
+                    info = await nodeInfo(config: config)
+                    registered = false
+                }
                 if !registered {
                     try await registry.register(info)
                     registered = true
                     logger.info("registered with head", metadata: ["head": "\(config.headNode)"])
                 }
                 let list = try await controller.list()
+                let stats = await machine.sample()
                 let start = ContinuousClock.now
                 try await registry.heartbeat(Heartbeat(
                     node: config.nodeID, nodeClock: Date(), processes: list.processes, orphans: list.orphans,
                     previousRoundTrip: roundTrip, spoolBacklog: (try? spool.backlog()) ?? 0,
                     spoolDropped: (try? spool.droppedTotal()) ?? 0,
-                    secretFetchErrors: await controller.gcp?.fetchErrors ?? 0))
+                    secretFetchErrors: await controller.gcp?.fetchErrors ?? 0, stats: stats))
                 let elapsed = (ContinuousClock.now - start).components
                 roundTrip = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
             } catch {

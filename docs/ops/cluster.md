@@ -2,8 +2,9 @@
 
 ## Tailscale ACL
 
-Each node's Tailscale machine name must equal its Tender node ID: the transport rejects
-a peer whose certificate and Tailscale identity differ.
+Each node's ID is a UUID, not its Tailscale name. The first Tailscale machine a node connects
+from is remembered, and the transport rejects a certificate used from any other machine, so
+renaming a Mac in Tailscale or in macOS breaks nothing.
 
 ```json
 {
@@ -82,8 +83,11 @@ sudo tender nodes
 The worker generates its key locally, and it never leaves the machine. The token carries
 the CA's fingerprint, so the worker can verify the head before trusting it.
 
-To remove a node, run `sudo tender node revoke <id>`. Its connection drops at once, and its
-certificate is refused from then on. Joining with a new token lets it back in.
+`tender nodes` lists each node's hostname and ID. To delete a node and its records on the head
+(a stale one, say), run `sudo tender node remove <id or hostname>`. It also revokes the certificate,
+so the node is refused until it joins again with a new token. A node that's up needs `--force`,
+and `--purge-logs` also deletes its stored log lines. `tender node revoke <id>` alone just refuses
+the certificate.
 
 ## Place binaries
 

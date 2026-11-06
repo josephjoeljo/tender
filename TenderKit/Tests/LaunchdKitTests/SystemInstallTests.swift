@@ -64,6 +64,7 @@ private let plan = SystemInstallPlan()
     #expect(plist["Label"] as? String == "com.olympsis.tender.agent")
     #expect(plist["ProgramArguments"] as? [String] == ["/opt/tender/libexec/tenderd", "run", "--role", "worker"])
     #expect(plist["UserName"] == nil, "tenderd itself runs as root; only managed processes are _tender")
+    #expect(plist["ThrottleInterval"] as? Int == SystemInstallPlan.daemonThrottleInterval, "restart loops are paced")
 }
 
 @Test func toolRunnerCapturesOutput() async throws {
@@ -71,4 +72,13 @@ private let plan = SystemInstallPlan()
     #expect(result.exitCode == 3)
     #expect(result.stdout == "out\n")
     #expect(result.stderr == "err\n")
+}
+
+@Test func daemonPlistCarriesExtraArguments() throws {
+    let plan = SystemInstallPlan()
+    let plist = try #require(
+        try PropertyListSerialization.propertyList(from: try plan.renderDaemonPlist(role: "head", extraArguments: ["--experimental-power"]),
+                                                   format: nil) as? [String: Any])
+    let arguments = try #require(plist["ProgramArguments"] as? [String])
+    #expect(arguments.suffix(3) == ["--role", "head", "--experimental-power"])
 }

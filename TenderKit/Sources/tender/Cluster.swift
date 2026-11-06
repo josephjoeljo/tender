@@ -66,7 +66,7 @@ extension Tender {
         static let configuration = CommandConfiguration(abstract: "Join this node to a cluster. Its daemon must be running.")
         @Argument(help: "The head's address: host or host:port.") var head: String
         @Option(help: "From `tender token create`.") var token: String
-        @Option(help: "This node's ID. It must match its Tailscale machine name. Defaults to the hostname.") var nodeId: String?
+        @Option(help: "This node's ID. Defaults to the UUID this machine made on first run; use this only to override it.") var nodeId: String?
         @OptionGroup var options: CommonOptions
 
         func run() async throws {
@@ -97,8 +97,17 @@ extension Tender {
         }
     }
 
+    struct Status: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Show whether this machine's daemon is listening for other nodes.")
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            try await options.run({ try await $0.network() }) { "tenderd is \($0.summary)" }
+        }
+    }
+
     struct Node: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Manage a node.", subcommands: [Revoke.self])
+        static let configuration = CommandConfiguration(abstract: "Manage a node.", subcommands: [Revoke.self, Remove.self])
 
         struct Revoke: AsyncParsableCommand {
             static let configuration = CommandConfiguration(abstract: "Refuse a node's certificate from now on.")
@@ -107,6 +116,19 @@ extension Tender {
 
             func run() async throws {
                 try await options.run({ try await $0.revokeNode(id) }) { _ in "Revoked \(id)" }
+            }
+        }
+
+        struct Remove: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Delete a node's records on the head, such as a stale one, and revoke its certificate.")
+            @Argument(help: "Node ID (a UUID), or its hostname if only one node has it. See `tender nodes`.") var id: String
+            @Flag(help: "Remove the node even though it is up.") var force = false
+            @Flag(help: "Also delete its stored log lines. They are kept by default.") var purgeLogs = false
+            @OptionGroup var options: CommonOptions
+
+            func run() async throws {
+                try await options.run({ try await $0.removeNode(id, force: force, purgeLogs: purgeLogs) }) { _ in "Removed \(id)" }
             }
         }
     }

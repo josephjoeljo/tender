@@ -102,14 +102,21 @@ public struct SystemInstallPlan: Sendable {
         return commands
     }
 
-    public func renderDaemonPlist(role: String = "worker") throws -> Data {
+    /// `extraArguments` are appended to `tenderd run`, such as `--experimental-power`.
+    public func renderDaemonPlist(role: String = "worker", extraArguments: [String] = []) throws -> Data {
         try PlistRenderer().render(
             label: environment.agentLabel,
-            programArguments: [installedDaemon.path(percentEncoded: false), "run", "--role", role],
+            programArguments: [installedDaemon.path(percentEncoded: false), "run", "--role", role] + extraArguments,
             stdoutPath: environment.logsDirectory.appending(path: "tenderd.out.log").path(percentEncoded: false),
-            stderrPath: environment.logsDirectory.appending(path: "tenderd.err.log").path(percentEncoded: false)
+            stderrPath: environment.logsDirectory.appending(path: "tenderd.err.log").path(percentEncoded: false),
+            // tenderd exits when Tailscale never comes up; launchd's default (10s) would be
+            // tolerable, but stating it keeps a restart loop paced.
+            throttleInterval: Self.daemonThrottleInterval
         )
     }
+
+    /// Seconds launchd waits between starts of tenderd.
+    public static let daemonThrottleInterval = 15
 
     private func dscl(_ arguments: String...) -> InstallCommand {
         InstallCommand("/usr/bin/dscl", ["."] + arguments)

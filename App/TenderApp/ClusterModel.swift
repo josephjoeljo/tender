@@ -10,6 +10,7 @@ final class ClusterModel {
     private(set) var health: ClusterHealth = .notConfigured
     private(set) var nodes: [NodeSummary] = []
     private(set) var processes: [InstanceStatus] = []
+    private(set) var history = NodeHistory()
     private(set) var head: String?
     private(set) var connections = ConnectionList()
     private(set) var connectionStatus: [UUID: ConnectionStatus] = [:]
@@ -49,6 +50,7 @@ final class ClusterModel {
         health = previewHealth
         self.nodes = nodes
         self.processes = processes
+        history = .preview(nodes)
         head = nodes.isEmpty ? nil : "mac-1:7071"
     }
     #endif
@@ -61,7 +63,7 @@ final class ClusterModel {
 
     /// The active cluster's head, once it has reported its role.
     var headNodeName: String? {
-        nodes.first { $0.info.isHead }?.info.id.rawValue
+        nodes.first { $0.info.isHead }?.info.displayName
     }
 
     var problems: [InstanceStatus] { processes.filter { $0.state == .crashed || $0.state == .unknown } }
@@ -104,6 +106,7 @@ final class ClusterModel {
         head = nil
         nodes = []
         processes = []
+        history = NodeHistory()
         health = .notConfigured
         savedConnectionError = nil
         do {
@@ -165,6 +168,7 @@ final class ClusterModel {
             guard requested == connections.activeID else { return }
             nodes = nodeList.nodes
             processes = processList.processes
+            history.record(nodeList.nodes)
             health = ClusterHealth(nodes: nodeList, processes: processList)
         } catch {
             guard requested == connections.activeID else { return }
@@ -194,6 +198,23 @@ final class ClusterModel {
         guard let client else { return "Not connected." }
         _ = try await client.rollback(service: service, to: sha12, node: node)
         return "\(node): rolled back to \(sha12)"
+    }
+
+    /// A node's hostname, or its ID when it hasn't reported one.
+    func name(of node: NodeID) -> String {
+        nodes.first { $0.info.id == node }?.info.displayName ?? node.rawValue
+    }
+
+    /// Deletes the node's records on the head. A node that is up needs `force`.
+    func removeNode(_ node: NodeSummary, force: Bool) async {
+        guard let client else { return }
+        do {
+            _ = try await client.removeNode(node.info.id.rawValue, force: force)
+            actionError = nil
+        } catch {
+            actionError = "\(error)"
+        }
+        await refresh()
     }
 
     enum Action { case start, stop, restart }

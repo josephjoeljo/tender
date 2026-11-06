@@ -1,6 +1,7 @@
 import Crypto
 import Foundation
 import LaunchdKit
+import Synchronization
 import Testing
 import TenderActorSystem
 import TenderAgent
@@ -78,8 +79,13 @@ final class Daemon: @unchecked Sendable {
     let metricsPort = freePort()
     let source: (any ReleaseSource)?
 
+    /// With this, the daemon has no `--listen` and finds its address from the monitor, like
+    /// a daemon that starts before Tailscale does.
+    let network: NetworkMonitor?
+
     init(node: String, head: Bool, env: TenderEnvironment? = nil, agentPort: Int? = nil, apiPort: Int? = nil,
-         source: (any ReleaseSource)? = nil) throws {
+         source: (any ReleaseSource)? = nil, network: NetworkMonitor? = nil) throws {
+        self.network = network
         self.source = source
         self.env = try env ?? makeEnvironment()
         self.agentPort = agentPort ?? freePort()
@@ -90,13 +96,13 @@ final class Daemon: @unchecked Sendable {
 
     func start() async throws {
         let secrets = env.makeSecretStore()
-        let cluster = ClusterOptions(listenHost: "127.0.0.1", advertiseHost: "127.0.0.1", agentPort: agentPort,
-                                     identityMode: .off, heartbeatInterval: .milliseconds(100))
+        let cluster = ClusterOptions(listenHost: network == nil ? "127.0.0.1" : nil, advertiseHost: "127.0.0.1", agentPort: agentPort,
+                                     identityMode: .off, heartbeatInterval: .milliseconds(100), network: network, addressTimeout: nil)
         var hooks: ClusterHooks?
         if isHead {
-            let options = HeadOptions(nodeID: NodeID(nodeName), apiHost: "127.0.0.1", apiPort: apiPort, agentPort: agentPort,
-                                      advertisedNames: ["127.0.0.1"], metricsPort: metricsPort)
-            hooks = try HeadServices(environment: env, secrets: secrets, options: options).hooks()
+            let options = HeadOptions(nodeID: NodeID(nodeName), apiHost: network == nil ? "127.0.0.1" : nil, apiPort: apiPort,
+                                      agentPort: agentPort, advertisedNames: ["127.0.0.1"], metricsPort: metricsPort)
+            hooks = try HeadServices(environment: env, secrets: secrets, options: options, network: network).hooks()
         }
         let runtime = AgentRuntime(environment: env, secrets: secrets, cluster: cluster, hooks: hooks, launchd: launchd, releaseSource: source, shutdownSignals: [])
         task = Task { try await runtime.run() }
@@ -132,6 +138,45 @@ func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async throws {
     #expect(joined == true)
     try await body(head, worker)
     await worker.stop()
+    await head.stop()
+}
+
+@Test func headWaitsForTailscaleThenListensAndRebindsWhenTheAddressChanges() async throws {
+    let address = Mutex<String?>(nil)
+    let network = NetworkMonitor(pollInterval: .milliseconds(50)) { address.withLock { $0 } }
+    let head = try Daemon(node: "head", head: true, network: network)
+    try await head.start()
+    defer { head.cleanup() }
+
+    // No address yet: the socket works, and says why nothing else does.
+    #expect(try await head.client.network().kind == .waitingForTailscale)
+    do {
+        _ = try await head.client.start(sleeper)
+        Issue.record("a head with no address can't run commands through its transport")
+    } catch let error as TenderClientError {
+        #expect(error.code == "not_ready")
+        #expect(error.description.contains("waiting for Tailscale"))
+    }
+    #expect(try await head.client.nodes().nodes.isEmpty)
+
+    // Tailscale comes up.
+    address.withLock { $0 = "127.0.0.1" }
+    let up = try await eventually { () -> Bool? in
+        let nodes = try await head.client.nodes().nodes
+        return nodes.count == 1 && nodes[0].up && nodes[0].info.network?.kind == .loopbackOnly ? true : nil
+    }
+    #expect(up == true)
+    #expect(try await head.client.network() == NetworkState(kind: .loopbackOnly, address: "127.0.0.1"))
+    #expect(try await head.client.start(sleeper).processes.first?.state == .running)
+
+    // The address changes: the listeners rebind and the node registers again.
+    address.withLock { $0 = "localhost" }
+    let moved = try await eventually { () -> Bool? in
+        let nodes = try await head.client.nodes().nodes
+        return try await head.client.network().address == "localhost" && nodes.count == 1 && nodes[0].up ? true : nil
+    }
+    #expect(moved == true)
+    #expect(try await head.client.list().processes.count == 1)
     await head.stop()
 }
 
@@ -345,6 +390,33 @@ func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async throws {
     }
 }
 
+@Test func removingANodeDeletesItsRecordsAndRefusesLiveOnesWithoutForce() async throws {
+    try await withCluster { head, worker async throws in
+        // Up, so it needs --force.
+        do {
+            _ = try await head.client.removeNode("worker")
+            Issue.record("an up node must not be removed without force")
+        } catch let error as TenderClientError {
+            #expect(error.code == "node_up")
+        }
+        #expect(try await head.client.nodes().nodes.count == 2)
+
+        _ = try await head.client.removeNode("worker", force: true, purgeLogs: true)
+        #expect(try await head.client.nodes().nodes.map(\.info.id) == [NodeID("head")])
+
+        // Unknown IDs and the head itself are refused. A repeat removal is fine: it is revoked, so still known.
+        for (id, code) in [("nope", "unknown_node"), ("head", "invalid_node")] {
+            do {
+                _ = try await head.client.removeNode(id, force: true)
+                Issue.record("\(id) must be refused")
+            } catch let error as TenderClientError {
+                #expect(error.code == code)
+            }
+        }
+        _ = try await head.client.removeNode("worker", force: true)
+    }
+}
+
 // MARK: Public API
 
 @Test func publicAPIRequiresTokensAndHonorsScopes() async throws {
@@ -368,6 +440,21 @@ func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async throws {
         let writeClient = TenderClient(head: address, caPEM: caPEM, token: writer.token)
         #expect(try await writeClient.start(sleeper).processes.count == 1)
         _ = try await writeClient.delete(service: "api")
+
+        // The app's Remove button: write scope only, and a node that is up needs force.
+        do {
+            _ = try await readClient.removeNode("worker", force: true)
+            Issue.record("read tokens can't remove nodes")
+        } catch let error as TenderClientError {
+            #expect(error.code == "forbidden")
+        }
+        do {
+            _ = try await writeClient.removeNode("worker")
+            Issue.record("an up node needs force")
+        } catch let error as TenderClientError {
+            #expect(error.code == "node_up")
+        }
+        #expect(try await writeClient.removeNode("worker", force: true).nodes.map(\.info.id) == [NodeID("head")])
 
         do {
             _ = try await TenderClient(head: address, caPEM: caPEM, token: "nonsense").nodes()
@@ -468,6 +555,19 @@ func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async throws {
     #expect(await state.downNodes(now: start.addingTimeInterval(21)) == [NodeID("n")])
     #expect(await !state.heartbeat(Heartbeat(node: NodeID("n"), nodeClock: start, processes: []), registeredThisRun: false, now: start))
     #expect(await !state.heartbeat(Heartbeat(node: NodeID("x"), nodeClock: start, processes: []), registeredThisRun: true, now: start))
+}
+
+@Test func nodesAreFoundByIDOrByAnUnambiguousHostname() async throws {
+    let state = RegistryState(store: nil)
+    let a = NodeID("0b6f1c9e-0000-4000-8000-00000000000a"), b = NodeID("0b6f1c9e-0000-4000-8000-00000000000b")
+    try await state.register(NodeInfo(id: a, version: "1", macOS: "x", hardware: "y", hostname: "mac-mini"))
+    try await state.register(NodeInfo(id: b, version: "1", macOS: "x", hardware: "y", hostname: "macbook"))
+    #expect(await state.resolve(a.rawValue) == a)
+    #expect(await state.resolve("MacBook") == b)
+    #expect(await state.resolve("nope") == nil)
+    // A hostname two nodes share can't pick one.
+    try await state.register(NodeInfo(id: NodeID("c"), version: "1", macOS: "x", hardware: "y", hostname: "macbook"))
+    #expect(await state.resolve("macbook") == nil)
 }
 
 @Test func lastKnownNodesLoadAsDown() async throws {

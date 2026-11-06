@@ -37,3 +37,18 @@ func rejectsServiceName(name: String) {
                                 uptime: 3, restarts: 2, release: "abc", cpu: 1.5, rss: 4096)
     #expect(try JSONDecoder().decode(InstanceStatus.self, from: JSONEncoder().encode(status)) == status)
 }
+
+@Test(arguments: [
+    ("homebrew.mxcl.mongodb-community", ProcessKind.database), ("postgres", .database), ("redis", .cache),
+    ("olympsis-api", .server), ("email-worker", .worker), ("minecraft", .gameServer), ("nginx", .proxy), ("thing", .other),
+])
+func processKindGuess(name: String, kind: ProcessKind) {
+    #expect(ProcessKind.guess(from: name) == kind)
+}
+
+@Test func processKindDecoding() throws {
+    let decode = { (json: String) in try JSONDecoder().decode([ProcessKind].self, from: Data(json.utf8)) }
+    #expect(try decode(#"["game-server", "hologram"]"#) == [ProcessKind.gameServer, .other])
+    let old = #"{"service":"api","instance":0,"node":{"rawValue":"m"},"state":"running","restarts":0,"adopted":false}"#
+    #expect(try JSONDecoder().decode(InstanceStatus.self, from: Data(old.utf8)).kind == nil)
+}

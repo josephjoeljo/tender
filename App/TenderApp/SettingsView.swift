@@ -5,6 +5,8 @@ import TenderClient
 /// fingerprint, which pins the connection, and it's kept in the Keychain.
 struct SettingsView: View {
     let model: ClusterModel
+    /// The Settings window sizes itself to the form; the dashboard gives it the detail column.
+    var fixedWidth = true
     @State private var name = ""
     @State private var head = ""
     @State private var token = ""
@@ -40,7 +42,8 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480)
+        .frame(width: fixedWidth ? 480 : nil)
+        .frame(maxWidth: fixedWidth ? nil : 640)
         .task { await model.checkConnections() }
         .confirmationDialog("Remove \(removing?.name ?? "this connection")?", isPresented: isRemoving, presenting: removing) { connection in
             Button("Remove", role: .destructive) {
