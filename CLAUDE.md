@@ -209,3 +209,10 @@ Detailed plans: `docs/plans/milestone-{1,1.5,2,3,4,5}.md`.
 - Integration tests that touch real launchd must use labels under
   `com.olympsis.tender.test.*` and clean up after themselves.
 - Prefer `launchctl bootstrap/bootout/kickstart/print` over legacy `load/unload`.
+- **Keep the laptop skills in step.** `~/.claude/skills/tender` (how agents operate
+  the cluster) and `~/.claude/skills/tender-deploy-node` (build and ship to a node)
+  describe this project's CLI and deploy flow. Whenever a change is meaningful, such
+  as a new, renamed or removed `tender` command or flag, a change to node identity,
+  paths, ports, install or deploy steps, or API token scopes, update those
+  SKILL.md files in the same piece of work and say so in the summary. Skip
+  internal-only refactors.
