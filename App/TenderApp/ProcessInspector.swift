@@ -87,6 +87,7 @@ struct ProcessInspector: View {
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
+                    .padding(.horizontal, 8)
                 }
                 .menuIndicator(.hidden)
                 .help("Switch between details, config and logs")

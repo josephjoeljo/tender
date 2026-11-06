@@ -204,8 +204,9 @@ struct ProcessesView: View {
                     .help(showsInspector ? "Hide the inspector" : "Show the inspector")
             }
         }
-        .onAppear {
-            if selection == nil { selection = groups.first?.processes.first?.id }
+        // Data can arrive after the page appears, and a selected process can go away.
+        .onChange(of: model.processes.map(\.id), initial: true) { _, ids in
+            if selection.map({ !ids.contains($0) }) ?? true { selection = groups.first?.processes.first?.id }
         }
     }
 }
