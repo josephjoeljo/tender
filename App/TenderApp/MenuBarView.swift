@@ -107,18 +107,20 @@ extension ClusterModel {
                     stats: up ? .preview : nil)
     }
 
-    private static func process(_ service: String, _ instance: Int, _ node: String, _ state: InstanceState) -> InstanceStatus {
+    private static func process(_ service: String, _ instance: Int, _ node: String, _ state: InstanceState,
+                                adopted: Bool = false) -> InstanceStatus {
         InstanceStatus(service: service, instance: instance, node: NodeID(node), state: state,
                        pid: state == .running ? 4242 : nil, uptime: state == .running ? 7200 : nil,
                        cpu: state == .running ? 3.2 : nil, rss: state == .running ? 150 << 20 : nil,
-                       cpuSeconds: state == .running ? 410 : nil, stats: state == .running ? .preview : nil)
+                       cpuSeconds: state == .running ? 410 : nil, adopted: adopted, stats: state == .running ? .preview : nil)
     }
 
     static var previewHealthy: ClusterModel {
         ClusterModel(previewHealth: .healthy,
                      nodes: [node("mac-1", up: true, processes: 2), node("mac-2", up: true, processes: 2)],
                      processes: [process("api", 0, "mac-1", .running), process("api", 1, "mac-2", .running),
-                                 process("mongod", 0, "mac-1", .running), process("worker", 0, "mac-2", .stopped)])
+                                 process("mongod", 0, "mac-1", .running), process("worker", 0, "mac-2", .stopped),
+                                 process("homebrew.mxcl.redis", 0, "mac-1", .running, adopted: true)])
     }
 
     static var previewDegraded: ClusterModel {

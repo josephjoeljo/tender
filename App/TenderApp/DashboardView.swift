@@ -148,7 +148,10 @@ struct ProcessesView: View {
         let order = model.nodes.map(\.info.id) + byNode.keys.filter { id in !model.nodes.contains { $0.info.id == id } }
             .sorted { $0.rawValue < $1.rawValue }
         return order.compactMap { node in
-            byNode[node].map { (node, $0.sorted { ($0.service, $0.instance) < ($1.service, $1.instance) }) }
+            // Tender's own services first, then the launchd jobs it adopted.
+            byNode[node].map { (node, $0.sorted {
+                ($0.adopted ? 1 : 0, $0.service, $0.instance) < ($1.adopted ? 1 : 0, $1.service, $1.instance)
+            }) }
         }
     }
 
