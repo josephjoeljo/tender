@@ -84,10 +84,11 @@ struct StatTile: View {
 }
 
 private struct StatGrid<Content: View>: View {
+    var minimum: CGFloat = 180
     @ViewBuilder let content: Content
 
     var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 10, alignment: .top)], spacing: 10) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: minimum), spacing: 10, alignment: .top)], spacing: 10) {
             content
         }
     }
@@ -124,6 +125,10 @@ struct ProcessStatsPanel: View {
     let process: InstanceStatus
     /// The node it runs on, for scaling CPU and memory against the machine.
     let node: NodeSummary?
+    /// Narrower tiles, for the inspector.
+    var compact = false
+    /// The inspector shows PID, uptime and the rest as rows of its own.
+    var showsFacts = true
 
     var body: some View {
         let stats = process.stats
@@ -137,7 +142,7 @@ struct ProcessStatsPanel: View {
             } else if stats == nil {
                 OlderDaemonNote()
             }
-            StatGrid {
+            StatGrid(minimum: compact ? 130 : 180) {
                 StatTile(title: "CPU", symbol: "cpu", value: StatFormat.percent(process.cpu),
                          detail: ["of one core" + (machine.map { " · node has \($0.cpuCores)" } ?? ""),
                                   "CPU time \(StatFormat.duration(process.cpuSeconds))"],
@@ -164,13 +169,15 @@ struct ProcessStatsPanel: View {
                              detail: [stats.openFiles.map { "\($0) open files" } ?? "Open files \(StatFormat.dash)"])
                 }
             }
-            FactRow(facts: [
+            if showsFacts {
+                FactRow(facts: [
                 ("PID", process.pid.map(String.init) ?? StatFormat.dash),
                 ("Uptime", StatFormat.duration(process.uptime)),
                 ("Release", process.release ?? StatFormat.dash),
                 ("Last exit", process.lastExitCode.map(String.init) ?? StatFormat.dash),
                 ("Restarts", "\(process.restarts)"),
             ] + (process.adopted ? [("Adopted", "yes")] : []))
+            }
         }
     }
 }

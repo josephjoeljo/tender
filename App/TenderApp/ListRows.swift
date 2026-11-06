@@ -31,6 +31,27 @@ enum RowLayout {
     static let spacing: CGFloat = 12
     /// Where the title starts, so dropped-down panels and separators line up with it.
     static let textLeading = artwork + spacing
+    /// Hit area of the icon buttons at the end of a row, so they space evenly.
+    static let button: CGFloat = 24
+}
+
+/// An icon button at the end of a row, the same size as its neighbours.
+struct RowIconButton: View {
+    let title: String
+    let symbol: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .frame(width: RowLayout.button, height: RowLayout.button)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .help(title)
+        .accessibilityLabel(title)
+    }
 }
 
 /// A small boxed label after a title, like the "explicit" mark on a track.
@@ -79,16 +100,20 @@ struct TrackRow<Artwork: View, Badges: View, Subtitle: View, Trailing: View, Act
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+            // Flush with the icon buttons before it, so the three sit evenly spaced.
             Menu {
                 actions
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundStyle(.secondary)
+                    .frame(width: RowLayout.button, height: RowLayout.button)
+                    .contentShape(Rectangle())
             }
             .menuStyle(.button)
             .buttonStyle(.borderless)
             .menuIndicator(.hidden)
             .fixedSize()
+            .padding(.leading, -RowLayout.spacing)
         }
         .padding(.vertical, 4)
     }
@@ -201,8 +226,11 @@ extension InstanceStatus {
 struct ProcessTrackRow: View {
     let process: InstanceStatus
     let model: ClusterModel
+    @Environment(\.openWindow) private var openWindow
     /// Show the instance number, for services that run more than one.
     var showsInstance = false
+    /// Fewer trailing columns, for when the inspector takes up room beside the list.
+    var compact = false
 
     var body: some View {
         let kind = process.resolvedKind
@@ -212,7 +240,8 @@ struct ProcessTrackRow: View {
         } badges: {
             if process.adopted { RowBadge("ADOPTED") }
         } subtitle: {
-            Text("\(kind.title) – \(model.name(of: process.node)) · ")
+            // The list groups processes by node, so the node isn't repeated here.
+            Text("\(kind.title) · ")
             Text(process.state.rawValue)
                 .foregroundStyle(process.state == .crashed ? .red : .secondary)
             if process.restarts > 0 {
@@ -222,12 +251,23 @@ struct ProcessTrackRow: View {
         } trailing: {
             Text(StatFormat.percent(process.cpu)).frame(width: 52, alignment: .trailing).help("CPU")
             Text(StatFormat.bytes(process.stats?.footprint ?? process.rss)).frame(width: 70, alignment: .trailing).help("Memory")
-            Text(StatFormat.duration(process.uptime)).frame(width: 64, alignment: .trailing).help("Uptime")
+            if !compact {
+                Text(StatFormat.duration(process.uptime)).frame(width: 64, alignment: .trailing).help("Uptime")
+            }
+            HStack(spacing: 0) {
+                if process.state == .running {
+                    RowIconButton(title: "Stop", symbol: "stop.fill") { perform(.stop) }
+                } else {
+                    RowIconButton(title: "Start", symbol: "play.fill") { perform(.start) }
+                }
+                RowIconButton(title: "Restart", symbol: "arrow.clockwise") { perform(.restart) }
+            }
         } actions: {
             Button("Start", systemImage: "play.fill") { perform(.start) }.disabled(process.state == .running)
             Button("Stop", systemImage: "stop.fill") { perform(.stop) }.disabled(process.state == .stopped)
             Button("Restart", systemImage: "arrow.clockwise") { perform(.restart) }
             Divider()
+            Button("Open in New Window", systemImage: "arrow.up.forward.app") { openWindow(id: "process", value: ProcessRef(process)) }
             Button("Copy Name") { copy(process.service) }
         }
     }
