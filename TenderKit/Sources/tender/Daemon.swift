@@ -103,7 +103,8 @@ extension Tender {
                     label: environment.agentLabel,
                     programArguments: [tenderd, "run", "--role", role, "--dev", "--identity-mode", "warn", "--listen", listen],
                     stdoutPath: environment.logsDirectory.appending(path: "tenderd.out.log").path(percentEncoded: false),
-                    stderrPath: environment.logsDirectory.appending(path: "tenderd.err.log").path(percentEncoded: false)
+                    stderrPath: environment.logsDirectory.appending(path: "tenderd.err.log").path(percentEncoded: false),
+                    throttleInterval: SystemInstallPlan.daemonThrottleInterval
                 ).write(to: plist, options: .atomic)
                 try await Daemon.load(plist: plist, environment: environment)
                 print("Installed \(environment.agentLabel) running \(tenderd)")

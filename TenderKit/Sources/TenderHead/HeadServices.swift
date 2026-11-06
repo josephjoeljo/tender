@@ -64,10 +64,14 @@ public final class HeadServices: Sendable {
     private let secrets: any SecretStore
     private let authority: CertificateAuthority
     private let holder = NIOLockedValueBox<(system: TenderActorSystem?, registry: HeadRegistry?)>((nil, nil))
+    private let issuedFor = NIOLockedValueBox<String?>(nil)
     private let logger: Logger
+    /// Where the head listens. Share it with the agent's `ClusterOptions.network`.
+    public let network: NetworkMonitor
 
     public init(environment: TenderEnvironment, secrets: any SecretStore, options: HeadOptions,
-                logger: Logger = Logger(label: "tender.head")) throws {
+                network: NetworkMonitor? = nil, logger: Logger = Logger(label: "tender.head")) throws {
+        self.network = network ?? NetworkMonitor(explicitHost: options.apiHost)
         self.environment = environment
         self.secrets = secrets
         self.options = options
@@ -77,7 +81,7 @@ public final class HeadServices: Sendable {
         logs = try LogStore(directory: environment.root.appending(path: "logstore"))
         audit = try AuditLog(directory: environment.root.appending(path: "logstore"))
         authority = try Self.loadOrCreateAuthority(secrets: secrets)
-        try Self.issueOwnIdentity(environment: environment, secrets: secrets, authority: authority, options: options)
+        try refreshIdentity(host: options.apiHost)
     }
 
     /// Creates the CA on first start. Losing it means every node has to re-join, so
@@ -123,28 +127,43 @@ public final class HeadServices: Sendable {
         return backup
     }
 
-    /// The head is a node too. Its certificate is reissued at each start so that it
-    /// always names the current addresses, while its key stays the same.
-    private static func issueOwnIdentity(environment: TenderEnvironment, secrets: any SecretStore,
-                                         authority: CertificateAuthority, options: HeadOptions) throws {
-        let key: NodeKey
-        if let existing = try secrets.read(ClusterSecrets.nodeKey) {
-            key = NodeKey(privateKeyPEM: String(decoding: existing, as: UTF8.self))
-        } else {
-            key = .generate()
-            try secrets.write(ClusterSecrets.nodeKey, Data(key.privateKeyPEM.utf8))
+    /// The head is a node too. Its certificate is reissued at each start, and again when
+    /// its address appears or changes, so that it always names the current addresses.
+    /// Its key stays the same.
+    private func refreshIdentity(host: String?) throws {
+        try issuedFor.withLockedValue { issued in
+            let key: NodeKey
+            if let existing = try secrets.read(ClusterSecrets.nodeKey) {
+                key = NodeKey(privateKeyPEM: String(decoding: existing, as: UTF8.self))
+            } else {
+                key = .generate()
+                try secrets.write(ClusterSecrets.nodeKey, Data(key.privateKeyPEM.utf8))
+            }
+            var names = options.advertisedNames
+            if let host { names.append(host) }
+            names.append("127.0.0.1")
+            let ips = names.filter { $0.first?.isNumber == true || $0.contains(":") }
+            let dns = names.filter { !ips.contains($0) }
+            let certificate = try authority.sign(csrPEM: try key.makeCSR(nodeID: options.nodeID), nodeID: options.nodeID,
+                                                 dnsNames: dns, ipAddresses: ips)
+            try secrets.write(ClusterSecrets.nodeCertificate, Data(certificate.utf8))
+            let reach = options.advertisedNames.first ?? host ?? "127.0.0.1"
+            try ClusterIdentityStore(environment: environment, secrets: secrets).save(
+                ClusterConfig(nodeID: options.nodeID, headNode: options.nodeID, headAgentAddress: "\(reach):\(options.agentPort)"))
+            issued = host
         }
-        var names = options.advertisedNames
-        if let host = options.apiHost { names.append(host) }
-        names.append("127.0.0.1")
-        let ips = names.filter { $0.first?.isNumber == true || $0.contains(":") }
-        let dns = names.filter { !ips.contains($0) }
-        let certificate = try authority.sign(csrPEM: try key.makeCSR(nodeID: options.nodeID), nodeID: options.nodeID,
-                                             dnsNames: dns, ipAddresses: ips)
-        try secrets.write(ClusterSecrets.nodeCertificate, Data(certificate.utf8))
-        let host = options.advertisedNames.first ?? options.apiHost ?? "127.0.0.1"
-        try ClusterIdentityStore(environment: environment, secrets: secrets).save(
-            ClusterConfig(nodeID: options.nodeID, headNode: options.nodeID, headAgentAddress: "\(host):\(options.agentPort)"))
+    }
+
+    /// Called before the transport binds to `host`. Does nothing if the certificate
+    /// already names it.
+    func addressReady(_ host: String) {
+        if issuedFor.withLockedValue({ $0 }) == host { return }
+        do {
+            try refreshIdentity(host: host)
+            logger.info("reissued the head certificate", metadata: ["address": "\(host)"])
+        } catch {
+            logger.error("couldn't reissue the head certificate", metadata: ["error": "\(error)"])
+        }
     }
 
     public var caFingerprint: String { authority.fingerprint }
@@ -165,13 +184,17 @@ public final class HeadServices: Sendable {
             services: { [self] in
                 let cloud = CloudServices(environment: environment, secrets: secrets)
                 var services: [any Service] = [
-                    try makePublicAPI(),
+                    AddressBoundServer(name: "public API", monitor: network, logger: logger) { [self] host in
+                        addressReady(host)
+                        return try makePublicAPI(host: host)
+                    },
                     LogRetentionService(logs: logs, logger: logger),
                     NightlyOffload(logs: logs, audit: audit, uploader: { try cloud.uploader() }),
                 ]
                 if let metrics = makeMetricsServer() { services.append(metrics) }
                 return services
-            }
+            },
+            addressReady: { [self] host in addressReady(host) }
         )
     }
 
@@ -179,7 +202,12 @@ public final class HeadServices: Sendable {
 
     private func agent(on node: NodeID) throws -> $NodeAgentProtocol<TenderActorSystem> {
         guard let system else {
-            throw NodeCallError(code: "not_ready", message: "The cluster transport isn't up yet.", httpStatus: 503)
+            let state = network.state
+            throw NodeCallError(code: "not_ready",
+                                message: state.kind == .waitingForTailscale
+                                    ? "The cluster transport isn't up: \(state.summary)."
+                                    : "The cluster transport isn't up yet.",
+                                httpStatus: 503)
         }
         return try $NodeAgentProtocol.resolve(id: ActorIdentity(node: node, name: ActorNames.agent), using: system)
     }
@@ -326,14 +354,16 @@ public final class HeadServices: Sendable {
     /// address, and Tailscale ACLs decide who reaches it. It carries no log lines or secrets.
     func makeMetricsServer() -> (any Service)? {
         guard let port = options.metricsPort else { return nil }
-        let router = Router()
-        router.get("/metrics") { [self] _, _ in
-            Response(status: .ok, headers: [.contentType: "text/plain; version=0.0.4"],
-                     body: ResponseBody(byteBuffer: ByteBuffer(string: await metricsText())))
+        return AddressBoundServer(name: "metrics", monitor: network, logger: logger) { [self] host in
+            let router = Router()
+            router.get("/metrics") { [self] _, _ in
+                Response(status: .ok, headers: [.contentType: "text/plain; version=0.0.4"],
+                         body: ResponseBody(byteBuffer: ByteBuffer(string: await metricsText())))
+            }
+            return Application(router: router,
+                               configuration: .init(address: .hostname(host, port: port), serverName: nil),
+                               logger: logger)
         }
-        return Application(router: router,
-                           configuration: .init(address: .hostname(options.apiHost ?? "127.0.0.1", port: port), serverName: nil),
-                           logger: logger)
     }
 
     func metricsText() async -> String {
@@ -364,7 +394,7 @@ public final class HeadServices: Sendable {
         // the head answers to, or take over a node that already exists.
         guard request.nodeID != options.nodeID,
               !options.advertisedNames.contains(request.nodeID.rawValue),
-              options.apiHost != request.nodeID.rawValue,
+              network.state.address != request.nodeID.rawValue,
               request.nodeID.rawValue != "127.0.0.1", request.nodeID.rawValue.lowercased() != "localhost" else {
             throw NodeCallError(code: "invalid_node", message: "'\(request.nodeID)' is a name of the head.", httpStatus: 409)
         }
@@ -384,7 +414,7 @@ public final class HeadServices: Sendable {
             throw NodeCallError(code: "invalid_token", message: "That join token is expired or already used.", httpStatus: 401)
         }
         try store.clearRevocation(node: request.nodeID)
-        let host = options.advertisedNames.first ?? options.apiHost ?? "127.0.0.1"
+        let host = options.advertisedNames.first ?? network.state.address ?? "127.0.0.1"
         logger.info("node joined", metadata: ["node": "\(request.nodeID)"])
         return JoinResponse(certificatePEM: certificate, caPEM: authority.certificatePEM, headNode: options.nodeID,
                             headAgentAddress: "\(host):\(options.agentPort)")
@@ -672,12 +702,11 @@ public final class HeadServices: Sendable {
         return router
     }
 
-    func makePublicAPI() throws -> any Service {
+    func makePublicAPI(host: String) throws -> any Service {
         guard let certificate = try secrets.read(ClusterSecrets.nodeCertificate),
               let key = try secrets.read(ClusterSecrets.nodeKey) else {
             throw NodeCallError(code: "not_ready", message: "The head has no certificate.")
         }
-        let host = options.apiHost ?? "127.0.0.1"
         let tls = TLSConfiguration.makeServerConfiguration(
             certificateChain: try NIOSSLCertificate.fromPEMBytes(Array(certificate)).map { .certificate($0) },
             privateKey: .privateKey(try NIOSSLPrivateKey(bytes: Array(key), format: .pem))
@@ -770,6 +799,51 @@ struct LogRetentionService: Service {
                     logger.error("log retention failed", metadata: ["error": "\(error)"])
                 }
                 try? await Task.sleep(for: .seconds(300))
+            }
+        }
+    }
+}
+
+/// Runs a server that listens on the node's address: it starts once there is one, and
+/// restarts on the new address when it changes. `build` is called for each address.
+struct AddressBoundServer: Service {
+    let name: String
+    let monitor: NetworkMonitor
+    let logger: Logger
+    let build: @Sendable (String) async throws -> any Service
+
+    func run() async throws {
+        try await cancelWhenGracefulShutdown {
+            while !Task.isCancelled {
+                // No timeout: the transport (ClusterLink) is what gives up, and exits the process.
+                guard let host = try await monitor.waitForHost(timeout: nil, logger: logger) else { return }
+                var failed = false
+                do {
+                    let group = ServiceGroup(services: [try await build(host)], gracefulShutdownSignals: [], logger: logger)
+                    await withTaskGroup(of: Bool.self) { tasks in
+                        tasks.addTask {
+                            do { try await group.run() } catch {
+                                logger.error("\(name) stopped", metadata: ["error": "\(error)", "address": "\(host)"])
+                                return true
+                            }
+                            return false
+                        }
+                        tasks.addTask {
+                            _ = await monitor.waitForChange(from: host)
+                            await group.triggerGracefulShutdown()
+                            return false
+                        }
+                        failed = await tasks.next() ?? false
+                        await group.triggerGracefulShutdown()
+                        tasks.cancelAll()
+                        await tasks.waitForAll()
+                    }
+                } catch {
+                    logger.error("couldn't start the \(name)", metadata: ["error": "\(error)"])
+                    failed = true
+                }
+                // Backs off after a failure (a port in use, say) rather than spinning.
+                if failed { try? await Task.sleep(for: .seconds(5)) }
             }
         }
     }

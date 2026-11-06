@@ -30,9 +30,12 @@ public struct NodeInfo: Codable, Sendable, Equatable {
     public var hardware: String
     public var address: String?
     public var labels: [String: String]
+    /// Whether the node is listening for peers. Nil from nodes running an older tenderd.
+    public var network: NetworkState?
 
     public init(id: NodeID, version: String, macOS: String, hardware: String,
-                address: String? = nil, labels: [String: String] = [:]) {
+                address: String? = nil, labels: [String: String] = [:], network: NetworkState? = nil) {
+        self.network = network
         self.id = id
         self.version = version
         self.macOS = macOS

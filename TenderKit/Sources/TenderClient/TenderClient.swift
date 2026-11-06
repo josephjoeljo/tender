@@ -97,6 +97,11 @@ public struct TenderClient: Sendable {
         try await send(.GET, "/v1/nodes")
     }
 
+    /// Where the local daemon is listening. Only meaningful over the socket.
+    public func network() async throws -> NetworkState {
+        try await send(.GET, "/v1/network")
+    }
+
     public func createJoinToken(ttlSeconds: Int? = nil) async throws -> JoinTokenResponse {
         try await send(.POST, "/v1/tokens", body: try JSONEncoder().encode(JoinTokenRequest(ttlSeconds: ttlSeconds)))
     }

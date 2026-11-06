@@ -97,6 +97,15 @@ extension Tender {
         }
     }
 
+    struct Status: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Show whether this machine's daemon is listening for other nodes.")
+        @OptionGroup var options: CommonOptions
+
+        func run() async throws {
+            try await options.run({ try await $0.network() }) { "tenderd is \($0.summary)" }
+        }
+    }
+
     struct Node: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Manage a node.", subcommands: [Revoke.self])
 

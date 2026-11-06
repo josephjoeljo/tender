@@ -64,6 +64,7 @@ private let plan = SystemInstallPlan()
     #expect(plist["Label"] as? String == "com.olympsis.tender.agent")
     #expect(plist["ProgramArguments"] as? [String] == ["/opt/tender/libexec/tenderd", "run", "--role", "worker"])
     #expect(plist["UserName"] == nil, "tenderd itself runs as root; only managed processes are _tender")
+    #expect(plist["ThrottleInterval"] as? Int == SystemInstallPlan.daemonThrottleInterval, "restart loops are paced")
 }
 
 @Test func toolRunnerCapturesOutput() async throws {

@@ -26,11 +26,16 @@ public struct ClusterHooks: Sendable {
     /// Replaces the socket's process routes with cluster-wide ones.
     public var installRoutes: @Sendable (Router<BasicRequestContext>) -> Void
     public var services: @Sendable () throws -> [any Service]
+    /// Called with the node's address each time the transport is about to (re)bind to it,
+    /// so the head can refresh what names that address, such as its certificate.
+    public var addressReady: @Sendable (String) async -> Void
 
     public init(resolver: any NodeResolver, verifier: any PeerVerifier,
                 systemReady: @escaping @Sendable (TenderActorSystem) -> Void,
                 installRoutes: @escaping @Sendable (Router<BasicRequestContext>) -> Void,
-                services: @escaping @Sendable () throws -> [any Service]) {
+                services: @escaping @Sendable () throws -> [any Service],
+                addressReady: @escaping @Sendable (String) async -> Void = { _ in }) {
+        self.addressReady = addressReady
         self.resolver = resolver
         self.verifier = verifier
         self.systemReady = systemReady
@@ -107,7 +112,7 @@ public struct AgentRuntime: Sendable {
         let socketPath = environment.socketPath.path(percentEncoded: false)
         let logger = self.logger
 
-        let router = makeRouter(controller: controller, identities: identities, clusterRoutes: hooks?.installRoutes)
+        let router = makeRouter(controller: controller, identities: identities, network: cluster.network, clusterRoutes: hooks?.installRoutes)
         let server = Application(
             router: router,
             configuration: .init(address: .unixDomainSocket(path: socketPath), serverName: nil),

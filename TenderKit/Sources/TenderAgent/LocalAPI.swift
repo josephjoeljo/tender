@@ -339,7 +339,7 @@ struct ProcessController: Sendable {
 }
 
 /// Routes of the local HTTP/JSON API. The head serves the same API in milestone 2.
-func makeRouter(controller: ProcessController, identities: ClusterIdentityStore? = nil,
+func makeRouter(controller: ProcessController, identities: ClusterIdentityStore? = nil, network: NetworkMonitor? = nil,
                 clusterRoutes: (@Sendable (Router<BasicRequestContext>) -> Void)? = nil) -> Router<BasicRequestContext> {
     let router = Router()
 
@@ -375,6 +375,13 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
                     throw APIFailure(status: .badRequest, code: "invalid_credentials", message: error.description)
                 }
             }
+        }
+    }
+
+    // Socket only: where this daemon's listeners are, for `tender status`.
+    if let network {
+        router.get("/v1/network") { _, _ in
+            await respond { await network.resolve(); return network.state }
         }
     }
 
