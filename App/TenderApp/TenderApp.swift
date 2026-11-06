@@ -35,8 +35,6 @@ struct TenderApp: App {
             DashboardView(model: model)
                 .font(.body)
                 .frame(minWidth: 900, minHeight: 560)
-                // Lets the desktop show through, so the glass sidebar has something to refract.
-                .containerBackground(.thinMaterial, for: .window)
         }
 
         // A process broken out of the dashboard. Opening the same one again brings its window forward.

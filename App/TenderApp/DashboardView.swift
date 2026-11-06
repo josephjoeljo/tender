@@ -33,10 +33,9 @@ struct DashboardView: View {
     }
 
     @State private var selection: Section? = Section.atLaunch ?? .nodes
-    @State private var columns: NavigationSplitViewVisibility = .all
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columns) {
+        NavigationSplitView {
             List(selection: $selection) {
                 ForEach(Section.pages) { section in
                     Label(section.rawValue, systemImage: section.symbol).tag(section)
@@ -46,15 +45,7 @@ struct DashboardView: View {
                 }
             }
             .font(.body)
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-            // Rows sit 8pt inside the panel, which sits 8pt inside the column.
-            .padding(.horizontal, FloatingSidebarPanel.inset + 2)
-            .padding(.bottom, FloatingSidebarPanel.inset)
-            .background { FloatingSidebarPanel() }
-            // The system toggle pins itself to the column's edge, on top of the panel's rim.
-            .toolbar(removing: .sidebarToggle)
-            .navigationSplitViewColumnWidth(min: 200, ideal: 220)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
         } detail: {
             if selection == .settings {
                 SettingsView(model: model, fixedWidth: false)
@@ -72,39 +63,6 @@ struct DashboardView: View {
                 }
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button("Toggle Sidebar", systemImage: "sidebar.leading") {
-                    withAnimation { columns = columns == .detailOnly ? .all : .detailOnly }
-                }
-                .help(columns == .detailOnly ? "Show the sidebar" : "Hide the sidebar")
-            }
-        }
-    }
-}
-
-/// The sidebar as a raised pane of glass, inset from the window's edges, with the window's
-/// own material around it.
-private struct FloatingSidebarPanel: View {
-    static let inset: CGFloat = 8
-    private let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-
-    var body: some View {
-        Group {
-            if #available(macOS 26, *) {
-                Color.clear.glassEffect(.regular, in: shape)
-            } else {
-                shape.fill(.regularMaterial)
-            }
-        }
-        // A lit rim, brighter along the top, so the pane reads as raised off the window.
-        .overlay {
-            shape.strokeBorder(LinearGradient(colors: [.white.opacity(0.35), .white.opacity(0.08)],
-                                              startPoint: .top, endPoint: .bottom), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.3), radius: 14, y: 5)
-        .padding(Self.inset)
-        .ignoresSafeArea()
     }
 }
 
@@ -214,8 +172,6 @@ struct ProcessesView: View {
             }
         }
         .listStyle(.inset)
-        // Lets the window's material through, so the list sits on the same glass as the sidebar.
-        .scrollContentBackground(.hidden)
         .contextMenu(forSelectionType: String.self) { _ in
         } primaryAction: { ids in
             for id in ids {

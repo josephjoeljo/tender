@@ -80,8 +80,15 @@ struct ProcessInspector: View {
                     }
                     .pickerStyle(.inline)
                 } label: {
-                    Text(tab.rawValue)
+                    // Our own chevron: the menu's indicator pads the capsule more than the round buttons beside it.
+                    HStack(spacing: 4) {
+                        Text(tab.rawValue)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .menuIndicator(.hidden)
                 .help("Switch between details, config and logs")
             }
             if #available(macOS 26, *) { ToolbarSpacer(.flexible) }
