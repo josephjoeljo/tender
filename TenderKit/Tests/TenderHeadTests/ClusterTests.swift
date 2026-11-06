@@ -1,6 +1,7 @@
 import Crypto
 import Foundation
 import LaunchdKit
+import Synchronization
 import Testing
 import TenderActorSystem
 import TenderAgent
@@ -73,8 +74,13 @@ final class Daemon: @unchecked Sendable {
     let metricsPort = freePort()
     let source: (any ReleaseSource)?
 
+    /// With this, the daemon has no `--listen` and finds its address from the monitor, like
+    /// a daemon that starts before Tailscale does.
+    let network: NetworkMonitor?
+
     init(node: String, head: Bool, env: TenderEnvironment? = nil, agentPort: Int? = nil, apiPort: Int? = nil,
-         source: (any ReleaseSource)? = nil) throws {
+         source: (any ReleaseSource)? = nil, network: NetworkMonitor? = nil) throws {
+        self.network = network
         self.source = source
         self.env = try env ?? makeEnvironment()
         self.agentPort = agentPort ?? freePort()
@@ -85,13 +91,13 @@ final class Daemon: @unchecked Sendable {
 
     func start() async throws {
         let secrets = env.makeSecretStore()
-        let cluster = ClusterOptions(listenHost: "127.0.0.1", advertiseHost: "127.0.0.1", agentPort: agentPort,
-                                     identityMode: .off, heartbeatInterval: .milliseconds(100))
+        let cluster = ClusterOptions(listenHost: network == nil ? "127.0.0.1" : nil, advertiseHost: "127.0.0.1", agentPort: agentPort,
+                                     identityMode: .off, heartbeatInterval: .milliseconds(100), network: network, addressTimeout: nil)
         var hooks: ClusterHooks?
         if isHead {
-            let options = HeadOptions(nodeID: NodeID(nodeName), apiHost: "127.0.0.1", apiPort: apiPort, agentPort: agentPort,
-                                      advertisedNames: ["127.0.0.1"], metricsPort: metricsPort)
-            hooks = try HeadServices(environment: env, secrets: secrets, options: options).hooks()
+            let options = HeadOptions(nodeID: NodeID(nodeName), apiHost: network == nil ? "127.0.0.1" : nil, apiPort: apiPort,
+                                      agentPort: agentPort, advertisedNames: ["127.0.0.1"], metricsPort: metricsPort)
+            hooks = try HeadServices(environment: env, secrets: secrets, options: options, network: network).hooks()
         }
         let runtime = AgentRuntime(environment: env, secrets: secrets, cluster: cluster, hooks: hooks, launchd: launchd, releaseSource: source, shutdownSignals: [])
         task = Task { try await runtime.run() }
@@ -127,6 +133,45 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     #expect(joined == true)
     try await body(head, worker)
     await worker.stop()
+    await head.stop()
+}
+
+@Test func headWaitsForTailscaleThenListensAndRebindsWhenTheAddressChanges() async throws {
+    let address = Mutex<String?>(nil)
+    let network = NetworkMonitor(pollInterval: .milliseconds(50)) { address.withLock { $0 } }
+    let head = try Daemon(node: "head", head: true, network: network)
+    try await head.start()
+    defer { head.cleanup() }
+
+    // No address yet: the socket works, and says why nothing else does.
+    #expect(try await head.client.network().kind == .waitingForTailscale)
+    do {
+        _ = try await head.client.start(sleeper)
+        Issue.record("a head with no address can't run commands through its transport")
+    } catch let error as TenderClientError {
+        #expect(error.code == "not_ready")
+        #expect(error.description.contains("waiting for Tailscale"))
+    }
+    #expect(try await head.client.nodes().nodes.isEmpty)
+
+    // Tailscale comes up.
+    address.withLock { $0 = "127.0.0.1" }
+    let up = try await eventually { () -> Bool? in
+        let nodes = try await head.client.nodes().nodes
+        return nodes.count == 1 && nodes[0].up && nodes[0].info.network?.kind == .loopbackOnly ? true : nil
+    }
+    #expect(up == true)
+    #expect(try await head.client.network() == NetworkState(kind: .loopbackOnly, address: "127.0.0.1"))
+    #expect(try await head.client.start(sleeper).processes.first?.state == .running)
+
+    // The address changes: the listeners rebind and the node registers again.
+    address.withLock { $0 = "localhost" }
+    let moved = try await eventually { () -> Bool? in
+        let nodes = try await head.client.nodes().nodes
+        return try await head.client.network().address == "localhost" && nodes.count == 1 && nodes[0].up ? true : nil
+    }
+    #expect(moved == true)
+    #expect(try await head.client.list().processes.count == 1)
     await head.stop()
 }
 
