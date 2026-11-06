@@ -31,6 +31,27 @@ enum RowLayout {
     static let spacing: CGFloat = 12
     /// Where the title starts, so dropped-down panels and separators line up with it.
     static let textLeading = artwork + spacing
+    /// Hit area of the icon buttons at the end of a row, so they space evenly.
+    static let button: CGFloat = 24
+}
+
+/// An icon button at the end of a row, the same size as its neighbours.
+struct RowIconButton: View {
+    let title: String
+    let symbol: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .frame(width: RowLayout.button, height: RowLayout.button)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .help(title)
+        .accessibilityLabel(title)
+    }
 }
 
 /// A small boxed label after a title, like the "explicit" mark on a track.
@@ -79,16 +100,20 @@ struct TrackRow<Artwork: View, Badges: View, Subtitle: View, Trailing: View, Act
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+            // Flush with the icon buttons before it, so the three sit evenly spaced.
             Menu {
                 actions
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundStyle(.secondary)
+                    .frame(width: RowLayout.button, height: RowLayout.button)
+                    .contentShape(Rectangle())
             }
             .menuStyle(.button)
             .buttonStyle(.borderless)
             .menuIndicator(.hidden)
             .fixedSize()
+            .padding(.leading, -RowLayout.spacing)
         }
         .padding(.vertical, 4)
     }
@@ -229,18 +254,14 @@ struct ProcessTrackRow: View {
             if !compact {
                 Text(StatFormat.duration(process.uptime)).frame(width: 64, alignment: .trailing).help("Uptime")
             }
-            HStack(spacing: 12) {
+            HStack(spacing: 0) {
                 if process.state == .running {
-                    Button("Stop", systemImage: "stop.fill") { perform(.stop) }.help("Stop")
+                    RowIconButton(title: "Stop", symbol: "stop.fill") { perform(.stop) }
                 } else {
-                    Button("Start", systemImage: "play.fill") { perform(.start) }.help("Start")
+                    RowIconButton(title: "Start", symbol: "play.fill") { perform(.start) }
                 }
-                Button("Restart", systemImage: "arrow.clockwise") { perform(.restart) }.help("Restart")
+                RowIconButton(title: "Restart", symbol: "arrow.clockwise") { perform(.restart) }
             }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
-            .frame(width: 44)
         } actions: {
             Button("Start", systemImage: "play.fill") { perform(.start) }.disabled(process.state == .running)
             Button("Stop", systemImage: "stop.fill") { perform(.stop) }.disabled(process.state == .stopped)

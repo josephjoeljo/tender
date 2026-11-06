@@ -71,6 +71,8 @@ struct ProcessInspector: View {
             }
         }
         .toolbar {
+            // Centres the tab menu over the inspector, with the pop-out at its far edge.
+            if #available(macOS 26, *) { ToolbarSpacer(.flexible) }
             ToolbarItem {
                 Menu {
                     Picker("Show", selection: $tab) {
@@ -82,6 +84,7 @@ struct ProcessInspector: View {
                 }
                 .help("Switch between details, config and logs")
             }
+            if #available(macOS 26, *) { ToolbarSpacer(.flexible) }
             if let popOut {
                 ToolbarItem {
                     Button("Open in New Window", systemImage: "arrow.up.forward.app", action: popOut)
