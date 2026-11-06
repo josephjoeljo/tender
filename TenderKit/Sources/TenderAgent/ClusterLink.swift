@@ -133,7 +133,7 @@ struct ClusterLink: Service {
     func run() async throws {
         let monitor = options.network
         try await cancelWhenGracefulShutdown {
-            var spool: LogSpool?
+            var openSpool: LogSpool?
             var timeout = options.addressTimeout
             while !Task.isCancelled {
                 guard (try? identities.tls()) != nil, let config = try? identities.config() else {
@@ -147,9 +147,13 @@ struct ClusterLink: Service {
                 timeout = nil
                 await hooks?.addressReady(host)
                 do {
-                    guard let tls = try identities.tls() else { continue }
+                    guard let tls = try identities.tls() else {
+                        try? await Task.sleep(for: .seconds(1))
+                        continue
+                    }
                     let (system, _) = try await start(config: config, tls: tls, host: host)
-                    let spool = try spool ?? LogSpool(directory: identities.environment.spoolDirectory)
+                    let spool = try openSpool ?? LogSpool(directory: identities.environment.spoolDirectory)
+                    openSpool = spool
                     await withTaskGroup(of: Void.self) { group in
                         group.addTask { await heartbeats(config: config, system: system, spool: spool) }
                         group.addTask { await tailLogs(spool: spool) }

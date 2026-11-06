@@ -86,7 +86,3 @@ public struct JoinClient: Sendable {
     }
 }
 
-/// This node's ID: a UUID made on first run (see `NodeIdentity`).
-public func defaultNodeID(environment: TenderEnvironment) -> String {
-    NodeIdentity.current(environment: environment).rawValue
-}

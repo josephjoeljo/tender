@@ -66,7 +66,7 @@ extension Tender {
         static let configuration = CommandConfiguration(abstract: "Join this node to a cluster. Its daemon must be running.")
         @Argument(help: "The head's address: host or host:port.") var head: String
         @Option(help: "From `tender token create`.") var token: String
-        @Option(help: "This node's ID. It must match its Tailscale machine name. Defaults to the hostname.") var nodeId: String?
+        @Option(help: "This node's ID. Defaults to the UUID this machine made on first run; use this only to override it.") var nodeId: String?
         @OptionGroup var options: CommonOptions
 
         func run() async throws {
