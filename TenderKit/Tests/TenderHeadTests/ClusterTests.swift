@@ -1028,6 +1028,20 @@ private struct FakeSource: ReleaseSource {
     #expect(two.map(\.label) == ["mac-1", "mac-2"])
 }
 
+@Test func metersAndOrderUseHostnamesNotUUIDs() {
+    func node(_ id: String, hostname: String?, head: Bool = false) -> NodeSummary {
+        NodeSummary(info: NodeInfo(id: NodeID(id), version: "1", macOS: "x", hardware: "y",
+                                   labels: head ? [NodeInfo.roleLabel: NodeInfo.headRole] : [:], hostname: hostname),
+                    up: true, lastHeartbeatAge: nil, instanceCount: 0, crashedCount: 0)
+    }
+    let head = node("88e68331-3a92-4a5e-88eb-1992d20c4763", hostname: "mac-mini", head: true)
+    let worker = node("7b556fd5-dbe2-4a1b-9c3d-000000000000", hostname: "mac-mini-2")
+    let unnamed = node("00000000-0000-0000-0000-000000000000", hostname: nil)
+    #expect([worker, unnamed, head].headFirst().map(\.info.id) == [head.info.id, unnamed.info.id, worker.info.id],
+            "head first, then by name; an unnamed node sorts by its ID")
+    #expect(NodeMeter.meters(nodes: [head, worker], processes: []).map(\.label) == ["mac-mini", "mac-mini-2"])
+}
+
 @Test func contextStorePersistsAndClears() throws {
     let env = try makeEnvironment()
     defer { try? FileManager.default.removeItem(at: env.root) }

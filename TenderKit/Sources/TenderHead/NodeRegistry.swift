@@ -98,7 +98,7 @@ public actor RegistryState {
                 secretFetchErrors: entry.secretFetchErrors,
                 stats: entry.stats
             )
-        }.sorted { $0.info.id.rawValue < $1.info.id.rawValue }
+        }.headFirst()
     }
 
     public func upNodes(now: Date = Date()) -> [NodeID] {

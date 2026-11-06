@@ -76,7 +76,7 @@ struct ProcessRow: View {
         HStack {
             VStack(alignment: .leading) {
                 Text("\(process.service)[\(process.instance)]")
-                Text("\(process.node.rawValue) · \(process.state.rawValue)")
+                Text("\(model.name(of: process.node)) · \(process.state.rawValue)")
                     .font(.caption)
                     .foregroundStyle(process.state == .crashed ? .red : .secondary)
             }

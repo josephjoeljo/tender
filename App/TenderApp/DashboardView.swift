@@ -164,17 +164,24 @@ struct LogsView: View {
                  text: text.isEmpty ? nil : text, limit: 1000)
     }
 
-    private var nodeOptions: [String] { Set(model.nodes.map(\.info.id.rawValue)).union(nodes).sorted() }
+    /// Node IDs, sorted by the name the menu shows.
+    private var nodeOptions: [String] {
+        Set(model.nodes.map(\.info.id.rawValue)).union(nodes).sorted {
+            model.name(of: NodeID($0)).localizedStandardCompare(model.name(of: NodeID($1))) == .orderedAscending
+        }
+    }
     private var serviceOptions: [String] { Set(model.processes.map(\.service)).union(services).sorted() }
 
     private func accepts(_ entry: LogEntry) -> Bool {
         (services.isEmpty || services.contains(entry.service)) && (nodes.isEmpty || nodes.contains(entry.node.rawValue))
     }
 
-    private func filterMenu(_ title: String, options: [String], selection: Binding<Set<String>>) -> some View {
+    /// `label` turns an option into what the menu shows; the selection keeps the raw value (a node's ID).
+    private func filterMenu(_ title: String, options: [String], selection: Binding<Set<String>>,
+                            label: @escaping (String) -> String = { $0 }) -> some View {
         Menu {
             ForEach(options, id: \.self) { option in
-                Toggle(option, isOn: Binding(
+                Toggle(label(option), isOn: Binding(
                     get: { selection.wrappedValue.contains(option) },
                     set: { on in
                         if on { selection.wrappedValue.insert(option) } else { selection.wrappedValue.remove(option) }
@@ -196,7 +203,7 @@ struct LogsView: View {
             HStack {
                 TextField("Search", text: $text).onSubmit(search)
                 filterMenu("services", options: serviceOptions, selection: $services)
-                filterMenu("nodes", options: nodeOptions, selection: $nodes)
+                filterMenu("nodes", options: nodeOptions, selection: $nodes) { model.name(of: NodeID($0)) }
                 Picker("", selection: $stream) {
                     Text("All").tag("all")
                     Text("stdout").tag("out")

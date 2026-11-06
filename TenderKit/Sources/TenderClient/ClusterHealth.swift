@@ -68,7 +68,7 @@ public struct NodeMeter: Sendable, Equatable {
         nodes.map { node in
             let wanted = processes.filter { $0.node == node.info.id && $0.state != .stopped }
             let running = wanted.filter { $0.state == .running || $0.state == .starting }.count
-            let name = nodes.count == 1 ? clusterName ?? node.info.id.rawValue : node.info.id.rawValue
+            let name = nodes.count == 1 ? clusterName ?? node.info.displayName : node.info.displayName
             let label = shortLabel(name)
             let isHead = node.info.isHead
             guard node.up else { return NodeMeter(label: label, fraction: 1, level: .down, isHead: isHead) }
