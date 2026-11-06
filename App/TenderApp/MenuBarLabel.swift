@@ -33,13 +33,8 @@ enum NodeMeterImage {
     private static let crownGap: CGFloat = 2
     private static let headColor = NSColor.systemYellow
 
-    /// Berkeley Mono if it's installed on this Mac, licensed or trial. It's never bundled,
-    /// because that takes a licence that allows embedding it. Otherwise, SF Mono.
     static func font(size: CGFloat = 9) -> NSFont {
-        for name in ["BerkeleyMono-Regular", "BerkeleyMonoTrial-Regular"] {
-            if let font = NSFont(name: name, size: size) { return font }
-        }
-        return .monospacedSystemFont(ofSize: size, weight: .regular)
+        .systemFont(ofSize: size)
     }
 
     private static func color(_ level: NodeMeter.Level) -> NSColor {

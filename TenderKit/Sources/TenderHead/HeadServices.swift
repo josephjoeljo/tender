@@ -743,6 +743,15 @@ public final class HeadServices: Sendable {
         router.post("/v1/join") { [self] request, _ in
             await respond { try await handleJoin(try await decode(JoinRequest.self, from: request)) }
         }
+        // For the app's Remove button. A write token can already run code on any node, so it can
+        // remove one. Purging log history stays on the socket.
+        router.delete("/v1/nodes/:id") { [self] request, context in
+            await respond {
+                _ = try await remove(node: await resolve(node: try context.parameters.requireDecoded("id")),
+                                     force: request.uri.queryParameters.get("force") == "true", purgeLogs: false)
+                return NodeList(nodes: await state.summaries())
+            }
+        }
         installClusterRoutes(on: router)
         return router
     }

@@ -32,9 +32,13 @@ public struct Heartbeat: Codable, Sendable, Equatable {
     public var previousRoundTrip: TimeInterval?
     public var spoolBacklog: Int
     public var spoolDropped: Int
+    /// Whole-machine resource use. Optional, so older peers still decode.
+    public var stats: NodeStats?
 
     public init(node: NodeID, nodeClock: Date, processes: [InstanceStatus], orphans: [String] = [],
-                previousRoundTrip: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0) {
+                previousRoundTrip: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0,
+                stats: NodeStats? = nil) {
+        self.stats = stats
         self.previousRoundTrip = previousRoundTrip
         self.spoolBacklog = spoolBacklog
         self.spoolDropped = spoolDropped

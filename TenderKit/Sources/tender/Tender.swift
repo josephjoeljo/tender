@@ -99,6 +99,9 @@ extension Tender {
         @Option(help: "Node to run on. Defaults to the node you're talking to.")
         var node: String?
 
+        @Option(help: "What it is, for the app's icon: \(ProcessKind.allCases.map(\.rawValue).joined(separator: ", ")). Guessed from the name by default.")
+        var kind: ProcessKind?
+
         @OptionGroup var options: CommonOptions
 
         @Argument(parsing: .postTerminator, help: "Command to run, after `--`.")
@@ -117,7 +120,8 @@ extension Tender {
                 workingDirectory: cwd,
                 instances: instances,
                 node: node.map { NodeID($0) },
-                user: user
+                user: user,
+                kind: kind
             )
             try await options.execute { try await $0.start(spec) }
         }
@@ -385,3 +389,5 @@ extension Tender {
         }
     }
 }
+
+extension ProcessKind: ExpressibleByArgument {}

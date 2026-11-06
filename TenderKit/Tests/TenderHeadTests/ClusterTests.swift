@@ -436,6 +436,21 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
         #expect(try await writeClient.start(sleeper).processes.count == 1)
         _ = try await writeClient.delete(service: "api")
 
+        // The app's Remove button: write scope only, and a node that is up needs force.
+        do {
+            _ = try await readClient.removeNode("worker", force: true)
+            Issue.record("read tokens can't remove nodes")
+        } catch let error as TenderClientError {
+            #expect(error.code == "forbidden")
+        }
+        do {
+            _ = try await writeClient.removeNode("worker")
+            Issue.record("an up node needs force")
+        } catch let error as TenderClientError {
+            #expect(error.code == "node_up")
+        }
+        #expect(try await writeClient.removeNode("worker", force: true).nodes.map(\.info.id) == [NodeID("head")])
+
         do {
             _ = try await TenderClient(head: address, caPEM: caPEM, token: "nonsense").nodes()
             Issue.record("unknown tokens are refused")

@@ -130,8 +130,7 @@ Things about how Tender works that may not be what you'd assume.
 
 ## Menu bar
 
-- **Font:** the node meters use Berkeley Mono if it's installed on that Mac, and SF Mono if not.
-  It isn't bundled, since that takes a licence that allows embedding it.
+- **Font:** the node meters use the system font.
 - **Names:** cut to 8 characters.
 - **More than 4 nodes:** the labelled meters become one unlabelled dot per node, because macOS
   silently hides menu bar items that don't fit. The popover says which node is which.

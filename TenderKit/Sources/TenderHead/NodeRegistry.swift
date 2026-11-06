@@ -15,6 +15,7 @@ public actor RegistryState {
         var skew: TimeInterval?
         var spoolBacklog = 0
         var spoolDropped = 0
+        var stats: NodeStats?
     }
 
     public static func skew(now: Date, nodeClock: Date, roundTrip: TimeInterval?) -> TimeInterval {
@@ -60,6 +61,7 @@ public actor RegistryState {
         entry.skew = Self.skew(now: now, nodeClock: heartbeat.nodeClock, roundTrip: heartbeat.previousRoundTrip)
         entry.spoolBacklog = heartbeat.spoolBacklog
         entry.spoolDropped = heartbeat.spoolDropped
+        entry.stats = heartbeat.stats
         entries[heartbeat.node] = entry
         return true
     }
@@ -90,7 +92,8 @@ public actor RegistryState {
                 crashedCount: entry.processes.filter { $0.state == .crashed }.count,
                 clockSkew: entry.skew,
                 spoolBacklog: entry.spoolBacklog,
-                spoolDropped: entry.spoolDropped
+                spoolDropped: entry.spoolDropped,
+                stats: entry.stats
             )
         }.sorted { $0.info.id.rawValue < $1.info.id.rawValue }
     }

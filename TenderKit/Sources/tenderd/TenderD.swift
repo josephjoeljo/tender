@@ -74,6 +74,9 @@ struct Run: AsyncParsableCommand {
     @Option(help: "Seconds between heartbeats.")
     var heartbeatInterval = 5
 
+    @Flag(help: "EXPERIMENTAL: report CPU, GPU, Neural Engine and DRAM power, read through a private macOS API.")
+    var experimentalPower = false
+
     func run() async throws {
         let env = environmentOptions.environment
         guard let mode = IdentityMode(rawValue: identityMode) else {
@@ -90,7 +93,7 @@ struct Run: AsyncParsableCommand {
         print("node id: \(nodeId ?? nodeID.rawValue) hostname: \(NodeIdentity.hostname())")
         let cluster = ClusterOptions(listenHost: listen, advertiseHost: advertise, agentPort: agentPort,
                                      identityMode: mode, heartbeatInterval: .seconds(heartbeatInterval),
-                                     network: network,
+                                     experimentalPower: experimentalPower, network: network,
                                      addressTimeout: tailscaleWait > 0 ? .seconds(tailscaleWait) : nil)
         let secrets = env.makeSecretStore()
         var hooks: ClusterHooks?
@@ -153,7 +156,13 @@ struct SecretsImport: AsyncParsableCommand {
     func run() async throws {
         let store = environmentOptions.environment.makeSecretStore()
         let values = try JSONDecoder().decode([String: Data].self, from: Data(contentsOf: URL(filePath: from)))
-        for (name, value) in values { try store.write(name, value) }
+        // Delete first: updating an existing Keychain item in place keeps its old access
+        // list, which trusts the previous tenderd and not this one. The values are already
+        // in the file, which is kept until every write has succeeded.
+        for (name, value) in values {
+            try store.delete(name)
+            try store.write(name, value)
+        }
         try FileManager.default.removeItem(atPath: from)
     }
 }

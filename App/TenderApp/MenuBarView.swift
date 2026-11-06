@@ -7,6 +7,9 @@ struct MenuBarView: View {
     let model: ClusterModel
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
+    /// The process list's natural height. A ScrollView in a menu bar window has no ideal
+    /// height of its own and collapses to zero, so the list is sized to this, up to a cap.
+    @State private var processListHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -20,7 +23,7 @@ struct MenuBarView: View {
                         Image(systemName: "circle.fill")
                             .font(.system(size: 8))
                             .foregroundStyle(node.up ? .green : .red)
-                        Text(node.info.id.rawValue)
+                        Text(node.info.displayName)
                         Spacer()
                         Text("\(node.instanceCount) processes").foregroundStyle(.secondary)
                     }
@@ -35,8 +38,9 @@ struct MenuBarView: View {
                             ProcessRow(process: process, model: model)
                         }
                     }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { processListHeight = $0 }
                 }
-                .frame(maxHeight: 220)
+                .frame(height: min(max(processListHeight, 20), 220))
             }
             if let error = model.actionError {
                 Text(error).font(.caption).foregroundStyle(.red).lineLimit(3)
@@ -99,11 +103,15 @@ extension ClusterModel {
     private static func node(_ name: String, up: Bool, processes: Int, crashed: Int = 0) -> NodeSummary {
         NodeSummary(info: NodeInfo(id: NodeID(name), version: "0.1.0", macOS: "macOS", hardware: "Mac", address: "\(name):7070",
                                    labels: name == "mac-1" ? [NodeInfo.roleLabel: NodeInfo.headRole] : [:]),
-                    up: up, lastHeartbeatAge: up ? 2 : 90, instanceCount: processes, crashedCount: crashed)
+                    up: up, lastHeartbeatAge: up ? 2 : 90, instanceCount: processes, crashedCount: crashed,
+                    stats: up ? .preview : nil)
     }
 
     private static func process(_ service: String, _ instance: Int, _ node: String, _ state: InstanceState) -> InstanceStatus {
-        InstanceStatus(service: service, instance: instance, node: NodeID(node), state: state)
+        InstanceStatus(service: service, instance: instance, node: NodeID(node), state: state,
+                       pid: state == .running ? 4242 : nil, uptime: state == .running ? 7200 : nil,
+                       cpu: state == .running ? 3.2 : nil, rss: state == .running ? 150 << 20 : nil,
+                       cpuSeconds: state == .running ? 410 : nil, stats: state == .running ? .preview : nil)
     }
 
     static var previewHealthy: ClusterModel {
