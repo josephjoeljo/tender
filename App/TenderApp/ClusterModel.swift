@@ -177,6 +177,16 @@ final class ClusterModel {
         }
     }
 
+    /// Fills in a node's history from the head, for the window about to be shown. A head
+    /// without history (older tenderd) leaves what the app recorded itself.
+    func loadHistory(nodeID: String, window: TimeInterval) async {
+        guard let client else { return }
+        let requested = connections.activeID
+        guard let fetched = try? await client.nodeHistory(node: nodeID, since: Date().addingTimeInterval(-window)),
+              requested == connections.activeID else { return }
+        history.seed(nodeID, with: fetched.points)
+    }
+
     func searchLogs(_ query: LogQuery) async throws -> LogSearchResult? {
         try await client?.searchLogs(query)
     }

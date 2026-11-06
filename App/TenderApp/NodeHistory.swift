@@ -2,8 +2,8 @@ import Foundation
 import TenderClient
 import TenderCore
 
-/// One poll's worth of a node's stats. The head keeps no history, so the app records its
-/// own while it's open: one sample per poll, the last hour, in memory only.
+/// One poll's worth of a node's stats, or one point of the head's history. The app seeds
+/// a node's history from the head when its detail opens, then adds a sample per poll.
 struct NodeSample: Identifiable {
     var date: Date
     var up: Bool
@@ -43,21 +43,47 @@ struct NodeSample: Identifiable {
         instances = Double(node.instanceCount)
         crashed = Double(node.crashedCount)
     }
+
+    /// The head records a point per heartbeat, so the node was up. Its heartbeat age is
+    /// how old the previous heartbeat got before this one arrived.
+    init(_ point: NodeStatsPoint) {
+        date = point.date
+        up = true
+        cpuPercent = point.cpuPercent
+        memoryUsed = point.memoryUsed
+        memoryTotal = point.memoryTotal
+        gpuPercent = point.gpuPercent
+        networkIn = point.networkInRate
+        networkOut = point.networkOutRate
+        diskRead = point.diskReadRate
+        diskWrite = point.diskWriteRate
+        power = point.power
+        heartbeatAge = point.heartbeatGap
+        clockSkew = point.clockSkew
+        spoolBacklog = Double(point.spoolBacklog)
+        instances = Double(point.instanceCount)
+        crashed = Double(point.crashedCount)
+    }
 }
 
 struct NodeHistory {
-    /// An hour at the 5-second poll interval.
-    static let capacity = 720
+    /// As far back as the head keeps.
+    static let kept: TimeInterval = 24 * 3600
 
     private(set) var samples: [String: [NodeSample]] = [:]
 
     mutating func record(_ nodes: [NodeSummary], at date: Date = Date()) {
         for node in nodes {
             samples[node.id, default: []].append(NodeSample(node, at: date))
-            if let count = samples[node.id]?.count, count > Self.capacity {
-                samples[node.id]?.removeFirst(count - Self.capacity)
-            }
+            samples[node.id]?.removeAll { $0.date < date.addingTimeInterval(-Self.kept) }
         }
+    }
+
+    /// The head's points replace what the app has up to the newest of them; later polls stay.
+    mutating func seed(_ nodeID: String, with points: [NodeStatsPoint]) {
+        guard let newest = points.last?.date else { return }
+        let later = (samples[nodeID] ?? []).filter { $0.date > newest }
+        samples[nodeID] = points.map(NodeSample.init) + later
     }
 
     func samples(for nodeID: String, since start: Date) -> [NodeSample] {
@@ -71,7 +97,7 @@ extension NodeHistory {
     static func preview(_ nodes: [NodeSummary]) -> NodeHistory {
         var history = NodeHistory()
         let now = Date()
-        for step in stride(from: capacity - 1, through: 0, by: -1) {
+        for step in stride(from: 719, through: 0, by: -1) {
             let t = Double(step)
             let wobbled = nodes.map { node -> NodeSummary in
                 var node = node

@@ -17,6 +17,7 @@ public actor RegistryState {
         var spoolDropped = 0
         var secretFetchErrors = 0
         var stats: NodeStats?
+        var history = NodeStatsRecorder()
     }
 
     public static func skew(now: Date, nodeClock: Date, roundTrip: TimeInterval?) -> TimeInterval {
@@ -56,10 +57,12 @@ public actor RegistryState {
     /// tells it to register again. That's how the registry rebuilds after a restart.
     public func heartbeat(_ heartbeat: Heartbeat, registeredThisRun: Bool, now: Date = Date()) -> Bool {
         guard registeredThisRun, var entry = entries[heartbeat.node] else { return false }
+        let gap = entry.lastHeartbeat.map { now.timeIntervalSince($0) }
         entry.lastHeartbeat = now
         entry.processes = heartbeat.processes
         entry.orphans = heartbeat.orphans
         entry.skew = Self.skew(now: now, nodeClock: heartbeat.nodeClock, roundTrip: heartbeat.previousRoundTrip)
+        entry.history.record(NodeStatsPoint(heartbeat, skew: entry.skew, gap: gap, at: now))
         entry.spoolBacklog = heartbeat.spoolBacklog
         entry.spoolDropped = heartbeat.spoolDropped
         entry.secretFetchErrors = heartbeat.secretFetchErrors
@@ -71,6 +74,14 @@ public actor RegistryState {
     public func remove(_ node: NodeID) { entries[node] = nil }
 
     public func knows(_ node: NodeID) -> Bool { entries[node] != nil }
+
+    /// Nil for a node the head doesn't know.
+    public func history(of node: NodeID, since: Date?, limit: Int) -> NodeStatsHistory? {
+        guard let entry = entries[node] else { return nil }
+        let points = entry.history.points(since: since)
+        return NodeStatsHistory(node: node, points: NodeStatsPoint.downsampled(points, to: limit),
+                                downsampled: points.count > limit)
+    }
 
     public func isUp(_ node: NodeID, now: Date = Date()) -> Bool {
         guard let last = entries[node]?.lastHeartbeat else { return false }
