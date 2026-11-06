@@ -240,9 +240,21 @@ public final class HeadServices: Sendable {
         return combined
     }
 
+    /// A node by ID, or by hostname when exactly one node goes by it (hostnames are only
+    /// labels, and two Macs can share one). Anything else is taken as an ID.
+    func resolve(node reference: String) async -> NodeID {
+        await state.resolve(reference) ?? NodeID(reference)
+    }
+
+    /// The `?node=` of a request, defaulting to the head.
+    private func resolve(query request: Request) async -> NodeID {
+        guard let reference = request.uri.queryParameters.get("node") else { return options.nodeID }
+        return await resolve(node: String(reference))
+    }
+
     /// Which nodes a by-name command means: the one asked for, or everywhere the service runs.
     private func targets(service: String, node: String?) async -> [NodeID] {
-        if let node { return [NodeID(node)] }
+        if let node { return [await resolve(node: node)] }
         let running = await state.nodes(running: service)
         return running.isEmpty ? [options.nodeID] : running
     }
@@ -259,7 +271,7 @@ public final class HeadServices: Sendable {
     /// A service's secret goes where the service runs, like other by-name commands. A
     /// shared one has no such place, so it needs a node or every node.
     private func secretTargets(scope: String, node: String?, all: Bool) async throws -> [NodeID] {
-        if let node { return [NodeID(node)] }
+        if let node { return [await resolve(node: node)] }
         if all { return Set(await state.upNodes() + [options.nodeID]).sorted { $0.rawValue < $1.rawValue } }
         guard scope != "shared" else {
             throw NodeCallError(code: "node_required", message: "A shared secret needs a node, or all nodes.", httpStatus: 400)
@@ -474,7 +486,7 @@ public final class HeadServices: Sendable {
             }
         }
         router.get("/v1/secrets") { [self] request, _ in
-            await respond { await clusterSecrets(nodes: request.uri.queryParameters.get("node").map { [NodeID($0)] }) }
+            await respond { await clusterSecrets(nodes: await request.uri.queryParameters.get("node").asyncMap { [await resolve(node: String($0))] }) }
         }
         // The audit log records the path, so the name, but never the body.
         router.put("/v1/secrets/:scope/:name") { [self] request, context in
@@ -537,7 +549,7 @@ public final class HeadServices: Sendable {
         }
         router.get("/v1/releases/:service") { [self] request, context in
             await respond {
-                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                let target = await resolve(query: request)
                 let service = try context.parameters.requireDecoded("service")
                 return try await translatingTransport(target) { try await agent(on: target).releases(service: service) }
             }
@@ -562,7 +574,7 @@ public final class HeadServices: Sendable {
         }
         router.post("/v1/gc") { [self] request, _ in
             await respond {
-                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                let target = await resolve(query: request)
                 _ = try await translatingTransport(target) { try await agent(on: target).apply(.collectGarbage) }
                 return await clusterStatus()
             }
@@ -638,7 +650,7 @@ public final class HeadServices: Sendable {
         router.post("/v1/adopt") { [self] request, _ in
             await respond {
                 let adopt = try await decode(AdoptRequest.self, from: request)
-                let target = request.uri.queryParameters.get("node").map { NodeID($0) } ?? options.nodeID
+                let target = await resolve(query: request)
                 _ = try await translatingTransport(target) { try await agent(on: target).adopt(adopt) }
                 return await clusterStatus()
             }
@@ -655,7 +667,7 @@ public final class HeadServices: Sendable {
         }
         router.post("/v1/nodes/:id/revoke") { [self] _, context in
             await respond {
-                try await revoke(node: NodeID(try context.parameters.requireDecoded("id")))
+                try await revoke(node: await resolve(node: try context.parameters.requireDecoded("id")))
                 return NodeList(nodes: await state.summaries())
             }
         }
@@ -741,6 +753,13 @@ struct BearerAuthMiddleware: RouterMiddleware {
             return errorResponse(NodeCallError(code: "forbidden", message: "This token is read-only.", httpStatus: 403))
         }
         return try await next(request, context)
+    }
+}
+
+extension Optional {
+    func asyncMap<T>(_ transform: (Wrapped) async -> T) async -> T? {
+        guard let self else { return nil }
+        return await transform(self)
     }
 }
 

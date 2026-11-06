@@ -50,7 +50,7 @@ struct Run: AsyncParsableCommand {
 
     @OptionGroup var environmentOptions: EnvironmentOptions
 
-    @Option(help: "This node's ID. It must match its Tailscale machine name. Defaults to the hostname.")
+    @Option(help: "This node's ID. Defaults to a UUID made on first run and kept in <root>/node-id; use this only to override it.")
     var nodeId: String?
 
     @Option(help: "Address to listen on. Defaults to the Tailscale IP, waited for if Tailscale isn't up yet.")
@@ -84,6 +84,10 @@ struct Run: AsyncParsableCommand {
         // Tailscale may not have an address yet (at boot). Nothing is resolved here: the
         // listeners wait for one, and the unix socket serves the local CLI meanwhile.
         let network = NetworkMonitor(explicitHost: listen)
+        // The ID is a UUID kept on disk, not the hostname, so renaming the Mac changes nothing.
+        let nodeID = try NodeIdentity.load(environment: env)
+        if let nodeId { NodeIdentity.override(NodeID(nodeId), environment: env) }
+        print("node id: \(nodeId ?? nodeID.rawValue) hostname: \(NodeIdentity.hostname())")
         let cluster = ClusterOptions(listenHost: listen, advertiseHost: advertise, agentPort: agentPort,
                                      identityMode: mode, heartbeatInterval: .seconds(heartbeatInterval),
                                      network: network,
@@ -92,7 +96,7 @@ struct Run: AsyncParsableCommand {
         var hooks: ClusterHooks?
         if role == .head {
             let names = [advertise, listen].compactMap { $0 }
-            let options = HeadOptions(nodeID: NodeID(nodeId ?? defaultNodeID()), apiHost: listen, apiPort: apiPort,
+            let options = HeadOptions(nodeID: NodeID(nodeId ?? nodeID.rawValue), apiHost: listen, apiPort: apiPort,
                                       agentPort: agentPort, advertisedNames: names)
             hooks = try HeadServices(environment: env, secrets: secrets, options: options, network: network).hooks()
         }

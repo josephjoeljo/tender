@@ -61,7 +61,7 @@ struct ProcessController: Sendable {
 
     func listSecrets() throws -> SecretList {
         let vault = try requireVault()
-        let node = try identities?.config()?.nodeID ?? NodeID(defaultNodeID())
+        let node = try identities?.config()?.nodeID ?? NodeIdentity.current(environment: environment)
         let specs = try store.services().map(\.spec).filter(\.usesSecretTemplates)
         var users: [String: [String]] = [:]
         var missing: [String] = []
@@ -396,7 +396,7 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
             let body = try await request.collectBody(upTo: 1 << 16)
             let deploy = try decodeBody(DeployRequest.self, Data(body.readableBytesView))
             let sha12 = try await controller.deploy(service: deploy.service, version: deploy.version)
-            return DeployResponse(outcomes: [DeployOutcome(node: NodeID(defaultNodeID()), sha12: sha12)])
+            return DeployResponse(outcomes: [DeployOutcome(node: NodeIdentity.current(environment: controller.environment), sha12: sha12)])
         }
     }
 
@@ -505,7 +505,7 @@ private func joinCluster(_ request: LocalJoinRequest, identities: ClusterIdentit
     if let existing = try identities.config() {
         throw APIFailure(status: .conflict, code: "already_joined", message: JoinError.alreadyJoined(existing.headNode.rawValue).description)
     }
-    let nodeID = NodeID(request.nodeID ?? defaultNodeID())
+    let nodeID = request.nodeID.map { NodeID($0) } ?? NodeIdentity.current(environment: identities.environment)
     let key = NodeKey.generate()
     let response: JoinResponse
     do {
@@ -520,6 +520,8 @@ private func joinCluster(_ request: LocalJoinRequest, identities: ClusterIdentit
     try identities.secrets.write(ClusterSecrets.caCertificate, Data(response.caPEM.utf8))
     let config = ClusterConfig(nodeID: nodeID, headNode: response.headNode, headAgentAddress: response.headAgentAddress)
     try identities.save(config)
+    // An explicit --node-id sticks, so everything on this node reports under the same ID.
+    if request.nodeID != nil { try NodeIdentity.adopt(nodeID, environment: identities.environment) }
     return JoinStatus(nodeID: nodeID, headNode: response.headNode)
 }
 

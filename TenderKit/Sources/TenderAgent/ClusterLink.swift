@@ -174,7 +174,8 @@ struct ClusterLink: Service {
     private func start(config: ClusterConfig, tls: TransportTLS, host listen: String) async throws -> (TenderActorSystem, NodeAgent) {
         let (host, port) = splitHostPort(config.headAgentAddress, defaultPort: options.agentPort)
         let logger = self.logger
-        let check = TailscaleIdentityCheck(mode: options.identityMode, requiredTags: options.requiredTags) { message in
+        let check = TailscaleIdentityCheck(mode: options.identityMode, requiredTags: options.requiredTags,
+                                           pins: PeerPins.standard(identities.environment)) { message in
             logger.warning("\(message)")
         }
         let system = TenderActorSystem(
@@ -205,7 +206,8 @@ struct ClusterLink: Service {
             hardware: String(decoding: hardware.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self),
             address: advertised.map { "\($0):\(options.agentPort)" },
             labels: config.nodeID == config.headNode ? [NodeInfo.roleLabel: NodeInfo.headRole] : [:],
-            network: options.network.state
+            network: options.network.state,
+            hostname: NodeIdentity.hostname()
         )
     }
 
@@ -286,7 +288,7 @@ struct ClusterLink: Service {
                 let registry = try $HeadRegistryProtocol.resolve(
                     id: ActorIdentity(node: config.headNode, name: ActorNames.registry), using: system)
                 // The head learns of a change in the node's network (waiting, loopback, listening).
-                if info.network != options.network.state {
+                if info.network != options.network.state || info.hostname != NodeIdentity.hostname() {
                     info = await nodeInfo(config: config)
                     registered = false
                 }

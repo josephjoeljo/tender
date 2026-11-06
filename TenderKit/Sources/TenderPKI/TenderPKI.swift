@@ -225,10 +225,13 @@ public protocol TailscaleRunning: Sendable {
 public struct WhoisResult: Sendable, Equatable {
     public var machineName: String
     public var tags: [String]
+    /// Tailscale's ID for the machine, which survives renaming it.
+    public var stableID: String?
 
-    public init(machineName: String, tags: [String]) {
+    public init(machineName: String, tags: [String], stableID: String? = nil) {
         self.machineName = machineName
         self.tags = tags
+        self.stableID = stableID
     }
 
     /// Parses `tailscale whois --json`. Reads only the fields needed, as the rest isn't stable.
@@ -241,7 +244,8 @@ public struct WhoisResult: Sendable, Equatable {
             name = full.split(separator: ".").first.map(String.init)
         }
         guard let name, !name.isEmpty else { return nil }
-        self.init(machineName: name, tags: node["Tags"] as? [String] ?? [])
+        let stable = (node["StableID"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        self.init(machineName: name, tags: node["Tags"] as? [String] ?? [], stableID: stable)
     }
 }
 
@@ -258,9 +262,13 @@ public enum IdentityCheckError: Error, Equatable, CustomStringConvertible {
     case mismatch(certificate: String, tailscale: String)
     case missingTag(node: String, required: [String])
     case lookupFailed(ip: String, detail: String)
+    case pinMismatch(node: String, tailscale: String)
 
     public var description: String {
         switch self {
+        case .pinMismatch(let node, let tailscale):
+            "Node \(node) first connected from a different Tailscale machine than \(tailscale). "
+                + "If it moved to new hardware, remove its record (`tender node remove`) and let it join again."
         case .mismatch(let certificate, let tailscale):
             "Certificate is for '\(certificate)' but Tailscale says this peer is '\(tailscale)'."
         case .missingTag(let node, let required):
@@ -276,10 +284,15 @@ public struct TailscaleIdentityCheck: Sendable {
     public let mode: IdentityMode
     public let requiredTags: [String]
     private let runner: any TailscaleRunning
+    private let pins: PeerPins?
     private let warn: @Sendable (String) -> Void
 
+    /// With `pins`, a node ID isn't a machine name: the first Tailscale machine a node
+    /// connects from is remembered, and later connections must come from the same one,
+    /// whatever either is called. Without, the ID must equal the machine name.
     public init(mode: IdentityMode, requiredTags: [String] = [], runner: any TailscaleRunning = TailscaleCLI(),
-                warn: @escaping @Sendable (String) -> Void = { _ in }) {
+                pins: PeerPins? = nil, warn: @escaping @Sendable (String) -> Void = { _ in }) {
+        self.pins = pins
         self.mode = mode
         self.requiredTags = requiredTags
         self.runner = runner
@@ -298,8 +311,17 @@ public struct TailscaleIdentityCheck: Sendable {
             guard let identity = WhoisResult(json: data) else {
                 throw IdentityCheckError.lookupFailed(ip: remoteIP, detail: "unrecognized whois output")
             }
-            guard identity.machineName.lowercased() == certificateNode.rawValue.lowercased() else {
-                throw IdentityCheckError.mismatch(certificate: certificateNode.rawValue, tailscale: identity.machineName)
+            if let pins {
+                guard let stableID = identity.stableID else {
+                    throw IdentityCheckError.lookupFailed(ip: remoteIP, detail: "Tailscale gave no stable ID for the peer")
+                }
+                guard pins.pinOrCheck(node: certificateNode, stableID: stableID) else {
+                    throw IdentityCheckError.pinMismatch(node: certificateNode.rawValue, tailscale: identity.machineName)
+                }
+            } else {
+                guard identity.machineName.lowercased() == certificateNode.rawValue.lowercased() else {
+                    throw IdentityCheckError.mismatch(certificate: certificateNode.rawValue, tailscale: identity.machineName)
+                }
             }
             if !requiredTags.isEmpty, Set(requiredTags).isDisjoint(with: identity.tags) {
                 throw IdentityCheckError.missingTag(node: identity.machineName, required: requiredTags)

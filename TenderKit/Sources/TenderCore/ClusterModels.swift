@@ -32,9 +32,12 @@ public struct NodeInfo: Codable, Sendable, Equatable {
     public var labels: [String: String]
     /// Whether the node is listening for peers. Nil from nodes running an older tenderd.
     public var network: NetworkState?
+    /// What people call the machine. A label only: the ID is what identifies the node.
+    public var hostname: String?
 
     public init(id: NodeID, version: String, macOS: String, hardware: String,
-                address: String? = nil, labels: [String: String] = [:], network: NetworkState? = nil) {
+                address: String? = nil, labels: [String: String] = [:], network: NetworkState? = nil, hostname: String? = nil) {
+        self.hostname = hostname
         self.network = network
         self.id = id
         self.version = version
@@ -46,6 +49,9 @@ public struct NodeInfo: Codable, Sendable, Equatable {
 
     public static let roleLabel = "role"
     public static let headRole = "head"
+
+    /// The hostname if there is one, else the ID.
+    public var displayName: String { hostname ?? id.rawValue }
 
     public var isHead: Bool { labels[Self.roleLabel] == Self.headRole }
 }

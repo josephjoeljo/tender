@@ -86,7 +86,7 @@ public struct JoinClient: Sendable {
     }
 }
 
-public func defaultNodeID() -> String {
-    let host = ProcessInfo.processInfo.hostName.split(separator: ".").first.map(String.init) ?? "node"
-    return host.lowercased()
+/// This node's ID: a UUID made on first run (see `NodeIdentity`).
+public func defaultNodeID(environment: TenderEnvironment) -> String {
+    NodeIdentity.current(environment: environment).rawValue
 }

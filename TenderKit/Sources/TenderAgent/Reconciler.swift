@@ -238,7 +238,7 @@ public actor Reconciler {
 
     /// Current status of all instances, plus orphaned labels.
     public func status() async throws -> ProcessList {
-        let node = NodeID(ProcessInfo.processInfo.hostName)
+        let node = NodeIdentity.current(environment: environment)
         let services = Dictionary(uniqueKeysWithValues: try store.services().map { ($0.spec.name, $0) })
         var processes: [InstanceStatus] = []
         let records = try store.instances().filter { $0.desired != .absent }

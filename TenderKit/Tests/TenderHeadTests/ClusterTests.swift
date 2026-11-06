@@ -465,6 +465,19 @@ private func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async th
     #expect(await !state.heartbeat(Heartbeat(node: NodeID("x"), nodeClock: start, processes: []), registeredThisRun: true, now: start))
 }
 
+@Test func nodesAreFoundByIDOrByAnUnambiguousHostname() async throws {
+    let state = RegistryState(store: nil)
+    let a = NodeID("0b6f1c9e-0000-4000-8000-00000000000a"), b = NodeID("0b6f1c9e-0000-4000-8000-00000000000b")
+    try await state.register(NodeInfo(id: a, version: "1", macOS: "x", hardware: "y", hostname: "mac-mini"))
+    try await state.register(NodeInfo(id: b, version: "1", macOS: "x", hardware: "y", hostname: "macbook"))
+    #expect(await state.resolve(a.rawValue) == a)
+    #expect(await state.resolve("MacBook") == b)
+    #expect(await state.resolve("nope") == nil)
+    // A hostname two nodes share can't pick one.
+    try await state.register(NodeInfo(id: NodeID("c"), version: "1", macOS: "x", hardware: "y", hostname: "macbook"))
+    #expect(await state.resolve("macbook") == nil)
+}
+
 @Test func lastKnownNodesLoadAsDown() async throws {
     let env = try makeEnvironment()
     defer { try? FileManager.default.removeItem(at: env.root) }

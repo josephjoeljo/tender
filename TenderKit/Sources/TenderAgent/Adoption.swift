@@ -94,7 +94,7 @@ public struct Adoption: Sendable {
     }
 
     public func statuses() async throws -> [InstanceStatus] {
-        let node = NodeID(ProcessInfo.processInfo.hostName)
+        let node = NodeIdentity.current(environment: environment)
         var statuses: [InstanceStatus] = []
         for adopted in try store.adoptedJobs() {
             let job = try await launchd.print(label: adopted.label)
