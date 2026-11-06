@@ -166,7 +166,8 @@ final class ClusterModel {
             let (nodeList, processList) = try await (fetchedNodes, fetchedProcesses)
             // The active connection may have changed during the wait.
             guard requested == connections.activeID else { return }
-            nodes = nodeList.nodes
+            // Sorted here too: a head running an older tenderd sorts by ID.
+            nodes = nodeList.nodes.headFirst()
             processes = processList.processes
             history.record(nodeList.nodes)
             health = ClusterHealth(nodes: nodeList, processes: processList)
@@ -191,13 +192,13 @@ final class ClusterModel {
     func deploy(service: String, version: String) async throws -> String {
         guard let client else { return "Not connected." }
         let response = try await client.deploy(service: service, version: version)
-        return response.outcomes.map { "\($0.node): \($0.sha12 ?? $0.error ?? "?")" }.joined(separator: "\n")
+        return response.outcomes.map { "\(name(of: $0.node)): \($0.sha12 ?? $0.error ?? "?")" }.joined(separator: "\n")
     }
 
     func rollback(service: String, to sha12: String, node: String) async throws -> String {
         guard let client else { return "Not connected." }
         _ = try await client.rollback(service: service, to: sha12, node: node)
-        return "\(node): rolled back to \(sha12)"
+        return "\(name(of: NodeID(node))): rolled back to \(sha12)"
     }
 
     /// A node's hostname, or its ID when it hasn't reported one.

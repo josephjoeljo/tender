@@ -58,6 +58,20 @@ public struct NodeInfo: Codable, Sendable, Equatable {
     public var isHead: Bool { labels[Self.roleLabel] == Self.headRole }
 }
 
+extension Sequence where Element == NodeSummary {
+    /// The order nodes are shown in everywhere: the head first, then by name, then by ID.
+    public func headFirst() -> [NodeSummary] {
+        sorted { a, b in
+            if a.info.isHead != b.info.isHead { return a.info.isHead }
+            switch a.info.displayName.localizedStandardCompare(b.info.displayName) {
+            case .orderedAscending: return true
+            case .orderedDescending: return false
+            case .orderedSame: return a.info.id.rawValue < b.info.id.rawValue
+            }
+        }
+    }
+}
+
 /// A node as the head sees it, for `tender nodes` and the app.
 public struct NodeSummary: Codable, Sendable, Equatable {
     public var info: NodeInfo

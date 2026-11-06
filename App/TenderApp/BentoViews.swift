@@ -128,14 +128,9 @@ struct NodeBentoCard: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(node.info.displayName).font(.headline).lineLimit(1)
+                    CopyIDButton(id: node.info.id.rawValue)
                     if node.info.isHead { RowBadge("HEAD", tint: .orange) }
                 }
-                Text(node.info.id.rawValue)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
                 Text("\(node.info.address ?? "No address") · up \(StatFormat.duration(node.uptime))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -292,6 +287,33 @@ private struct BentoMiniTile: View {
 private func copyToPasteboard(_ text: String) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(text, forType: .string)
+}
+
+/// A small icon that copies a node's ID, and turns into a checkmark for a moment once it has.
+private struct CopyIDButton: View {
+    let id: String
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            copyToPasteboard(id)
+            copied = true
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                copied = false
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.caption)
+                .foregroundStyle(copied ? AnyShapeStyle(.green) : AnyShapeStyle(.tertiary))
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Copy node ID \(id)")
+        .accessibilityLabel("Copy node ID")
+    }
 }
 
 #if DEBUG
