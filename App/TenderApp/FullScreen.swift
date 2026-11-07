@@ -22,8 +22,11 @@ private struct FullScreenCapable: NSViewRepresentable {
             observation = nil
             guard let window else { return }
             Self.makePrimary(window)
+            // SwiftUI rewrites the behaviour while it updates the window's size limits. Answering
+            // inside that update re-enters it and recurses until the stack overflows, so put the
+            // flag back on the next pass of the run loop instead.
             observation = window.observe(\.collectionBehavior) { window, _ in
-                MainActor.assumeIsolated { Self.makePrimary(window) }
+                DispatchQueue.main.async { MainActor.assumeIsolated { Self.makePrimary(window) } }
             }
         }
 

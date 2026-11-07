@@ -182,6 +182,8 @@ struct ProcessesView: View {
             }
         }
         .listStyle(.inset)
+        // As narrow as the inspector's own minimum, so the inspector can take the rest.
+        .frame(minWidth: 320)
         .contextMenu(forSelectionType: String.self) { _ in
         } primaryAction: { ids in
             for id in ids {
@@ -206,7 +208,9 @@ struct ProcessesView: View {
                                            description: Text("Pick a process to see its details, config and logs."))
                 }
             }
-            .inspectorColumnWidth(min: 320, ideal: 380, max: 560)
+            // Wider than any screen, so in practice no max. Not .infinity: AppKit's split view
+            // turns it into a layout constraint, and an infinite one throws during layout.
+            .inspectorColumnWidth(min: 320, ideal: 380, max: 4000)
         }
         .toolbar {
             ToolbarItem {
