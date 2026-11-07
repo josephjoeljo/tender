@@ -150,6 +150,22 @@ public struct TenderClient: Sendable {
         try await send(.POST, "/v1/leave")
     }
 
+    /// The head's audit log, newest first: who changed what, when, and how it went.
+    public func history(_ query: AuditQuery = AuditQuery()) async throws -> AuditList {
+        var items = ["limit=\(query.limit)"]
+        if let since = query.since { items.append("since=\(since.timeIntervalSince1970)") }
+        if let until = query.until { items.append("until=\(until.timeIntervalSince1970)") }
+        if let who = query.who { items.append("who=\(try escaped(who))") }
+        if let about = query.about { items.append("about=\(try escaped(about))") }
+        if query.failedOnly { items.append("failed=true") }
+        return try await send(.GET, "/v1/audit?" + items.joined(separator: "&"))
+    }
+
+    /// Sets and removes a node's labels; `name` is its display name. The node stores them.
+    public func updateLabels(node: String, _ update: NodeLabelsUpdate) async throws -> NodeList {
+        try await send(.PUT, "/v1/nodes/\(try escaped(node))/labels", body: try JSONEncoder().encode(update))
+    }
+
     public func revokeNode(_ id: String) async throws -> NodeList {
         try await send(.POST, "/v1/nodes/\(try escaped(id))/revoke")
     }

@@ -157,7 +157,73 @@ extension Tender {
     }
 
     struct Node: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Manage a node.", subcommands: [Revoke.self, Remove.self])
+        static let configuration = CommandConfiguration(abstract: "Manage a node.",
+                                                        subcommands: [Label.self, Rename.self, Revoke.self, Remove.self])
+
+        struct Label: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Show, set or remove a node's labels.",
+                discussion: """
+                    Labels are key=value pairs the node keeps in its own config and reports to the head, \
+                    for grouping now and placement later. Keys use lowercase letters, digits, '.', '_', '-' \
+                    and '/'. `role` is Tender's own; `name` is the display name (see `tender node rename`). \
+                    With no pairs and no --remove, prints the node's labels.
+                    """
+            )
+            @Argument(help: "Node ID, name or hostname.") var node: String
+            @Argument(help: "Labels to set, as key=value.") var pairs: [String] = []
+            @Option(name: .customLong("remove"), help: "A label key to remove. Repeatable.") var remove: [String] = []
+            @OptionGroup var options: CommonOptions
+
+            func run() async throws {
+                var set: [String: String] = [:]
+                for pair in pairs {
+                    guard let equals = pair.firstIndex(of: "="), equals != pair.startIndex else {
+                        throw ValidationError("'\(pair)' isn't key=value.")
+                    }
+                    set[String(pair[..<equals])] = String(pair[pair.index(after: equals)...])
+                }
+                let update = NodeLabelsUpdate(set: set, remove: remove)
+                try await options.run({ client -> NodeSummary in
+                    let list = update == NodeLabelsUpdate() ? try await client.nodes() : try await client.updateLabels(node: node, update)
+                    guard let match = list.nodes.first(where: { Self.matches($0, node) }) else {
+                        throw TenderClientError.api(status: 404, code: "node_not_found", message: "No node named \(node).")
+                    }
+                    return match
+                }) { summary in
+                    let labels = summary.info.labels.sorted { $0.key < $1.key }
+                    return labels.isEmpty ? "\(summary.info.displayName) has no labels." : labels.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
+                }
+            }
+
+            static func matches(_ summary: NodeSummary, _ reference: String) -> Bool {
+                let wanted = reference.lowercased()
+                return summary.info.id.rawValue == reference || summary.info.labels[NodeLabels.nameKey]?.lowercased() == wanted
+                    || summary.info.hostname?.lowercased() == wanted
+            }
+        }
+
+        struct Rename: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Give a node a display name, used everywhere in place of its hostname.",
+                discussion: "Sets the node's `name` label. The ID doesn't change, so nothing else does. --reset goes back to the hostname."
+            )
+            @Argument(help: "Node ID, name or hostname.") var node: String
+            @Argument(help: "The new display name.") var name: String?
+            @Flag(help: "Remove the display name.") var reset = false
+            @OptionGroup var options: CommonOptions
+
+            func validate() throws {
+                guard (name == nil) == reset else { throw ValidationError("Give a new name, or --reset, not both.") }
+            }
+
+            func run() async throws {
+                let update = name.map { NodeLabelsUpdate(set: [NodeLabels.nameKey: $0]) } ?? NodeLabelsUpdate(remove: [NodeLabels.nameKey])
+                try await options.run({ try await $0.updateLabels(node: node, update) }) { _ in
+                    name.map { "\(node) is now shown as \($0)" } ?? "\(node) is shown by its hostname again"
+                }
+            }
+        }
 
         struct Revoke: AsyncParsableCommand {
             static let configuration = CommandConfiguration(abstract: "Refuse a node's certificate from now on.")

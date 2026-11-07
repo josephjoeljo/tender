@@ -225,7 +225,7 @@ struct ClusterLink: Service {
             macOS: process.operatingSystemVersionString,
             hardware: String(decoding: hardware.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self),
             address: advertised.map { "\($0):\(options.agentPort)" },
-            labels: config.nodeID == config.headNode ? [NodeInfo.roleLabel: NodeInfo.headRole] : [:],
+            labels: controller.labels.load().merging(config.nodeID == config.headNode ? [NodeInfo.roleLabel: NodeInfo.headRole] : [:]) { _, tender in tender },
             network: options.network.state,
             hostname: NodeIdentity.hostname()
         )
@@ -314,7 +314,9 @@ struct ClusterLink: Service {
                 let registry = try $HeadRegistryProtocol.resolve(
                     id: ActorIdentity(node: config.headNode, name: ActorNames.registry), using: system)
                 // The head learns of a change in the node's network (waiting, loopback, listening).
-                if info.network != options.network.state || info.hostname != NodeIdentity.hostname() {
+                // A file read, so a label set through the head (or by hand) shows within a heartbeat.
+                if info.network != options.network.state || info.hostname != NodeIdentity.hostname()
+                    || info.userLabels != controller.labels.load() {
                     info = await nodeInfo(config: config)
                     registered = false
                 }

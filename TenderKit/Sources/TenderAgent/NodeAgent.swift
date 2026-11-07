@@ -105,6 +105,11 @@ distributed actor NodeAgent: NodeAgentProtocol {
         return try await translating { try await controller.descriptors(service: service, instance: instance) }
     }
 
+    distributed func updateLabels(_ update: NodeLabelsUpdate) async throws -> [String: String] {
+        let controller = self.controller
+        return try await translating { try controller.labels.update(update) }
+    }
+
     distributed func forgetAdopted(label: String) async throws -> ProcessList {
         let controller = self.controller
         return try await translating { try await controller.forget(label: label) }

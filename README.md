@@ -100,6 +100,9 @@ To debug the daemon instead of installing it, add these launch arguments to the 
 | `tender rollback <name>` | Go back to an earlier release |
 | `tender deploy <name> --release <version>` | Fetch a release and restart on it. Needs a [release source](docs/ops/releases-and-logs.md) |
 | `tender nodes` | List the cluster's nodes |
+| `tender node rename <node> <name>` | Give a node a display name (`--reset` to go back to its hostname) |
+| `tender node label <node> key=value… [--remove key]` | Show, set or remove a node's labels |
+| `tender history [--since 24h] [--failed] [--about api]` | Who changed what, newest first, failures counted first |
 | `tender apply -f services.yaml` | Create or update every service a [service file](#service-files) describes |
 | `tender export` | Print what runs as a service file |
 

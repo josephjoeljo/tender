@@ -611,6 +611,7 @@ public final class HeadServices: Sendable {
         router.post("/v1/deploy") { [self] request, _ in
             await respond {
                 let deploy = try await decode(DeployRequest.self, from: request)
+                AuditLog.note?.text = "service \(deploy.service) version \(deploy.version)"
                 return await self.deploy(deploy)
             }
         }
@@ -679,6 +680,21 @@ public final class HeadServices: Sendable {
                 return history
             }
         }
+        router.put("/v1/nodes/:id/labels") { [self] request, context in
+            await respond {
+                let node = await resolve(node: try context.parameters.requireDecoded("id"))
+                let update = try await decode(NodeLabelsUpdate.self, from: request)
+                AuditLog.note?.text = (update.set.keys.sorted().map { "set \($0)" } + update.remove.sorted().map { "remove \($0)" })
+                    .joined(separator: ", ")
+                let labels = try await translatingTransport(node) { try await agent(on: node).updateLabels(update) }
+                try await state.setLabels(labels, of: node)
+                return NodeList(nodes: await state.summaries())
+            }
+        }
+        // Who changed what. Read scope: it holds token names and paths, never values.
+        router.get("/v1/audit") { [self] request, _ in
+            await respond { audit.read(try auditQuery(from: request)) }
+        }
         router.get("/v1/settings/history") { [self] _, _ in
             await respond { await state.retention }
         }
@@ -721,6 +737,7 @@ public final class HeadServices: Sendable {
             await respond {
                 let spec = try await decode(ServiceSpec.self, from: request)
                 let target = spec.node ?? options.nodeID
+                AuditLog.note?.text = "service \(spec.name) on \(target)"
                 _ = try await translatingTransport(target) { try await agent(on: target).apply(.start(spec)) }
                 return await clusterStatus()
             }
@@ -814,6 +831,28 @@ public final class HeadServices: Sendable {
             limit = min(parsed, NodeStatsHistory.maxLimit)
         }
         return (since, limit)
+    }
+
+    /// `since` and `until` in Unix seconds; `failed=true` for failures only.
+    private func auditQuery(from request: Request) throws -> AuditQuery {
+        let parameters = request.uri.queryParameters
+        func date(_ name: String) throws -> Date? {
+            guard let raw = parameters.get(name) else { return nil }
+            guard let seconds = Double(raw) else {
+                throw NodeCallError(code: "invalid_query", message: "\(name) must be Unix seconds.", httpStatus: 400)
+            }
+            return Date(timeIntervalSince1970: seconds)
+        }
+        var limit = AuditQuery.defaultLimit
+        if let raw = parameters.get("limit") {
+            guard let parsed = Int(raw), parsed > 0 else {
+                throw NodeCallError(code: "invalid_query", message: "limit must be a positive integer.", httpStatus: 400)
+            }
+            limit = parsed
+        }
+        return AuditQuery(since: try date("since"), until: try date("until"), limit: limit,
+                          who: parameters.get("who").map { String($0) }, about: parameters.get("about").map { String($0) },
+                          failedOnly: parameters.get("failed") == "true")
     }
 
     private func logQuery(from request: Request) throws -> LogQuery {

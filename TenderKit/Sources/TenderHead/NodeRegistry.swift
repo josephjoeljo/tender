@@ -67,8 +67,21 @@ public actor RegistryState {
     /// The node with this ID, else the only one with this hostname.
     public func resolve(_ reference: String) -> NodeID? {
         if entries[NodeID(reference)] != nil { return NodeID(reference) }
-        let named = entries.values.filter { $0.info.hostname?.lowercased() == reference.lowercased() }
+        let wanted = reference.lowercased()
+        // A display name someone chose wins over a hostname.
+        let labelled = entries.values.filter { $0.info.labels[NodeLabels.nameKey]?.lowercased() == wanted }
+        if labelled.count == 1 { return labelled[0].info.id }
+        let named = entries.values.filter { $0.info.hostname?.lowercased() == wanted }
         return named.count == 1 ? named[0].info.id : nil
+    }
+
+    /// A node's labels as it just reported them, ahead of its next registration. Tender's
+    /// own labels stay as they were.
+    public func setLabels(_ labels: [String: String], of node: NodeID) throws {
+        guard var entry = entries[node] else { return }
+        entry.info.labels = labels.merging(entry.info.labels.filter { NodeLabels.reservedKeys.contains($0.key) }) { _, tender in tender }
+        entries[node] = entry
+        try store?.saveNode(entry.info)
     }
 
     public func register(_ info: NodeInfo) throws {

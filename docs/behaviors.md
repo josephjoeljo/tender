@@ -152,6 +152,21 @@ Things about how Tender works that may not be what you'd assume.
 - **Node IDs:** a node's ID is a UUID made on first run and kept in `/opt/tender/node-id`
   (`--node-id` overrides it). The hostname is only a label, so renaming a Mac changes nothing.
   An ID already in use can't be joined until `tender node revoke` or `tender node remove` frees it.
+- **Display names and labels:** a node keeps its own labels in `<config>/labels.json`
+  (`/etc/tender/labels.json`) and reports them when it registers, so they survive losing the
+  head. `tender node label` and the app's Name and Labels sheet change them through the head,
+  which relays to the node and updates its registry at once; a hand edit to the file shows
+  within a heartbeat. `name` is the display name, used in place of the hostname everywhere,
+  and `--node` accepts it (it wins over a hostname). `role` is Tender's own and can't be set.
+  Keys are lowercase letters, digits, `.`, `_`, `-` and `/`; values are one printable line;
+  at most 32 per node. Labels don't affect placement yet.
+- **History:** every call that changes something, over the head's API or its socket, is in
+  the head's audit log (`logstore/audit-YYYY-MM-DD.jsonl`, uploaded with the nightly
+  offload): time, token name or `local-socket`, method, path, status, the `?node=` it named,
+  and a handler's summary (a start's or deploy's service, an apply's counts, a label
+  update's keys). Reads, bodies and other query parameters aren't recorded, so no value or
+  token ever is. `GET /v1/audit` (read scope) and `tender history` return it newest first,
+  with failures counted. Audit files aren't expired yet.
 - **Tailscale pinning:** the first Tailscale machine a node ID connects from is remembered in
   `peer-pins.json` (trust on first use), and later connections must come from the same machine,
   whatever either is called. After moving a node to new hardware, `tender node remove` it first.

@@ -324,7 +324,22 @@ final class ClusterModel {
         return "\(name(of: NodeID(node))): rolled back to \(sha12)"
     }
 
-    /// A node's hostname, or its ID when it hasn't reported one.
+    /// The head's audit log. Nil when not connected; sample records in previews.
+    func history(_ query: AuditQuery) async throws -> AuditList? {
+        #if DEBUG
+        if isPreview { return .preview }
+        #endif
+        return try await client?.history(query)
+    }
+
+    /// Sets and removes a node's labels, its display name among them. The node keeps them.
+    func updateLabels(of node: NodeSummary, _ update: NodeLabelsUpdate) async throws {
+        guard let client else { return }
+        _ = try await client.updateLabels(node: node.info.id.rawValue, update)
+        await refresh()
+    }
+
+    /// A node's display name, or its ID when it hasn't reported one.
     func name(of node: NodeID) -> String {
         nodes.first { $0.info.id == node }?.info.displayName ?? node.rawValue
     }

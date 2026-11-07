@@ -11,15 +11,7 @@ import TenderMetrics
 /// Who changed what, when, and how it went. One JSON line per mutating call, in a file
 /// per UTC day. Request bodies are left out, because they can hold secrets.
 public final class AuditLog: Sendable {
-    public struct Record: Codable, Sendable, Equatable {
-        public var time: Date
-        public var who: String
-        public var method: String
-        public var path: String
-        public var status: Int
-        /// A handler's own summary, such as an apply's file hash and counts. Never values.
-        public var detail: String? = nil
-    }
+    public typealias Record = AuditRecord
 
     /// Set while a call runs, so that its handler can add a `detail` to the call's record.
     @TaskLocal static var note: AuditNote?
@@ -54,6 +46,29 @@ public final class AuditLog: Sendable {
         }
     }
 
+    /// Records matching `query`, newest first, reading day files from the newest back and
+    /// stopping once `limit` is reached. Lines that don't decode are skipped.
+    public func read(_ query: AuditQuery) -> AuditList {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path(percentEncoded: false))) ?? []
+        let sinceDay = query.since.map { "audit-\(LogStore.dayName($0)).jsonl" }
+        let untilDay = query.until.map { "audit-\(LogStore.dayName($0)).jsonl" }
+        let days = names.filter { $0.hasPrefix("audit-") && $0.hasSuffix(".jsonl") }
+            .filter { name in sinceDay.map { name >= $0 } ?? true && untilDay.map { name <= $0 } ?? true }
+            .sorted(by: >)
+        var records: [AuditRecord] = []
+        for day in days {
+            let data = lock.withLock { try? Data(contentsOf: directory.appending(path: day)) } ?? Data()
+            for line in data.split(separator: UInt8(ascii: "\n")).reversed() {
+                guard let record = try? decoder.decode(AuditRecord.self, from: Data(line)), query.matches(record) else { continue }
+                if records.count == query.limit { return AuditList(records: records, truncated: true) }
+                records.append(record)
+            }
+        }
+        return AuditList(records: records)
+    }
+
     /// Days before `today`, by file name.
     public func closedFiles(today: String) -> [URL] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path(percentEncoded: false))) ?? []
@@ -76,13 +91,18 @@ struct AuditMiddleware: RouterMiddleware {
         do {
             let response = try await AuditLog.$note.withValue(note) { try await next(request, context) }
             audit.record(.init(time: Date(), who: who(request), method: request.method.rawValue,
-                               path: request.routedPath, status: response.status.code, detail: note.text))
+                               path: request.routedPath, status: response.status.code, detail: note.text, node: node(request)))
             return response
         } catch {
             audit.record(.init(time: Date(), who: who(request), method: request.method.rawValue,
-                               path: request.routedPath, status: 500, detail: note.text))
+                               path: request.routedPath, status: 500, detail: note.text, node: node(request)))
             throw error
         }
+    }
+
+    /// The only query parameter kept: a node reference, which can't hold a secret.
+    private func node(_ request: Request) -> String? {
+        request.uri.queryParameters.get("node").map { String($0) }.flatMap { $0.count <= 128 ? $0 : nil }
     }
 }
 
