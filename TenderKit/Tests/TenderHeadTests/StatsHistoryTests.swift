@@ -121,6 +121,16 @@ private func point(_ second: Double, cpu: Double = 10, crashed: Int = 0, gap: Ti
     #expect(NodeStatsPoint.downsampled(all, to: 0, over: span).isEmpty)
 }
 
+@Test func subSecondPointsStillFillTheLimit() {
+    // Heartbeats right after a node joins can be a fraction of a second apart.
+    let points = (0..<5).map { point(Double($0) * 0.2) }
+    let span = points.first!.date...points.last!.date
+    #expect(NodeStatsPoint.downsampled(points, to: 2, over: span).count == 2)
+    #expect(NodeStatsPoint.downsampled(points, to: 4, over: span).count == 4)
+    let instant = Array(repeating: point(0), count: 5)
+    #expect(NodeStatsPoint.downsampled(instant, to: 2, over: instant[0].date...instant[0].date).count == 2)
+}
+
 @Test func storedHistorySurvivesARestartAndStitchesTiers() async throws {
     let env = try makeEnvironment()
     defer { try? FileManager.default.removeItem(at: env.root) }

@@ -128,8 +128,16 @@ import TenderCore
     guard let sampler = PowerSampler() else { return }
     #expect(sampler.sample() == nil) // the first reading is only a baseline
     try await Task.sleep(for: .milliseconds(300))
-    let power = try #require(sampler.sample())
+    // Nil when the counters don't move for this process, as on macOS 27: no reading, not 0 W.
+    guard let power = sampler.sample() else { return }
     #expect((power.stats.cpu ?? 0) > 0)
+}
+
+@Test func frozenCountersAreNoReading() {
+    #expect(PowerSampler.reading([("CPU Energy", 0), ("GPU Energy", 0), ("DRAM0", 0)]) == nil)
+    #expect(PowerSampler.reading([]) == nil)
+    let power = PowerSampler.reading([("CPU Energy", 2.5), ("GPU Energy", 0), ("DRAM0", 0.5)])
+    #expect(power?.stats.cpu == 2.5 && power?.stats.total == 3.0)
 }
 
 @Test func treeUsageAddsUp() {
