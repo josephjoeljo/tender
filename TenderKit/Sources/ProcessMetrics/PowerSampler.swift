@@ -89,14 +89,24 @@ final class PowerSampler {
         let delta = Unmanaged<CFDictionary>.fromOpaque(deltaPointer).takeRetainedValue() as NSDictionary
         guard let items = delta["IOReportChannels"] as? NSArray else { return nil }
 
-        var power = NodePower()
+        var channels: [(name: String, watts: Double)] = []
         for case let item as NSDictionary in items {
             let pointer = Unmanaged.passUnretained(item).toOpaque()
             guard let name = string(channelName(pointer)),
                   let joules = joules(integerValue(pointer, 0), unit: string(unitLabel(pointer)))
             else { continue }
-            Self.add(joules / elapsed, channel: name, to: &power)
+            channels.append((name, joules / elapsed))
         }
+        return Self.reading(channels)
+    }
+
+    /// The reading for one interval's channels. Nil when no channel used any energy: a
+    /// running Mac always does, so that means the counters aren't moving (macOS 27 hands
+    /// some callers a frozen snapshot), and "0 W" would be a false reading.
+    static func reading(_ channels: [(name: String, watts: Double)]) -> NodePower? {
+        guard channels.contains(where: { $0.watts > 0 }) else { return nil }
+        var power = NodePower()
+        for channel in channels { add(channel.watts, channel: channel.name, to: &power) }
         return power
     }
 

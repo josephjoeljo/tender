@@ -29,7 +29,14 @@ extension Tender {
     }
 
     struct Credentials: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Manage this node's cloud credentials.", subcommands: [Set.self])
+        static let configuration = CommandConfiguration(
+            abstract: "Manage this node's cloud credentials and secrets sources.",
+            discussion: """
+                The default credentials serve ${secret:gcp:…}, release fetching and log offload. A named \
+                source, defined under secrets.sources in the node's cloud.json with its own project and \
+                allowed services, has its own key and serves ${secret:<source>:…}.
+                """,
+            subcommands: [Set.self, Show.self, Delete.self])
 
         struct Set: AsyncParsableCommand {
             static let configuration = CommandConfiguration(
@@ -37,11 +44,54 @@ extension Tender {
                 discussion: "The key goes to the local daemon's secret store. You can delete the file afterwards."
             )
             @Option(help: "Path to the key's JSON file.") var file: String
+            @Option(help: "A named secrets source from cloud.json. Defaults to the node's default credentials.") var source: String?
             @OptionGroup var options: CommonOptions
 
             func run() async throws {
                 let json = try String(contentsOf: URL(filePath: file), encoding: .utf8)
-                try await options.run({ try await $0.setCredentials(serviceAccountJSON: json) }) { "Saved credentials for \($0.clientEmail)" }
+                try await options.run({ try await $0.setCredentials(serviceAccountJSON: json, source: source) }) {
+                    "Saved credentials for \($0.clientEmail)" + ($0.source.map { " (source \($0))" } ?? "")
+                }
+            }
+        }
+
+        struct Show: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Show a node's secrets sources: account, project, allowed services and failures.",
+                discussion: "Without --node, asks this machine's daemon. With it, asks the head, which has each node's latest report. Never shows a key."
+            )
+            @Option(help: "A node, by name or ID, as the head last heard from it.") var node: String?
+            @OptionGroup var options: CommonOptions
+
+            func run() async throws {
+                guard let node else {
+                    try await options.run({ try await $0.credentials() }) { ProcessTable.render($0) }
+                    return
+                }
+                try await options.run({ client -> NodeSecretsStatus in
+                    let nodes = try await client.nodes().nodes
+                    guard let match = nodes.first(where: { $0.info.id.rawValue == node || $0.info.hostname == node }) else {
+                        throw TenderClientError.api(status: 404, code: "unknown_node", message: "No node named \(node).")
+                    }
+                    guard let secrets = match.secrets else {
+                        throw TenderClientError.api(status: 409, code: "not_reported",
+                                                    message: "\(node) hasn't reported its secrets sources. It may run an older tenderd.")
+                    }
+                    return secrets
+                }) { ProcessTable.render($0, node: node) }
+            }
+        }
+
+        struct Delete: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Forget a source's key on this node.",
+                discussion: "Cached values stay, so running services keep starting until a value changes. Deleting the default credentials also stops release fetching and log offload."
+            )
+            @Option(help: "A named secrets source. Defaults to the node's default credentials.") var source: String?
+            @OptionGroup var options: CommonOptions
+
+            func run() async throws {
+                try await options.run({ try await $0.deleteCredentials(source: source) }) { ProcessTable.render($0) }
             }
         }
     }

@@ -28,7 +28,7 @@ public enum ProcessTable {
 
     public static func render(_ list: NodeList) -> String {
         guard !list.nodes.isEmpty else { return "No nodes." }
-        let rows = [["NODE", "ID", "STATE", "ADDRESS", "PROCESSES", "CRASHED", "LAST SEEN", "SKEW", "VERSION"]] + list.nodes.map { node in
+        let rows = [["NODE", "ID", "STATE", "ADDRESS", "PROCESSES", "CRASHED", "LAST SEEN", "SKEW", "SECRETS", "VERSION"]] + list.nodes.map { node in
             [
                 node.info.displayName,
                 node.info.id.rawValue,
@@ -38,6 +38,7 @@ public enum ProcessTable {
                 String(node.crashedCount),
                 node.lastHeartbeatAge.map { duration($0) + " ago" } ?? "-",
                 node.clockSkew.map { String(format: "%.1fs", $0) } ?? "-",
+                secretsCell(node.secrets),
                 node.info.version,
             ]
         }
@@ -49,6 +50,11 @@ public enum ProcessTable {
         }
         for node in list.nodes where node.spoolDropped > 0 {
             output += "\nwarning: \(node.info.displayName) has dropped \(node.spoolDropped) log lines."
+        }
+        for node in list.nodes {
+            for source in node.secrets?.sources ?? [] where !source.isHealthy {
+                output += "\nwarning: \(node.info.displayName)'s secrets source '\(source.name)': \(source.problem ?? source.lastError ?? "\(source.failing) failing")"
+            }
         }
         return output
     }
@@ -73,6 +79,33 @@ public enum ProcessTable {
         output += aligned(rows)
         if list.truncated { output += "\n\nMore changes match; raise --limit or narrow with --since." }
         return output
+    }
+
+    /// Source names, `!` after one with a problem. `-` for none, `?` from an older tenderd.
+    static func secretsCell(_ secrets: NodeSecretsStatus?) -> String {
+        guard let secrets else { return "?" }
+        guard !secrets.sources.isEmpty else { return "-" }
+        return secrets.sources.map { $0.name + ($0.isHealthy ? "" : "!") }.joined(separator: ",")
+    }
+
+    /// `tender credentials show`: one block per source, then the local secrets' count.
+    public static func render(_ secrets: NodeSecretsStatus, node: String? = nil) -> String {
+        var lines: [String] = []
+        if secrets.sources.isEmpty {
+            lines.append("No secrets sources\(node.map { " on \($0)" } ?? ""). Set one up with `tender credentials set --file <key.json>`.")
+        }
+        for source in secrets.sources {
+            let state = source.problem != nil ? "unusable" : source.failing > 0 ? "\(source.failing) of \(source.references) failing" : "ok"
+            lines.append("\(source.name)\(source.isDefault ? " (default)" : "")  \(source.kind)  \(state)")
+            lines.append("  account:  \(source.account ?? "-")")
+            lines.append("  project:  \(source.project ?? "-")")
+            lines.append("  services: \(source.services?.joined(separator: ", ") ?? "any")")
+            lines.append("  used by:  \(source.usedBy.isEmpty ? "-" : source.usedBy.joined(separator: ", ")) (\(source.references) reference\(source.references == 1 ? "" : "s"))")
+            if let problem = source.problem { lines.append("  problem:  \(problem)") }
+            if let error = source.lastError { lines.append("  last error: \(error)") }
+        }
+        lines.append("Local secrets: \(secrets.localSecrets) (`tender secret list`)")
+        return lines.joined(separator: "\n")
     }
 
     private static func aligned(_ rows: [[String]]) -> String {

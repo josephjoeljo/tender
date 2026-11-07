@@ -499,24 +499,33 @@ func aRealJobSeesItsSecretThroughTenderdExec() async throws {
     try vault.set(SecretName(service: "echo", name: "KEY"), value: Data("file-first".utf8))
     #expect(try await reconciler.reconcile().failures.isEmpty)
 
+    // A job's first launch of a freshly built tenderd can take seconds while the system
+    // checks the new binary, and more on a loaded machine, so each step gets 30.
     func seen(_ expected: String) async throws -> Bool {
-        for _ in 0..<100 {
+        for _ in 0..<300 {
             if (try? String(contentsOf: output, encoding: .utf8)) == expected { return true }
             try await Task.sleep(for: .milliseconds(100))
         }
         return false
     }
-    #expect(try await seen("t=first|file-first"))
+    /// What the job said, for a failure message.
+    func jobStderr() -> String {
+        let log = env.stderrLog(service: "echo", instance: 0)
+        return (try? String(contentsOf: log, encoding: .utf8)).map { "stderr: \($0.suffix(500))" } ?? "no stderr at \(log.path)"
+    }
+    let first = try await seen("t=first|file-first")
+    #expect(first, "\(jobStderr())")
+    guard first else { return }
     #expect(try FileManager.default.attributesOfItem(atPath: keyFile)[.posixPermissions] as? Int == 0o400)
     let pid = try await launchctl.print(label: label)?.pid
     #expect(pid != nil)
 
     try vault.set(SecretName(service: "echo", name: "KEY"), value: Data("file-second".utf8))
     #expect(try await reconciler.reconcile().failures.isEmpty)
-    #expect(try await seen("t=first|file-second"))
+    #expect(try await seen("t=first|file-second"), "\(jobStderr())")
     try vault.set(SecretName(service: "echo", name: "TOKEN"), value: Data("second".utf8))
     #expect(try await reconciler.reconcile().failures.isEmpty)
-    #expect(try await seen("t=second|file-second"))
+    #expect(try await seen("t=second|file-second"), "\(jobStderr())")
     let plistData = try Data(contentsOf: env.plistPath(label: label))
     #expect(!String(decoding: plistData, as: UTF8.self).contains("second"))
 
@@ -524,7 +533,7 @@ func aRealJobSeesItsSecretThroughTenderdExec() async throws {
     try vault.delete(SecretName(service: "echo", name: "KEY"))
     #expect(try await reconciler.reconcile().failures.isEmpty)
     var exitCode: Int?
-    for _ in 0..<100 {
+    for _ in 0..<300 {
         exitCode = try await launchctl.print(label: label)?.lastExitCode.map(Int.init)
         if exitCode == Int(SecretExec.configurationError) { break }
         try await Task.sleep(for: .milliseconds(100))
@@ -534,4 +543,35 @@ func aRealJobSeesItsSecretThroughTenderdExec() async throws {
 
     try store.deleteService("echo")
     #expect(try await reconciler.reconcile().failures.isEmpty)
+}
+
+@Test func namedSourcesAreCheckedAtStartAndNeedACloudEntryForAKey() async throws {
+    try await withSecretsDaemon { client, env async throws in
+        try FileManager.default.createDirectory(at: env.configDirectory, withIntermediateDirectories: true)
+        try Data(#"{"secrets":{"sources":{"billing":{"project":"billing-123","services":["billing-api"]}}}}"#.utf8)
+            .write(to: env.configDirectory.appending(path: "cloud.json"))
+        for (service, ref, expected) in [("api", "billing:STRIPE_KEY", "doesn't allow api"),
+                                         ("api", "nope:STRIPE_KEY", "no secrets source named 'nope'")] {
+            let spec = ServiceSpec(name: service, program: .executable("/bin/sleep"), arguments: ["1000"],
+                                   environment: ["S": "${secret:\(ref)}"])
+            do {
+                _ = try await client.start(spec)
+                Issue.record("expected \(ref) to be refused for \(service)")
+            } catch let error as TenderClientError {
+                #expect(error.code == "invalid_secret_ref")
+                #expect(error.description.contains(expected), "\(error)")
+            }
+        }
+
+        do {
+            _ = try await client.setCredentials(serviceAccountJSON: "{}", source: "typo")
+            Issue.record("expected an undefined source to be refused")
+        } catch let error as TenderClientError {
+            #expect(error.code == "unknown_source")
+        }
+        let status = try await client.credentials()
+        #expect(status.sources.map(\.name) == ["billing"])
+        #expect(status.sources[0].problem?.contains("tender credentials set --source billing") == true)
+        #expect(!status.hasSource)
+    }
 }

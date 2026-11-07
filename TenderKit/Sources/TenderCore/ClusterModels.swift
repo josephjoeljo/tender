@@ -91,11 +91,14 @@ public struct NodeSummary: Codable, Sendable, Equatable {
     public var secretFetchErrors: Int
     /// From the latest heartbeat. Nil from nodes running an older tenderd.
     public var stats: NodeStats?
+    /// Its secrets sources, from the latest heartbeat. Nil from nodes running an older tenderd.
+    public var secrets: NodeSecretsStatus?
 
     public init(info: NodeInfo, up: Bool, lastHeartbeatAge: TimeInterval?, instanceCount: Int, crashedCount: Int,
                 clockSkew: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0, secretFetchErrors: Int = 0,
-                stats: NodeStats? = nil) {
+                stats: NodeStats? = nil, secrets: NodeSecretsStatus? = nil) {
         self.stats = stats
+        self.secrets = secrets
         self.secretFetchErrors = secretFetchErrors
         self.clockSkew = clockSkew
         self.spoolBacklog = spoolBacklog

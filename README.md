@@ -133,7 +133,7 @@ tender start api --secret-file /opt/olympsis/api/gcp.json=GCP_KEY -- ./api
 
 The file is written by `tenderd exec` as the service's own user, `0400`, and replaced whole at each start. The path must be absolute and outside Tender's own directories, and the service's user must be able to create files in its directory. The reference is what goes between `${secret:` and `}`: `GCP_KEY`, `shared/GCP_KEY` or a `gcp:` reference.
 
-Secrets can also come from GCP Secret Manager: `${secret:gcp:NAME}` (latest, re-checked every 5 minutes), `${secret:gcp:NAME@4}` (pinned) and `${secret:gcp:projects/P/secrets/S[@4]}`. Each node fetches them with its own credentials and caches them, so services still start while GCP is down. Setup, IAM roles and the full behaviour are in [docs/ops/gcp-secrets.md](docs/ops/gcp-secrets.md).
+Secrets can also come from GCP Secret Manager: `${secret:gcp:NAME}` (latest, re-checked every 5 minutes), `${secret:gcp:NAME@4}` (pinned) and `${secret:gcp:projects/P/secrets/S[@4]}`. Each node fetches them with its own credentials and caches them, so services still start while GCP is down. A service whose secrets need their own account uses a named source instead, `${secret:billing:NAME}`, defined in the node's `cloud.json` with its own key and the services allowed to use it; `tender credentials show` lists a node's sources. Setup, IAM roles and the full behaviour are in [docs/ops/gcp-secrets.md](docs/ops/gcp-secrets.md).
 
 Values stay on the node: in the System Keychain in production, and in 0600 files in dev mode. The head passes them on and keeps nothing. A Mac that dies takes its secrets with it, so keep your own copy, for example a script that pipes each one into `tender secret set`.
 

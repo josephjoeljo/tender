@@ -128,7 +128,7 @@ public struct Manifest: Codable, Sendable, Equatable {
                 throw ManifestError("\(what): secret_files paths must be absolute, not '\(path)'.")
             }
             guard SecretRef(reference: ref) != nil else {
-                throw ManifestError("\(what): secret_files '\(path)': '\(ref)' isn't NAME, shared/NAME or gcp:NAME.")
+                throw ManifestError("\(what): secret_files '\(path)': '\(ref)' isn't NAME, shared/NAME, gcp:NAME or <source>:NAME.")
             }
         }
         do {

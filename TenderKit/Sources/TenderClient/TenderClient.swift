@@ -346,9 +346,21 @@ public struct TenderClient: Sendable {
         try await send(.GET, "/v1/releases?service=\(try escaped(service))")
     }
 
-    /// Saves a service account key on the node this client talks to. Socket only.
-    public func setCredentials(serviceAccountJSON: String) async throws -> CredentialsResponse {
-        try await send(.POST, "/v1/credentials", body: try JSONEncoder().encode(CredentialsRequest(serviceAccountJSON: serviceAccountJSON)))
+    /// Saves a service account key on the node this client talks to, for its default
+    /// credentials or for a named secrets source in its `cloud.json`. Socket only.
+    public func setCredentials(serviceAccountJSON: String, source: String? = nil) async throws -> CredentialsResponse {
+        try await send(.POST, "/v1/credentials",
+                       body: try JSONEncoder().encode(CredentialsRequest(serviceAccountJSON: serviceAccountJSON, source: source)))
+    }
+
+    /// The node's secrets sources: accounts, projects, allowed services, failures. Socket only.
+    public func credentials() async throws -> NodeSecretsStatus {
+        try await send(.GET, "/v1/credentials")
+    }
+
+    /// Forgets a source's key, nil for the default one. Socket only.
+    public func deleteCredentials(source: String? = nil) async throws -> NodeSecretsStatus {
+        try await send(.DELETE, "/v1/credentials" + (try source.map { "?source=\(try escaped($0))" } ?? ""))
     }
 
     // MARK: Secrets

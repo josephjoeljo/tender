@@ -306,6 +306,9 @@ struct ClusterLink: Service {
         var failures = 0
         var info = await nodeInfo(config: config)
         let machine = SystemSampler(experimentalPower: options.experimentalPower)
+        // Reads each source's key from the Keychain, so it's refreshed now and then rather
+        // than on every heartbeat.
+        var secrets: (status: NodeSecretsStatus, at: ContinuousClock.Instant)?
         while !Task.isCancelled {
             do {
                 let registry = try $HeadRegistryProtocol.resolve(
@@ -326,12 +329,15 @@ struct ClusterLink: Service {
                 }
                 let list = try await controller.list()
                 let stats = await machine.sample()
+                if secrets.map({ ContinuousClock.now - $0.at > .seconds(30) }) ?? true {
+                    secrets = (await controller.secretsStatus(), ContinuousClock.now)
+                }
                 let start = ContinuousClock.now
                 try await registry.heartbeat(Heartbeat(
                     node: config.nodeID, nodeClock: Date(), processes: list.processes, orphans: list.orphans,
                     previousRoundTrip: roundTrip, spoolBacklog: (try? spool.backlog()) ?? 0,
                     spoolDropped: (try? spool.droppedTotal()) ?? 0,
-                    secretFetchErrors: await controller.gcp?.fetchErrors ?? 0, stats: stats))
+                    secretFetchErrors: await controller.gcp?.fetchErrors ?? 0, stats: stats, secrets: secrets?.status))
                 let elapsed = (ContinuousClock.now - start).components
                 roundTrip = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
             } catch {

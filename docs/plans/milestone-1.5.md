@@ -133,6 +133,10 @@ log_path: /opt/homebrew/var/log/mongodb/mongo.log
 ### 7. GCP Secret Manager source (step G) — done
 - Ref syntax: `${secret:gcp:NAME}`, `${secret:gcp:NAME@4}`,
   `${secret:gcp:projects/P/secrets/S}`; default project in `CloudConfig.secrets`.
+- Named sources (added later): `${secret:<source>:…}` with `secrets.sources.<name>`
+  (`kind`, `project`, `services`) in `cloud.json` and a key per source. The reference names
+  its source rather than a per-service default, so a spec shows exactly what it fetches
+  and the key in `secrets.json` stays unambiguous. See `docs/ops/gcp-secrets.md`.
 - `GCPSecretSource` in `GoogleCloud.swift` reuses `GoogleTokenProvider` (scope
   `cloud-platform`; access is limited by IAM, grant
   `roles/secretmanager.secretAccessor` per secret to each node's service account).

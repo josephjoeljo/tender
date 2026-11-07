@@ -38,6 +38,66 @@ while GCP or the head is unreachable.
    {"secrets": {"project": "olympsis-prod"}}
    ```
 
+## Named sources: separate credentials per service
+
+The default credentials serve every service on the node. When a service's secrets should be
+readable only by that service, say `billing-api`'s Stripe key, give it a named source with
+its own service account:
+
+1. Define the source in the node's `cloud.json`, with the services allowed to use it:
+
+   ```json
+   {
+     "secrets": {
+       "project": "olympsis-prod",
+       "sources": {
+         "billing": {"kind": "gcp", "project": "billing-123", "services": ["billing-api"]}
+       }
+     }
+   }
+   ```
+
+   `kind` defaults to `gcp`, the only kind so far. `project` is the source's default project.
+   Leave out `services` to allow every service on the node, but then a separate key buys
+   little: anyone who can edit a service's spec could point it at the source.
+
+2. Install its key on the node. The source must already be in `cloud.json`, so a typo can't
+   hide a key under a name nothing uses:
+
+   ```bash
+   sudo tender credentials set --source billing --file billing-key.json
+   ```
+
+3. Grant `roles/secretmanager.secretAccessor` to that account, as for the default one.
+
+4. Reference it by name in place of `gcp`: `${secret:billing:STRIPE_KEY}`,
+   `${secret:billing:STRIPE_KEY@3}`, `${secret:billing:projects/P/secrets/S}`, or
+   `billing:STRIPE_KEY` in `secret_files`.
+
+What it guarantees:
+
+- **The allow-list is checked on the node** at every start, fetch and delivery. A service
+  that isn't in `services` is refused at `tender start` / apply, never has the reference
+  fetched, and its `tenderd exec` gets no value even if `cloud.json` changes after it
+  started.
+- **Each source keeps its own cached copy** (`gcpsrc.<source>.…` in the store), so a value
+  fetched through `billing` is never handed to a service through the default source, even
+  when both name the same project and secret.
+- **A source without a key fails only its own references**; the default source keeps working.
+- **Sources are per node**, like credentials. A service that moves to another node needs the
+  source defined, with its key, there too: the start fails with the setup step otherwise.
+
+Source names are lowercase letters, digits and `-`, start with a letter, and are at most 32
+characters. `gcp` (the default source) and `shared` are reserved. Release fetching and log
+offload always use the default credentials.
+
+`tender credentials show` lists a node's sources: account (never the key), project, allowed
+services, which services use it and what's failing. `--node <n>` asks the head for any
+node's latest report, and `tender nodes` has a `SECRETS` column (`gcp,billing!`, where `!`
+marks a source with a problem). The app shows the same on each node's page.
+`tender credentials delete [--source <name>]` forgets a key; cached values stay until they
+change.
+
 ## Check that it's hooked up
 
 `tender credentials set` checks only that the file is a service account key (and prints its
@@ -69,6 +129,7 @@ through its local socket, so run it on the node itself (over SSH).
 | `${secret:gcp:NAME@4}` | Version 4 of `NAME`, pinned |
 | `${secret:gcp:projects/P/secrets/S}` | The latest version of `S` in project `P` |
 | `${secret:gcp:projects/P/secrets/S@4}` | Version 4 of `S` in project `P` |
+| `${secret:billing:NAME}` (any form above) | The same, through the named source `billing`, with its own key and default project |
 
 `@latest` is accepted and means the same as no version. `P` is a project ID or number.
 Version aliases other than `latest` aren't supported. In `secret_files` and

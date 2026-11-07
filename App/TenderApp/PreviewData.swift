@@ -9,7 +9,7 @@ extension ClusterModel {
         NodeSummary(info: NodeInfo(id: NodeID(name), version: "0.1.0", macOS: "macOS", hardware: "Mac", address: "\(name):7070",
                                    labels: name == "mac-1" ? [NodeInfo.roleLabel: NodeInfo.headRole] : [:]),
                     up: up, lastHeartbeatAge: up ? 2 : 90, instanceCount: processes, crashedCount: crashed,
-                    stats: up ? .preview : nil)
+                    stats: up ? .preview : nil, secrets: name == "mac-1" ? .preview : NodeSecretsStatus(localSecrets: 1))
     }
 
     private static func process(_ service: String, _ instance: Int, _ node: String, _ state: InstanceState,
@@ -57,6 +57,18 @@ extension AuditList {
             AuditRecord(time: now.addingTimeInterval(-3600), who: "local-socket", method: "PUT", path: "/v1/secrets/api/MONGO_PASSWORD", status: 200),
             AuditRecord(time: now.addingTimeInterval(-7200), who: "joel", method: "POST", path: "/v1/apply", status: 200,
                         detail: "file 3f2a9c, 2 changed, 5 unchanged"),
+        ])
+    }
+}
+
+extension NodeSecretsStatus {
+    static var preview: NodeSecretsStatus {
+        NodeSecretsStatus(localSecrets: 3, sources: [
+            SecretSourceStatus(name: "gcp", project: "olympsis-prod", account: "tender@olympsis-prod.iam.gserviceaccount.com",
+                               usedBy: ["api", "worker"], references: 4),
+            SecretSourceStatus(name: "billing", project: "billing-123", services: ["billing-api"],
+                               account: "billing@billing-123.iam.gserviceaccount.com", usedBy: ["billing-api"], references: 2,
+                               failing: 1, lastError: "Google Cloud returned HTTP 503 for billing:projects/billing-123/secrets/STRIPE_KEY@latest."),
         ])
     }
 }

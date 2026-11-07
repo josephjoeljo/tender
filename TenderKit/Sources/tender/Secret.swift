@@ -12,7 +12,9 @@ extension Tender {
                 (that service's own) or ${secret:shared/NAME}, for example \
                 tender start api --env 'MONGO_URL=mongodb://app:${secret:MONGO_PASSWORD}@db/olympsis' -- ./api. \
                 ${secret:gcp:NAME}, ${secret:gcp:NAME@4} and ${secret:gcp:projects/P/secrets/S[@4]} come from \
-                GCP Secret Manager, fetched and cached by the node. \
+                GCP Secret Manager, fetched and cached by the node. Put a named source in place of gcp, as in \
+                ${secret:billing:NAME}, to fetch with that source's own credentials \
+                (see `tender credentials`). \
                 Values stay on the node that runs the service and no command ever prints one.
                 """,
             subcommands: [Set.self, List.self, Delete.self]

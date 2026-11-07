@@ -98,8 +98,8 @@ public struct AgentRuntime: Sendable {
 
         let store = try StateStore(environment: environment)
         let cloud = CloudServices(environment: environment, secrets: secrets)
-        let vault = SecretVault(secrets: secrets, store: store, gcpProject: { cloud.defaultSecretsProject() })
-        let gcp = GCPSecretSync(vault: vault, source: { try cloud.secretSource() })
+        let vault = SecretVault(secrets: secrets, store: store, sources: { cloud.secretSources() })
+        let gcp = GCPSecretSync(vault: vault, sources: { try cloud.secretSource($0) })
         let reconciler = Reconciler(environment: environment, store: store, launchd: launchd,
                                     vault: vault, gcp: gcp, execPath: execPath)
         let releases = ReleaseManager(environment: environment, store: store, reconciler: reconciler)
