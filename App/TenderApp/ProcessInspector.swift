@@ -21,12 +21,12 @@ struct ProcessRef: Codable, Hashable {
 }
 
 enum InspectorTab: String, CaseIterable, Identifiable {
-    case details = "Details", info = "Info", logs = "Logs"
+    case info = "Info", stats = "Stats", logs = "Logs"
     var id: String { rawValue }
     var symbol: String {
         switch self {
-        case .details: "gauge.with.dots.needle.33percent"
-        case .info: "doc.text"
+        case .info: "info.circle"
+        case .stats: "gauge.with.dots.needle.33percent"
         case .logs: "text.alignleft"
         }
     }
@@ -57,8 +57,13 @@ struct ProcessInspector: View {
                     VStack(alignment: .leading, spacing: 18) {
                         ProcessHeader(process: process, model: model)
                         switch tab {
-                        case .details: ProcessDetailsTab(process: process, model: model)
-                        case .info: ProcessConfigTab(process: process, model: model)
+                        case .info:
+                            ProcessFactsSection(process: process, model: model)
+                            ProcessDescriptorsSection(process: process, model: model)
+                            ProcessConfigSection(process: process, model: model)
+                        case .stats:
+                            ProcessStatsPanel(process: process, node: model.nodes.first { $0.info.id == process.node },
+                                              compact: true, showsFacts: false)
                         case .logs: ProcessLogsTab(model: model, ref: ref)
                         }
                     }
@@ -90,7 +95,7 @@ struct ProcessInspector: View {
                     .padding(.horizontal, 8)
                 }
                 .menuIndicator(.hidden)
-                .help("Switch between details, config and logs")
+                .help("Switch between info, stats and logs")
             }
             if #available(macOS 26, *) { ToolbarSpacer(.flexible) }
             if let popOut {
@@ -142,9 +147,10 @@ private struct ProcessHeader: View {
     }
 }
 
-// MARK: Details
+// MARK: Info
 
-private struct ProcessDetailsTab: View {
+/// What it is and how it's doing, like the name, ID and status at the top of a container.
+private struct ProcessFactsSection: View {
     let process: InstanceStatus
     let model: ClusterModel
 
@@ -159,10 +165,6 @@ private struct ProcessDetailsTab: View {
             ("Last exit", process.lastExitCode.map(String.init) ?? StatFormat.dash),
         ])
         InspectorCard(rows: [("Label", process.launchdLabel)])
-        InspectorSection("Resources") {
-            ProcessStatsPanel(process: process, node: model.nodes.first { $0.info.id == process.node },
-                              compact: true, showsFacts: false)
-        }
     }
 
     private var status: String {
@@ -176,9 +178,103 @@ private struct ProcessDetailsTab: View {
     }
 }
 
-// MARK: Info (config)
+/// The ports it listens on, the files it has open and its descriptors by kind, read from
+/// the node on demand and refreshed while shown.
+private struct ProcessDescriptorsSection: View {
+    let process: InstanceStatus
+    let model: ClusterModel
+    private static let filesShown = 50
 
-private struct ProcessConfigTab: View {
+    @State private var result: ProcessDescriptors?
+    @State private var error: String?
+    @State private var showsAllFiles = false
+
+    var body: some View {
+        Group {
+            if process.state != .running {
+                InspectorSection("Ports") {
+                    note("Not running, so it holds no ports or files.")
+                }
+            } else {
+                InspectorTable(title: "Ports", columns: ("Address", "Protocol"),
+                               rows: (result?.ports ?? []).map { ($0.endpoint, $0.proto.rawValue.uppercased()) },
+                               empty: placeholder("Not listening on any port"), valueWidth: 70)
+                let files = result?.files ?? []
+                let total = files.count + (result?.filesOmitted ?? 0)
+                InspectorTable(title: "Open Files", columns: ("Path", "Mode"),
+                               rows: (showsAllFiles ? files : Array(files.prefix(Self.filesShown))).map { ($0.path, $0.mode.title) },
+                               empty: placeholder("No open files"), valueWidth: 80) {
+                    if files.count > Self.filesShown {
+                        Button(showsAllFiles ? "Show Fewer" : "Show All \(total)") { showsAllFiles.toggle() }
+                            .buttonStyle(.borderless)
+                            .font(.callout)
+                    } else if total > 0 {
+                        Text("\(total)").font(.callout).foregroundStyle(.secondary)
+                    }
+                }
+                if let result {
+                    InspectorCard(title: "File Descriptors",
+                                  rows: [("Total", "\(result.total)")] + result.counts.map { ($0.kind.title, "\($0.count)") })
+                    if result.unreadable > 0 {
+                        note("\(result.unreadable) child \(result.unreadable == 1 ? "process" : "processes") couldn't be read.")
+                    }
+                }
+            }
+        }
+        .task(id: "\(process.id)/\(process.pid ?? 0)") { await refresh() }
+    }
+
+    private func placeholder(_ empty: String) -> String {
+        error ?? (result == nil ? "Loading…" : empty)
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text).font(.callout).foregroundStyle(.secondary).padding(.horizontal, 4)
+    }
+
+    /// Every 15 seconds while shown. A read is a libproc walk on the node, so not faster.
+    private func refresh() async {
+        result = nil
+        error = nil
+        guard process.state == .running else { return }
+        while !Task.isCancelled {
+            do {
+                result = try await model.descriptors(for: process)
+                error = nil
+            } catch is CancellationError {
+                return
+            } catch {
+                self.error = "Couldn't read: \(error)"
+            }
+            try? await Task.sleep(for: .seconds(15))
+        }
+    }
+}
+
+extension OpenFile.Mode {
+    var title: String {
+        switch self {
+        case .read: "Read"
+        case .write: "Write"
+        case .readWrite: "Read/Write"
+        }
+    }
+}
+
+extension DescriptorCount.Kind {
+    var title: String {
+        switch self {
+        case .file: "Files"
+        case .socket: "Sockets"
+        case .pipe: "Pipes"
+        case .kqueue: "Kqueues"
+        case .other: "Other"
+        }
+    }
+}
+
+/// The spec it was started from: program, environment, secret files and log paths.
+private struct ProcessConfigSection: View {
     let process: InstanceStatus
     let model: ClusterModel
     @State private var revealed = false
@@ -196,16 +292,20 @@ private struct ProcessConfigTab: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if let error = model.specsError {
-                ContentUnavailableView {
-                    Label("Config Unavailable", systemImage: "lock")
-                } description: {
-                    Text("Reading specs needs a write token, since they can hold values from an env_file.\n\(error)")
+                InspectorSection("Config") {
+                    Label("Reading config needs a write token, since it can hold values from an env_file. \(error)",
+                          systemImage: "lock")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
             } else if model.specs == nil {
-                ProgressView().frame(maxWidth: .infinity)
+                InspectorSection("Config") { ProgressView().frame(maxWidth: .infinity) }
             } else {
-                ContentUnavailableView("No Config", systemImage: "doc.questionmark",
-                                       description: Text("\(model.name(of: process.node)) didn't report a spec for \(process.service)."))
+                InspectorSection("Config") {
+                    Text("\(model.name(of: process.node)) didn't report a spec for \(process.service).")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .task(id: process.id) { await model.loadSpecs() }
@@ -409,14 +509,18 @@ struct InspectorTable<Accessory: View>: View {
     let columns: (String, String)
     let rows: [(String, String)]
     let empty: String
+    /// A fixed width for the second column, so a short one (mode, protocol) leaves the first
+    /// (a path) the room. Nil splits the width evenly.
+    let valueWidth: CGFloat?
     let accessory: Accessory
 
-    init(title: String, columns: (String, String), rows: [(String, String)], empty: String,
+    init(title: String, columns: (String, String), rows: [(String, String)], empty: String, valueWidth: CGFloat? = nil,
          @ViewBuilder accessory: () -> Accessory = { EmptyView() }) {
         self.title = title
         self.columns = columns
         self.rows = rows
         self.empty = empty
+        self.valueWidth = valueWidth
         self.accessory = accessory()
     }
 
@@ -452,11 +556,12 @@ struct InspectorTable<Accessory: View>: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(key)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .lineLimit(1)
+                // Paths get a second line before they're shortened.
+                .lineLimit(valueWidth == nil ? 1 : 2)
                 .truncationMode(.middle)
             Text(value)
                 .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minWidth: valueWidth, maxWidth: valueWidth ?? .infinity, alignment: .leading)
                 .lineLimit(2)
                 .truncationMode(.middle)
         }
@@ -477,7 +582,7 @@ extension View {
 struct ProcessWindow: View {
     let model: ClusterModel
     let ref: ProcessRef?
-    @State private var tab: InspectorTab = .details
+    @State private var tab: InspectorTab = .info
 
     var body: some View {
         if let ref {
@@ -506,6 +611,21 @@ extension SpecList {
                             secretFiles: ["/etc/olympsis/gcp.json": "shared/GCP_KEY"])
             })
         })
+    }
+}
+
+extension ProcessDescriptors {
+    static func preview(_ process: InstanceStatus) -> ProcessDescriptors {
+        let pid = process.pid ?? 4242
+        return ProcessDescriptors(
+            service: process.service, instance: process.instance, node: process.node, pid: pid,
+            ports: [ListeningPort(proto: .tcp, address: "*", port: 8080, pid: pid),
+                    ListeningPort(proto: .tcp, address: "127.0.0.1", port: 9090, pid: pid + 1)],
+            files: [OpenFile(fd: 3, path: "/opt/tender/releases/\(process.service)/3f9a1c2b7d4e/\(process.service)", mode: .read, pid: pid),
+                    OpenFile(fd: 4, path: "/var/log/tender/\(process.service).0.out.log", mode: .write, pid: pid),
+                    OpenFile(fd: 7, path: "/Users/joel/Library/Application Support/olympsis/cache.db", mode: .readWrite, pid: pid + 1)],
+            counts: [DescriptorCount(kind: .socket, count: 14), DescriptorCount(kind: .file, count: 3),
+                     DescriptorCount(kind: .pipe, count: 4), DescriptorCount(kind: .kqueue, count: 1)])
     }
 }
 

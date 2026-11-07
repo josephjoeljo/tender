@@ -47,6 +47,9 @@ final class ClusterModel {
     }
 
     #if DEBUG
+    /// Set by the preview initializer, so calls that would reach a head return sample data.
+    private(set) var isPreview = false
+
     /// Fixed data for Xcode previews: no polling, no Keychain, no network.
     init(previewHealth: ClusterHealth, nodes: [NodeSummary], processes: [InstanceStatus]) {
         store = ConnectionStore(directory: URL(filePath: "/dev/null"),
@@ -57,6 +60,7 @@ final class ClusterModel {
         history = .preview(nodes)
         head = nodes.isEmpty ? nil : "mac-1:7071"
         specs = .preview(processes)
+        isPreview = true
     }
     #endif
 
@@ -218,6 +222,14 @@ final class ClusterModel {
     /// The adopted-job entry for a process Tender didn't create.
     func adoptedItem(for process: InstanceStatus) -> AdoptedItem? {
         specs?.nodes.first { $0.node == process.node }?.adopted.first { $0.label == process.service }
+    }
+
+    /// The ports, open files and descriptor counts of a running process, read from its node.
+    func descriptors(for process: InstanceStatus) async throws -> ProcessDescriptors? {
+        #if DEBUG
+        if isPreview { return .preview(process) }
+        #endif
+        return try await client?.descriptors(service: process.service, instance: process.instance, node: process.node.rawValue)
     }
 
     func searchLogs(_ query: LogQuery) async throws -> LogSearchResult? {

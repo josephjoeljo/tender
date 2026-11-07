@@ -33,6 +33,10 @@ distributed actor TestAgent: NodeAgentProtocol {
     distributed func applyManifest(_ request: ApplyRequest) async throws -> ApplyResponse {
         ApplyResponse(diff: ManifestDiff(), dryRun: request.dryRun)
     }
+    distributed func descriptors(service: String, instance: Int) async throws -> ProcessDescriptors {
+        ProcessDescriptors(service: service, instance: instance, node: NodeID("test"), pid: 1,
+                           ports: [ListeningPort(proto: .tcp, address: "*", port: 8080, pid: 1)])
+    }
 }
 
 distributed actor TestRegistry: HeadRegistryProtocol {

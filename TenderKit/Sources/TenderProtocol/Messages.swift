@@ -79,6 +79,9 @@ public protocol NodeAgentProtocol: DistributedActor where ActorSystem: Distribut
     /// Diffs `request.items` against this node and, unless it's a dry run, applies the
     /// changes. Items must name this node or none. One failing item doesn't stop the others.
     distributed func applyManifest(_ request: ApplyRequest) async throws -> ApplyResponse
+    /// Listening ports, open files and descriptor counts of one running instance and its
+    /// children. Nodes from before this call answer with an unknown-target error.
+    distributed func descriptors(service: String, instance: Int) async throws -> ProcessDescriptors
 }
 
 /// What a worker tells the head.

@@ -137,7 +137,7 @@ struct ProcessesView: View {
     @State private var selection: String?
     @State private var showsInspector = true
     @State private var collapsed: Set<String> = []
-    @AppStorage("processInspectorTab") private var tab: InspectorTab = .details
+    @AppStorage("processInspectorTab") private var tab: InspectorTab = .info
     @Environment(\.openWindow) private var openWindow
 
     private var selected: InstanceStatus? { model.processes.first { $0.id == selection } }

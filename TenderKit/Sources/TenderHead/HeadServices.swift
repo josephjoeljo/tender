@@ -690,6 +690,24 @@ public final class HeadServices: Sendable {
                 return await clusterStatus()
             }
         }
+        router.get("/v1/processes/:name/descriptors") { [self] request, context in
+            await respond {
+                let name = try context.parameters.requireDecoded("name")
+                let query = request.uri.queryParameters
+                var instance = 0
+                if let raw = query.get("instance") {
+                    guard let parsed = Int(raw), parsed >= 0 else {
+                        throw NodeCallError(code: "invalid_instance", message: "instance must be a whole number, not '\(raw)'.", httpStatus: 400)
+                    }
+                    instance = parsed
+                }
+                // Without ?node=, the first node running it: fine for a service on one node.
+                let target = await targets(service: name, node: query.get("node").map { String($0) })[0]
+                return try await translatingTransport(target) {
+                    try await agent(on: target).descriptors(service: name, instance: instance)
+                }
+            }
+        }
         router.post("/v1/processes/:name/:action") { [self] request, context in
             await respond {
                 let name = try context.parameters.requireDecoded("name")
