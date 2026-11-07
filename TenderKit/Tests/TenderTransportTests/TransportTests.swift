@@ -25,6 +25,9 @@ private func agentRef(_ node: String, using system: TenderActorSystem) throws ->
     #expect(list.processes.first?.node == NodeID("worker"))
     #expect(try await remote.status().orphans == ["on-worker"])
     #expect(try await remote.releases(service: "svc").current == "svc")
+    let descriptors = try await remote.descriptors(service: "api", instance: 2)
+    #expect(descriptors.instance == 2)
+    #expect(descriptors.ports.map(\.endpoint) == ["*:8080"])
     _ = agent
 }
 

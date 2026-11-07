@@ -176,6 +176,13 @@ public struct TenderClient: Sendable {
         try await send(.DELETE, "/v1/processes/\(try escaped(service))\(try nodeQuery(node))")
     }
 
+    /// Listening ports, open files and descriptor counts of one running instance and its children.
+    public func descriptors(service: String, instance: Int = 0, node: String? = nil) async throws -> ProcessDescriptors {
+        var path = "/v1/processes/\(try escaped(service))/descriptors?instance=\(instance)"
+        if let node { path += "&node=\(try escaped(node))" }
+        return try await send(.GET, path)
+    }
+
     public func logs(service: String, lines: Int = 200, instance: Int? = nil,
                      stream: LogLine.Stream? = nil) async throws -> LogResponse {
         try await send(.GET, try logsPath(service, lines, instance, stream, follow: false))

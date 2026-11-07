@@ -8,7 +8,7 @@ struct Tender: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tender",
         abstract: "Manage processes across your Macs.",
-        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Releases.self, Rollback.self, Adopt.self, Abandon.self, Apply.self, Export.self, Secret.self, Gc.self, Version.self, Daemon.self,
+        subcommands: [Start.self, Stop.self, Restart.self, Delete.self, List.self, Logs.self, Inspect.self, Releases.self, Rollback.self, Adopt.self, Abandon.self, Apply.self, Export.self, Secret.self, Gc.self, Version.self, Daemon.self,
                       Deploy.self, Credentials.self, Token.self, Join.self, Leave.self, Nodes.self, Status.self, Node.self, CA.self, ApiToken.self, Context.self]
     )
 }
@@ -311,6 +311,57 @@ extension Tender {
                 print("\(line.service)[\(line.instance)] \(line.stream.rawValue) | \(terminalSafe(line.text))")
             }
             fflush(stdout)
+        }
+    }
+
+    struct Inspect: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Show what a running process holds open: listening ports, open files and descriptor counts.",
+            discussion: "Includes the process's children, so a wrapper script shows its server's ports."
+        )
+        @Argument(help: "Service name or adopted launchd label.") var name: String
+        @Option(help: "Instance number.") var instance = 0
+        @Option(help: "Node it runs on. Defaults to the first node running it.") var node: String?
+        @Option(help: "Open files to show, at most.") var limit = 50
+        @OptionGroup var options: CommonOptions
+
+        func validate() throws {
+            guard limit >= 0 else { throw ValidationError("--limit can't be negative.") }
+        }
+
+        func run() async throws {
+            do {
+                var result = try await options.makeClient().descriptors(service: name, instance: instance, node: node)
+                if result.files.count > limit {
+                    result.filesOmitted += result.files.count - limit
+                    result.files = Array(result.files.prefix(limit))
+                }
+                print(options.json ? try options.encode(result) : Self.render(result))
+            } catch let error as TenderClientError {
+                try options.fail(error)
+            }
+        }
+
+        static func render(_ result: ProcessDescriptors) -> String {
+            var lines = ["\(terminalSafe(result.service)) #\(result.instance) on \(terminalSafe(result.node.rawValue)), pid \(result.pid)", ""]
+            lines.append("PORTS")
+            if result.ports.isEmpty { lines.append("  none listening") }
+            for port in result.ports {
+                lines.append("  \(port.proto.rawValue)  \(port.endpoint.padding(toLength: 28, withPad: " ", startingAt: 0))pid \(port.pid)")
+            }
+            lines.append("")
+            let shown = result.files.count
+            lines.append("OPEN FILES" + (result.filesOmitted > 0 ? " (\(shown) of \(shown + result.filesOmitted); raise --limit for more)" : ""))
+            if result.files.isEmpty { lines.append("  none") }
+            for file in result.files {
+                let fd = String(file.fd).padding(toLength: 5, withPad: " ", startingAt: 0)
+                let mode = file.mode.rawValue.padding(toLength: 4, withPad: " ", startingAt: 0)
+                lines.append("  \(fd)\(mode)\(terminalSafe(file.path))" + (file.pid == result.pid ? "" : "  (pid \(file.pid))"))
+            }
+            lines.append("")
+            lines.append("DESCRIPTORS  \(result.total) total: " + result.counts.map { "\($0.count) \($0.kind.rawValue)" }.joined(separator: ", "))
+            if result.unreadable > 0 { lines.append("  \(result.unreadable) child process(es) couldn't be read") }
+            return lines.joined(separator: "\n")
         }
     }
 

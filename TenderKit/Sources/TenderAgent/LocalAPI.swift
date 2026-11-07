@@ -438,6 +438,15 @@ extension ProcessController {
     }
 }
 
+/// `?instance=` as a number, 0 when it's left out.
+func instanceParameter(_ request: Request) throws -> Int {
+    guard let raw = request.uri.queryParameters.get("instance") else { return 0 }
+    guard let instance = Int(raw), instance >= 0 else {
+        throw APIFailure(status: .badRequest, code: "invalid_instance", message: "instance must be a whole number, not '\(raw)'.")
+    }
+    return instance
+}
+
 /// Routes of the local HTTP/JSON API. The head serves the same API in milestone 2.
 func makeRouter(controller: ProcessController, identities: ClusterIdentityStore? = nil, network: NetworkMonitor? = nil,
                 clusterRoutes: (@Sendable (Router<BasicRequestContext>) -> Void)? = nil) -> Router<BasicRequestContext> {
@@ -530,6 +539,12 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
             var request = request
             let body = try await request.collectBody(upTo: 1 << 20)
             return try await controller.start(try decodeBody(ServiceSpec.self, Data(body.readableBytesView)))
+        }
+    }
+    router.get("/v1/processes/:name/descriptors") { request, context in
+        await respond {
+            try await controller.descriptors(service: try context.parameters.requireDecoded("name"),
+                                             instance: try instanceParameter(request))
         }
     }
     router.post("/v1/processes/:name/:action") { _, context in
