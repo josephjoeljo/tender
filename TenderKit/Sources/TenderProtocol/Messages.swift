@@ -82,6 +82,10 @@ public protocol NodeAgentProtocol: DistributedActor where ActorSystem: Distribut
     /// Listening ports, open files and descriptor counts of one running instance and its
     /// children. Nodes from before this call answer with an unknown-target error.
     distributed func descriptors(service: String, instance: Int) async throws -> ProcessDescriptors
+    /// Sets and removes the node's own labels, `name` among them, and returns them all. The
+    /// node re-registers with them. Nodes from before this call answer with an
+    /// unknown-target error.
+    distributed func updateLabels(_ update: NodeLabelsUpdate) async throws -> [String: String]
 }
 
 /// What a worker tells the head.

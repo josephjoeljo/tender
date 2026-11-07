@@ -1130,3 +1130,53 @@ private struct FakeSource: ReleaseSource {
     try store.clear()
     #expect(try store.load() == nil)
 }
+
+@Test func historyListsChangesNewestFirstWithFailuresCounted() async throws {
+    try await withCluster { head, _ async throws in
+        let writer = try await head.client.createAPIToken(name: "alice", scope: .write)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let remote = TenderClient(head: address, caPEM: try await ClientPinning.fetchCA(head: address, credential: writer.token),
+                                  token: writer.token)
+        _ = try await remote.start(sleeper)
+        _ = try? await remote.restart(service: "nope", node: "worker")
+        _ = try await remote.list()
+
+        let history = try await remote.history(AuditQuery(since: Date().addingTimeInterval(-60)))
+        let alices = history.records.filter { $0.who == "alice" }
+        #expect(alices.map(\.action) == ["restart", "start"], "newest first, reads left out")
+        #expect(alices.first?.target == "nope" && alices.first?.node == "worker" && alices.first?.succeeded == false)
+        #expect(alices.last?.target == "api" && alices.last?.succeeded == true)
+        #expect(history.failures >= 1)
+        #expect(try await remote.history(AuditQuery(who: "alice", failedOnly: true)).records.map(\.action) == ["restart"])
+        #expect(try await remote.history(AuditQuery(about: "api")).records.allSatisfy { $0.target == "api" })
+        let limited = try await remote.history(AuditQuery(limit: 1))
+        #expect(limited.records.count == 1 && limited.truncated)
+    }
+}
+
+@Test func labelsAreKeptByTheNodeAndNameItEverywhere() async throws {
+    try await withCluster { head, worker async throws in
+        let nodes = try await head.client.updateLabels(node: "worker", NodeLabelsUpdate(set: ["name": "Basement mini", "rack": "a"]))
+        let summary = try #require(nodes.nodes.first { $0.info.id == NodeID("worker") })
+        #expect(summary.info.displayName == "Basement mini")
+        #expect(summary.info.userLabels == ["name": "Basement mini", "rack": "a"])
+
+        // The node holds them: in its config, and in what it registers with.
+        let file = worker.env.configDirectory.appending(path: "labels.json")
+        #expect(try JSONDecoder().decode([String: String].self, from: Data(contentsOf: file)) == ["name": "Basement mini", "rack": "a"])
+
+        // A display name resolves like a hostname.
+        _ = try await head.client.updateLabels(node: "basement mini", NodeLabelsUpdate(remove: ["rack"]))
+        let after = try await head.client.nodes().nodes.first { $0.info.id == NodeID("worker") }
+        #expect(after?.info.userLabels == ["name": "Basement mini"])
+
+        do {
+            _ = try await head.client.updateLabels(node: "head", NodeLabelsUpdate(set: ["role": "worker"]))
+            Issue.record("role is Tender's own")
+        } catch let error as TenderClientError {
+            #expect(error.code == "invalid_labels")
+        }
+        #expect(try await head.client.nodes().nodes.first { $0.info.id == NodeID("head") }?.info.isHead == true)
+        #expect(try await head.client.history(AuditQuery(about: "basement")).records.first?.action == "label node")
+    }
+}

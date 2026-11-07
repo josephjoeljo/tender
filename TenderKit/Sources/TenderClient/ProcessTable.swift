@@ -53,6 +53,28 @@ public enum ProcessTable {
         return output
     }
 
+    /// `tender history`: failures counted first, then newest first in local time.
+    public static func render(_ list: AuditList, names: [NodeID: String] = [:]) -> String {
+        guard !list.records.isEmpty else { return "No changes recorded." }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let rows = [["TIME", "WHO", "ACTION", "TARGET", "NODE", "RESULT", "DETAIL"]] + list.records.map { record in
+            [
+                formatter.string(from: record.time),
+                record.who,
+                record.action,
+                record.target ?? "-",
+                record.node.map { names[NodeID($0)] ?? $0 } ?? "-",
+                record.succeeded ? "ok" : "failed \(record.status)",
+                record.detail ?? "",
+            ]
+        }
+        var output = list.failures > 0 ? "\(list.failures) of \(list.records.count) failed.\n\n" : ""
+        output += aligned(rows)
+        if list.truncated { output += "\n\nMore changes match; raise --limit or narrow with --since." }
+        return output
+    }
+
     private static func aligned(_ rows: [[String]]) -> String {
         let widths = rows[0].indices.map { column in rows.map { $0[column].count }.max() ?? 0 }
         return rows.map { row in

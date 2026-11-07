@@ -7,15 +7,16 @@ struct DashboardView: View {
     let model: ClusterModel
 
     enum Section: String, CaseIterable, Identifiable {
-        case nodes = "Nodes", processes = "Processes", logs = "Logs", releases = "Releases", settings = "Settings"
+        case nodes = "Nodes", processes = "Processes", logs = "Logs", releases = "Releases", history = "History", settings = "Settings"
         var id: String { rawValue }
-        static let pages: [Section] = [.nodes, .processes, .logs, .releases]
+        static let pages: [Section] = [.nodes, .processes, .logs, .releases, .history]
         var symbol: String {
             switch self {
             case .nodes: "desktopcomputer"
             case .processes: "gearshape.2"
             case .logs: "text.alignleft"
             case .releases: "shippingbox"
+            case .history: "clock.arrow.circlepath"
             case .settings: "gearshape"
             }
         }
@@ -94,6 +95,7 @@ struct DashboardView: View {
             case .processes: ProcessesView(model: model)
             case .logs: LogsView(model: model)
             case .releases: ReleasesView(model: model)
+            case .history: HistoryView(model: model)
             case .settings: EmptyView()
             }
         }

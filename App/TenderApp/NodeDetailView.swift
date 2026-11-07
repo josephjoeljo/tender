@@ -7,6 +7,7 @@ struct NodeDetailView: View {
     let model: ClusterModel
     let nodeID: String
     @AppStorage("nodeHistoryWindow") private var window: Double = 900
+    @State private var editing = false
 
     var body: some View {
         if let node = model.nodes.first(where: { $0.id == nodeID }) {
@@ -42,6 +43,13 @@ struct NodeDetailView: View {
                 .padding(16)
             }
             .navigationTitle(node.info.displayName)
+            .toolbar {
+                ToolbarItem {
+                    Button("Name and Labels", systemImage: "tag") { editing = true }
+                        .help("Rename this node or edit its labels")
+                }
+            }
+            .sheet(isPresented: $editing) { NodeSettingsSheet(model: model, node: node) }
             .task(id: "\(nodeID) \(window)") {
                 await model.loadHistoryRetention()
                 await model.loadHistory(nodeID: nodeID, window: window)

@@ -52,8 +52,11 @@ public struct NodeInfo: Codable, Sendable, Equatable {
     public static let roleLabel = "role"
     public static let headRole = "head"
 
-    /// The hostname if there is one, else the ID.
-    public var displayName: String { hostname ?? id.rawValue }
+    /// The `name` label if someone set one, else the hostname, else the ID.
+    public var displayName: String { labels[NodeLabels.nameKey] ?? hostname ?? id.rawValue }
+
+    /// Labels people set, without the ones Tender sets itself.
+    public var userLabels: [String: String] { labels.filter { !NodeLabels.reservedKeys.contains($0.key) } }
 
     public var isHead: Bool { labels[Self.roleLabel] == Self.headRole }
 }

@@ -47,4 +47,17 @@ extension ClusterModel {
         ClusterModel(previewHealth: .notConfigured, nodes: [], processes: [])
     }
 }
+extension AuditList {
+    static var preview: AuditList {
+        let now = Date()
+        return AuditList(records: [
+            AuditRecord(time: now.addingTimeInterval(-120), who: "app", method: "POST", path: "/v1/processes/api/restart", status: 200, node: "mac-1"),
+            AuditRecord(time: now.addingTimeInterval(-900), who: "ci", method: "POST", path: "/v1/deploy", status: 502,
+                        detail: "service api version 1.4.2"),
+            AuditRecord(time: now.addingTimeInterval(-3600), who: "local-socket", method: "PUT", path: "/v1/secrets/api/MONGO_PASSWORD", status: 200),
+            AuditRecord(time: now.addingTimeInterval(-7200), who: "joel", method: "POST", path: "/v1/apply", status: 200,
+                        detail: "file 3f2a9c, 2 changed, 5 unchanged"),
+        ])
+    }
+}
 #endif

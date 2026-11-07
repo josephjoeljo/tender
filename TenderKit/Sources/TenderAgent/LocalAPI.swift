@@ -42,6 +42,9 @@ struct ProcessController: Sendable {
     /// Shared by every copy, so that applies run one at a time.
     let applies = OneAtATime()
 
+    /// The node's own labels, which it reports when it registers.
+    var labels: LabelStore { LabelStore(environment: environment) }
+
     // MARK: Secrets
 
     private func requireVault() throws -> SecretVault {

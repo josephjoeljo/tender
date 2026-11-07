@@ -37,6 +37,10 @@ distributed actor TestAgent: NodeAgentProtocol {
         ProcessDescriptors(service: service, instance: instance, node: NodeID("test"), pid: 1,
                            ports: [ListeningPort(proto: .tcp, address: "*", port: 8080, pid: 1)])
     }
+
+    distributed func updateLabels(_ update: NodeLabelsUpdate) async throws -> [String: String] {
+        update.applied(to: [:])
+    }
 }
 
 distributed actor TestRegistry: HeadRegistryProtocol {
