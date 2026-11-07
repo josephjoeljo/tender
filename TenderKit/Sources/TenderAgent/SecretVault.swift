@@ -19,17 +19,22 @@ public struct SecretVault: Sendable {
 
     let secrets: any SecretStore
     let store: StateStore
-    /// The project of `gcp:` references that name none, read when it's needed so that a
-    /// change to `cloud.json` needs no restart.
-    let gcpProject: @Sendable () -> String?
+    /// The node's secrets sources, read when they're needed so that a change to
+    /// `cloud.json` needs no restart.
+    let sources: @Sendable () -> SecretSources
     /// The store and `state.db` change in two steps, so a concurrent set and delete could
     /// otherwise leave a record saying live with no value behind it. Copies share it.
     private let lock = NSLock()
 
-    public init(secrets: any SecretStore, store: StateStore, gcpProject: @escaping @Sendable () -> String? = { nil }) {
+    public init(secrets: any SecretStore, store: StateStore, sources: @escaping @Sendable () -> SecretSources) {
         self.secrets = secrets
         self.store = store
-        self.gcpProject = gcpProject
+        self.sources = sources
+    }
+
+    /// Only the default source, with `gcpProject` as its project.
+    public init(secrets: any SecretStore, store: StateStore, gcpProject: @escaping @Sendable () -> String? = { nil }) {
+        self.init(secrets: secrets, store: store, sources: { SecretSources(defaultProject: gcpProject()) })
     }
 
     static func validate(_ value: Data) throws {
@@ -71,7 +76,7 @@ public struct SecretVault: Sendable {
     }
 
     func itemName(_ ref: SecretRef, service: String) -> String? {
-        ref.itemName(service: service, defaultProject: gcpProject())
+        ref.itemName(service: service, sources: sources())
     }
 
     // MARK: GCP cache

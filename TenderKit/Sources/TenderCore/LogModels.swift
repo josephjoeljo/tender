@@ -172,10 +172,21 @@ public struct ClusterReleases: Codable, Sendable, Equatable {
 public struct CredentialsRequest: Codable, Sendable, Equatable {
     /// A GCP service account key file's contents.
     public var serviceAccountJSON: String
-    public init(serviceAccountJSON: String) { self.serviceAccountJSON = serviceAccountJSON }
+    /// A named secrets source in `cloud.json`. Nil (or `gcp`) for the node's default
+    /// credentials, which releases and log offload use too.
+    public var source: String?
+    public init(serviceAccountJSON: String, source: String? = nil) {
+        self.serviceAccountJSON = serviceAccountJSON
+        self.source = source
+    }
 }
 
 public struct CredentialsResponse: Codable, Sendable, Equatable {
     public var clientEmail: String
-    public init(clientEmail: String) { self.clientEmail = clientEmail }
+    /// Nil from an older tenderd, which only has the default source.
+    public var source: String?
+    public init(clientEmail: String, source: String? = nil) {
+        self.clientEmail = clientEmail
+        self.source = source
+    }
 }

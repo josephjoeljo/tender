@@ -96,6 +96,46 @@ struct ProcessController: Sendable {
         return SecretList(secrets: secrets, missing: missing, gcp: await gcp?.infos(for: specs, node: node) ?? [])
     }
 
+    /// The node's secrets sources and local secrets, for `tender credentials show` and the
+    /// heartbeat. Reads each source's key to name its account; never returns it.
+    func secretsStatus() async -> NodeSecretsStatus {
+        let specs = ((try? store.services()) ?? []).map(\.spec).filter(\.usesSecretTemplates)
+        let local = (try? vault?.live().count) ?? 0
+        guard let cloud else { return NodeSecretsStatus(localSecrets: local) }
+        let sources = cloud.secretSources()
+        let usage = await gcp?.sourceUsage(for: specs) ?? [:]
+
+        func status(_ name: String?, config: SecretSourceConfig?) -> SecretSourceStatus {
+            let used = usage[name] ?? ([], 0, 0, nil)
+            var status = SecretSourceStatus(
+                name: name ?? SecretSources.defaultName, kind: config?.resolvedKind ?? SecretSourceConfig.gcpKind,
+                project: name == nil ? sources.defaultProject : config?.project, services: config?.services,
+                usedBy: used.users.sorted(), references: used.references, failing: used.failing, lastError: used.lastError)
+            if let name, config == nil {
+                status.problem = SecretSourceError.unknownSource(name).description
+            } else if status.kind != SecretSourceConfig.gcpKind, let name {
+                status.problem = SecretSourceError.unsupportedKind(source: name, kind: status.kind).description
+            } else {
+                do {
+                    status.account = try cloud.credentials(source: name).clientEmail
+                } catch {
+                    status.problem = "\(error)"
+                }
+            }
+            return status
+        }
+
+        var result: [SecretSourceStatus] = []
+        let defaultStatus = status(nil, config: nil)
+        // The default source counts once it's set up or used; a node without it is normal.
+        if defaultStatus.account != nil || sources.defaultProject != nil || usage[nil] != nil {
+            result.append(defaultStatus)
+        }
+        let names = Set(sources.named.keys).union(usage.keys.compactMap { $0 })
+        for name in names.sorted() { result.append(status(name, config: sources.named[name])) }
+        return NodeSecretsStatus(localSecrets: local, sources: result)
+    }
+
     /// Fetches `spec`'s GCP secrets before its instances need them. One that was never
     /// fetched fails the start, naming the secret and the role it needs; one that was
     /// cached starts from the cache, and `tender secret list` shows it as stale.
@@ -267,7 +307,7 @@ struct ProcessController: Sendable {
         } catch let error as CloudError {
             switch error {
             case .invalidVersion: throw APIFailure(status: .badRequest, code: "invalid_version", message: error.description)
-            case .notConfigured, .noCredentials: throw APIFailure(status: .conflict, code: "not_configured", message: error.description)
+            case .notConfigured, .noCredentials, .noSourceCredentials: throw APIFailure(status: .conflict, code: "not_configured", message: error.description)
             case .checksumMismatch: throw APIFailure(status: .badGateway, code: "checksum_mismatch", message: error.description)
             case .http, .invalidManifest, .invalidCredentials: throw APIFailure(status: .badGateway, code: "release_fetch_failed", message: error.description)
             }
@@ -378,8 +418,8 @@ struct ProcessController: Sendable {
             guard gcp != nil else {
                 throw APIFailure(status: .notImplemented, code: "no_secrets", message: "This daemon can't fetch GCP secrets.")
             }
-            if let gcpRef = ref.gcp, vault?.itemName(ref, service: spec.name) == nil {
-                throw APIFailure(status: .badRequest, code: "invalid_secret_ref", message: SecretFetchError.noProject(gcpRef.description).description)
+            if let gcpRef = ref.gcp, let vault, case .failure(let error) = vault.sources().resolve(gcpRef, service: spec.name) {
+                throw APIFailure(status: .badRequest, code: "invalid_secret_ref", message: error.description)
             }
         }
         try validateSecretFiles(spec)
@@ -448,6 +488,20 @@ func instanceParameter(_ request: Request) throws -> Int {
 }
 
 /// Routes of the local HTTP/JSON API. The head serves the same API in milestone 2.
+/// The source a credentials call names: nil for the default one (`gcp` or none). A named
+/// source must be in `cloud.json` before it gets a key, so a typo can't hide a key away.
+private func credentialsSource(_ raw: String?, controller: ProcessController, mustBeDefined: Bool = true) throws -> String? {
+    guard let raw, raw != SecretSources.defaultName else { return nil }
+    guard SecretSources.isValidName(raw) else {
+        throw APIFailure(status: .badRequest, code: "invalid_source",
+                         message: "'\(raw)' isn't a source name: lowercase letters, digits and '-', starting with a letter, up to 32.")
+    }
+    if mustBeDefined, controller.cloud?.secretSources().named[raw] == nil {
+        throw APIFailure(status: .badRequest, code: "unknown_source", message: SecretSourceError.unknownSource(raw).description)
+    }
+    return raw
+}
+
 func makeRouter(controller: ProcessController, identities: ClusterIdentityStore? = nil, network: NetworkMonitor? = nil,
                 clusterRoutes: (@Sendable (Router<BasicRequestContext>) -> Void)? = nil) -> Router<BasicRequestContext> {
     let router = Router()
@@ -475,14 +529,28 @@ func makeRouter(controller: ProcessController, identities: ClusterIdentityStore?
                 var request = request
                 let body = try await request.collectBody(upTo: 1 << 16)
                 let credentials = try decodeBody(CredentialsRequest.self, Data(body.readableBytesView))
+                let source = try credentialsSource(credentials.source, controller: controller)
                 let json = Data(credentials.serviceAccountJSON.utf8)
                 do {
                     let parsed = try GoogleCredentials(json: json)
-                    try identities.secrets.write(GoogleCredentials.secretName, json)
-                    return CredentialsResponse(clientEmail: parsed.clientEmail)
+                    try identities.secrets.write(SecretSources.credentialsItem(source), json)
+                    // References that failed for want of a key are fetched now, not at the next retry.
+                    try? await controller.reconciler.reconcile()
+                    return CredentialsResponse(clientEmail: parsed.clientEmail, source: source ?? SecretSources.defaultName)
                 } catch let error as CloudError {
                     throw APIFailure(status: .badRequest, code: "invalid_credentials", message: error.description)
                 }
+            }
+        }
+        router.get("/v1/credentials") { _, _ in
+            await respond { await controller.secretsStatus() }
+        }
+        router.delete("/v1/credentials") { request, _ in
+            await respond {
+                let raw: String? = request.uri.queryParameters.get("source").map { String($0) }
+                let source = try credentialsSource(raw, controller: controller, mustBeDefined: false)
+                try identities.secrets.delete(SecretSources.credentialsItem(source))
+                return await controller.secretsStatus()
             }
         }
     }

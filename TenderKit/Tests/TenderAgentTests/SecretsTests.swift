@@ -544,3 +544,34 @@ func aRealJobSeesItsSecretThroughTenderdExec() async throws {
     try store.deleteService("echo")
     #expect(try await reconciler.reconcile().failures.isEmpty)
 }
+
+@Test func namedSourcesAreCheckedAtStartAndNeedACloudEntryForAKey() async throws {
+    try await withSecretsDaemon { client, env async throws in
+        try FileManager.default.createDirectory(at: env.configDirectory, withIntermediateDirectories: true)
+        try Data(#"{"secrets":{"sources":{"billing":{"project":"billing-123","services":["billing-api"]}}}}"#.utf8)
+            .write(to: env.configDirectory.appending(path: "cloud.json"))
+        for (service, ref, expected) in [("api", "billing:STRIPE_KEY", "doesn't allow api"),
+                                         ("api", "nope:STRIPE_KEY", "no secrets source named 'nope'")] {
+            let spec = ServiceSpec(name: service, program: .executable("/bin/sleep"), arguments: ["1000"],
+                                   environment: ["S": "${secret:\(ref)}"])
+            do {
+                _ = try await client.start(spec)
+                Issue.record("expected \(ref) to be refused for \(service)")
+            } catch let error as TenderClientError {
+                #expect(error.code == "invalid_secret_ref")
+                #expect(error.description.contains(expected), "\(error)")
+            }
+        }
+
+        do {
+            _ = try await client.setCredentials(serviceAccountJSON: "{}", source: "typo")
+            Issue.record("expected an undefined source to be refused")
+        } catch let error as TenderClientError {
+            #expect(error.code == "unknown_source")
+        }
+        let status = try await client.credentials()
+        #expect(status.sources.map(\.name) == ["billing"])
+        #expect(status.sources[0].problem?.contains("tender credentials set --source billing") == true)
+        #expect(!status.hasSource)
+    }
+}

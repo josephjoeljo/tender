@@ -17,6 +17,7 @@ public actor RegistryState {
         var spoolDropped = 0
         var secretFetchErrors = 0
         var stats: NodeStats?
+        var secrets: NodeSecretsStatus?
         var history = NodeStatsRecorder()
         /// Instances in the latest heartbeat; one that stops being reported is dropped, and
         /// only what's on disk is left of it.
@@ -104,6 +105,7 @@ public actor RegistryState {
         entry.spoolDropped = heartbeat.spoolDropped
         entry.secretFetchErrors = heartbeat.secretFetchErrors
         entry.stats = heartbeat.stats
+        entry.secrets = heartbeat.secrets
         entries[heartbeat.node] = entry
         return true
     }
@@ -217,7 +219,8 @@ public actor RegistryState {
                 spoolBacklog: entry.spoolBacklog,
                 spoolDropped: entry.spoolDropped,
                 secretFetchErrors: entry.secretFetchErrors,
-                stats: entry.stats
+                stats: entry.stats,
+                secrets: entry.secrets
             )
         }.headFirst()
     }

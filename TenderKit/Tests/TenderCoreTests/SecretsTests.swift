@@ -133,3 +133,50 @@ func malformedGCPReferencesAreRejected(text: String) {
     let encoded = String(decoding: try JSONEncoder().encode(info), as: UTF8.self)
     #expect(encoded.contains(#""stale":true"#))
 }
+
+// MARK: Named secrets sources
+
+@Test func namedSourceReferencesParseAndKeepTheirSource() throws {
+    let ref = try #require(SecretRef(parsing: "billing:projects/billing-123/secrets/STRIPE_KEY@4"))
+    #expect(ref.gcp == GCPSecretRef(source: "billing", project: "billing-123", secret: "STRIPE_KEY", version: "4"))
+    #expect(ref.description == "billing:projects/billing-123/secrets/STRIPE_KEY@4")
+    #expect(SecretRef(parsing: ref.description) == ref)
+    #expect(SecretRef(parsing: "gcp:JWT")?.gcp?.source == nil, "gcp: is the default source")
+    #expect(SecretRef(parsing: "gcp:JWT")?.description == "gcp:JWT")
+    for body in ["Billing:X", "shared:X", "-a:X", "a-:X", "a.b:X", ":X", "billing:", "billing:a/b"] {
+        #expect(SecretRef(parsing: body) == nil, "\(body)")
+    }
+    #expect(try SecretTemplate.references(in: "k=${secret:billing:STRIPE_KEY}").map(\.description) == ["billing:STRIPE_KEY"])
+}
+
+@Test func sourcesResolveProjectsAndEnforceTheirServices() throws {
+    let sources = SecretSources(defaultProject: "prod", named: [
+        "billing": SecretSourceConfig(project: "billing-123", services: ["billing-api"]),
+        "open": SecretSourceConfig(),
+        "vault": SecretSourceConfig(kind: "hashicorp"),
+    ])
+    let billing = try #require(SecretRef(parsing: "billing:STRIPE_KEY")?.gcp)
+    let version = try sources.resolve(billing, service: "billing-api").get()
+    #expect(version == GCPSecretVersion(source: "billing", project: "billing-123", secret: "STRIPE_KEY", version: "latest"))
+    #expect(version.itemName == "gcpsrc.billing.billing-123.STRIPE_KEY.latest")
+    #expect(GCPSecretVersion(itemName: version.itemName) == version)
+    #expect(version.description == "billing:projects/billing-123/secrets/STRIPE_KEY@latest")
+    #expect(SecretName(itemName: version.itemName) == nil)
+
+    #expect(sources.resolve(billing, service: "api") == .failure(.notAllowed(source: "billing", service: "api")))
+    #expect(SecretRef(parsing: "billing:STRIPE_KEY")?.itemName(service: "api", sources: sources) == nil)
+    let unknown = try #require(SecretRef(parsing: "other:X")?.gcp)
+    #expect(sources.resolve(unknown, service: "api") == .failure(.unknownSource("other")))
+    let open = try #require(SecretRef(parsing: "open:X")?.gcp)
+    #expect(sources.resolve(open, service: "api") == .failure(.noProject(source: "open", secret: "X")))
+    #expect(try sources.resolve(#require(SecretRef(parsing: "open:projects/p/secrets/X")?.gcp), service: "api").get().project == "p")
+    let vault = try #require(SecretRef(parsing: "vault:projects/p/secrets/X")?.gcp)
+    #expect(sources.resolve(vault, service: "api") == .failure(.unsupportedKind(source: "vault", kind: "hashicorp")))
+    #expect(try sources.resolve(#require(SecretRef(parsing: "gcp:X")?.gcp), service: "api").get().itemName == "gcp.prod.X.latest")
+
+    #expect(SecretSources.credentialsItem(nil) == "gcp.json")
+    #expect(SecretSources.credentialsItem("billing") == "credentials.billing.json")
+    for name in ["gcp", "shared", "Billing", "1st", "a_b", "a-", String(repeating: "a", count: 33)] {
+        #expect(!SecretSources.isValidName(name), "\(name)")
+    }
+}

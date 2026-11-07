@@ -83,7 +83,10 @@ public enum SecretCheck {
     private static func matches(_ resolved: String, _ ref: SecretRef) -> Bool {
         guard let gcp = ref.gcp else { return false }
         let version = gcp.version ?? "latest"
-        if let project = gcp.project { return resolved == "projects/\(project)/secrets/\(gcp.secret)@\(version)" }
+        // A named source's are `<source>:projects/…`; the default source's have no prefix.
+        let prefix = gcp.source.map { "\($0):" } ?? ""
+        guard resolved.hasPrefix(prefix + "projects/") else { return false }
+        if let project = gcp.project { return resolved == "\(prefix)projects/\(project)/secrets/\(gcp.secret)@\(version)" }
         return resolved.hasSuffix("/secrets/\(gcp.secret)@\(version)")
     }
 }
