@@ -77,6 +77,8 @@ struct RowBadge: View {
 
 struct TrackRow<Artwork: View, Badges: View, Subtitle: View, Trailing: View, Actions: View>: View {
     let title: String
+    /// The "…" button at the end. Without it, the actions are the row's long-press menu.
+    var showsMenuButton = true
     @ViewBuilder let artwork: Artwork
     @ViewBuilder let badges: Badges
     @ViewBuilder let subtitle: Subtitle
@@ -84,6 +86,14 @@ struct TrackRow<Artwork: View, Badges: View, Subtitle: View, Trailing: View, Act
     @ViewBuilder let actions: Actions
 
     var body: some View {
+        if showsMenuButton {
+            row
+        } else {
+            row.contextMenu { actions }
+        }
+    }
+
+    private var row: some View {
         HStack(spacing: RowLayout.spacing) {
             artwork
             VStack(alignment: .leading, spacing: 2) {
@@ -101,22 +111,24 @@ struct TrackRow<Artwork: View, Badges: View, Subtitle: View, Trailing: View, Act
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            // Flush with the icon buttons before it, so the three sit evenly spaced.
-            Menu {
-                actions
-            } label: {
-                Image(systemName: "ellipsis")
-                    .foregroundStyle(.secondary)
-                    .frame(width: RowLayout.button, height: RowLayout.button)
-                    .contentShape(Rectangle())
+            if showsMenuButton {
+                // Flush with the icon buttons before it, so the three sit evenly spaced.
+                Menu {
+                    actions
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .foregroundStyle(.secondary)
+                        .frame(width: RowLayout.button, height: RowLayout.button)
+                        .contentShape(Rectangle())
+                }
+                #if os(macOS)
+                .menuStyle(.button)
+                #endif
+                .buttonStyle(.borderless)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .padding(.leading, -RowLayout.spacing)
             }
-            #if os(macOS)
-            .menuStyle(.button)
-            #endif
-            .buttonStyle(.borderless)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .padding(.leading, -RowLayout.spacing)
         }
         .padding(.vertical, 4)
     }
@@ -136,8 +148,15 @@ struct NodeTrackRow: View {
     var remove: (() -> Void)?
     @Environment(\.isCompactWidth) private var isCompactWidth
 
+    /// On iOS a node's actions are its long-press menu, which leaves the row to its stats and chevron.
+    #if os(macOS)
+    private static let showsMenuButton = true
+    #else
+    private static let showsMenuButton = false
+    #endif
+
     var body: some View {
-        TrackRow(title: node.info.displayName) {
+        TrackRow(title: node.info.displayName, showsMenuButton: Self.showsMenuButton) {
             RowArtwork(symbol: node.info.isHead ? "crown.fill" : "desktopcomputer",
                        tint: node.info.isHead ? .orange : .blue, active: node.up)
                 .help(node.info.isHead ? "Head" : "Worker")
