@@ -123,6 +123,13 @@ Things about how Tender works that may not be what you'd assume.
   start from the cache and `tender secret list` marks the reference `stale`; a reference
   never fetched fails `tender start` with the secret's name and the IAM role it needs.
   Payloads are checked against their CRC32C. See [ops/gcp-secrets.md](ops/gcp-secrets.md).
+- **Named secrets sources** (`${secret:<source>:…}`) are defined under `secrets.sources`
+  in a node's `cloud.json`, each with its own key (`tender credentials set --source`), its
+  own default project and an optional `services` allow-list. A service not on the list is
+  refused at start, its references are never fetched, and it's delivered no value. Each
+  source caches its own copy, and one without a key fails only its own references.
+  Heartbeats carry each source's account, project, allowed services and failures (never a
+  key), for `tender credentials show --node`, `tender nodes` and the app.
 - **Default GCP project:** `${secret:gcp:NAME}` uses `secrets.project` in `cloud.json`.
   Without one, a start with such a reference is refused. Changing it restarts the services
   that use unqualified references, since they now name other secrets.

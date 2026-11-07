@@ -71,7 +71,8 @@ public struct SecretName: Hashable, Codable, Sendable, CustomStringConvertible {
 }
 
 /// `${secret:NAME}` or `${secret:shared/NAME}` inside an environment value or argument,
-/// or `${secret:gcp:…}` for a secret in GCP Secret Manager.
+/// `${secret:gcp:…}` for a secret in GCP Secret Manager through the node's default
+/// source, or `${secret:<source>:…}` through one of its named sources.
 public struct SecretRef: Hashable, Codable, Sendable, CustomStringConvertible {
     public var shared: Bool
     /// The secret's name, or a GCP reference's secret ID.
@@ -90,9 +91,14 @@ public struct SecretRef: Hashable, Codable, Sendable, CustomStringConvertible {
     }
 
     /// Parses what goes between `${secret:` and `}`, which is also what `secret_files` holds.
+    /// A local name has no `:`, so anything before one names the source.
     public init?(parsing body: String) {
-        if body.hasPrefix("gcp:") {
-            guard let gcp = GCPSecretRef(parsing: String(body.dropFirst("gcp:".count))) else { return nil }
+        if let colon = body.firstIndex(of: ":") {
+            let prefix = String(body[..<colon])
+            let source: String? = prefix == SecretSources.defaultName ? nil : prefix
+            guard source.map(SecretSources.isValidName) ?? true,
+                  var gcp = GCPSecretRef(parsing: String(body[body.index(after: colon)...])) else { return nil }
+            gcp.source = source
             self.init(gcp: gcp)
             return
         }
@@ -106,7 +112,7 @@ public struct SecretRef: Hashable, Codable, Sendable, CustomStringConvertible {
 
     /// What goes between `${secret:` and `}`, and the key of its value in `secrets.json`.
     public var description: String {
-        if let gcp { return "gcp:\(gcp)" }
+        if let gcp { return "\(gcp.source ?? SecretSources.defaultName):\(gcp)" }
         return shared ? "shared/\(name)" : name
     }
 
@@ -119,7 +125,13 @@ public struct SecretRef: Hashable, Codable, Sendable, CustomStringConvertible {
     /// The key of its value in the node's `SecretStore`. Nil for a GCP reference without a
     /// project on a node without a default one.
     public func itemName(service: String, defaultProject: String?) -> String? {
-        if let gcp { return gcp.resolved(defaultProject: defaultProject)?.itemName }
+        itemName(service: service, sources: SecretSources(defaultProject: defaultProject))
+    }
+
+    /// Nil for a GCP reference `sources` can't resolve for `service`: an unknown source,
+    /// one that doesn't allow the service, or no project.
+    public func itemName(service: String, sources: SecretSources) -> String? {
+        if let gcp { return try? sources.resolve(gcp, service: service).get().itemName }
         return secretName(service: service)?.itemName
     }
 }
@@ -127,13 +139,18 @@ public struct SecretRef: Hashable, Codable, Sendable, CustomStringConvertible {
 /// `gcp:NAME`, `gcp:NAME@4`, `gcp:projects/P/secrets/S` or `gcp:projects/P/secrets/S@4`.
 /// Without a version it means `latest`, which the node re-checks; a number is pinned.
 public struct GCPSecretRef: Hashable, Codable, Sendable, CustomStringConvertible {
-    /// Nil for the node's default project, `secrets.project` in `cloud.json`.
+    /// The named source it's fetched through, `billing` in `${secret:billing:…}`. Nil for
+    /// the default one, `gcp:`.
+    public var source: String?
+    /// Nil for the source's default project: `secrets.project`, or the named source's
+    /// `project`, in `cloud.json`.
     public var project: String?
     public var secret: String
     /// Nil for `latest`.
     public var version: String?
 
-    public init(project: String? = nil, secret: String, version: String? = nil) {
+    public init(source: String? = nil, project: String? = nil, secret: String, version: String? = nil) {
+        self.source = source
         self.project = project
         self.secret = secret
         self.version = version
@@ -159,14 +176,14 @@ public struct GCPSecretRef: Hashable, Codable, Sendable, CustomStringConvertible
         guard Self.isValidSecret(secret) else { return nil }
     }
 
-    /// As written, except that `@latest` is left out.
+    /// As written after the source, except that `@latest` is left out.
     public var description: String {
         (project.map { "projects/\($0)/secrets/" } ?? "") + secret + (version.map { "@\($0)" } ?? "")
     }
 
     public func resolved(defaultProject: String?) -> GCPSecretVersion? {
         guard let project = project ?? defaultProject, Self.isValidProject(project) else { return nil }
-        return GCPSecretVersion(project: project, secret: secret, version: version ?? "latest")
+        return GCPSecretVersion(source: source, project: project, secret: secret, version: version ?? "latest")
     }
 
     /// Project IDs, or project numbers: lowercase letters, digits and `-`.
@@ -197,12 +214,15 @@ public struct GCPSecretRef: Hashable, Codable, Sendable, CustomStringConvertible
 
 /// A GCP reference with its project filled in: what a node fetches and caches.
 public struct GCPSecretVersion: Hashable, Sendable, CustomStringConvertible {
+    /// Nil for the default source.
+    public var source: String?
     public var project: String
     public var secret: String
     /// `latest` or a version number.
     public var version: String
 
-    public init(project: String, secret: String, version: String) {
+    public init(source: String? = nil, project: String, secret: String, version: String) {
+        self.source = source
         self.project = project
         self.secret = secret
         self.version = version
@@ -210,19 +230,35 @@ public struct GCPSecretVersion: Hashable, Sendable, CustomStringConvertible {
 
     public var isLatest: Bool { version == "latest" }
 
-    /// Its cache key in the node's `SecretStore`. Project IDs, secret IDs and versions have
-    /// no dots, so these can't collide with each other or with `SecretName.itemName`.
-    public var itemName: String { "gcp.\(project).\(secret).\(version)" }
-
-    public init?(itemName: String) {
-        let parts = itemName.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 4, parts[0] == "gcp", GCPSecretRef.isValidProject(parts[1]), GCPSecretRef.isValidSecret(parts[2]),
-              parts[3] == "latest" || GCPSecretRef.isValidVersion(parts[3]) else { return nil }
-        self.init(project: parts[1], secret: parts[2], version: parts[3])
+    /// Its cache key in the node's `SecretStore`. Source names, project IDs, secret IDs and
+    /// versions have no dots, so these can't collide with each other or with
+    /// `SecretName.itemName`. Each source has its own copy, so a service a source doesn't
+    /// allow never reads a value fetched through it.
+    public var itemName: String {
+        let path = "\(project).\(secret).\(version)"
+        return source.map { "gcpsrc.\($0).\(path)" } ?? "gcp.\(path)"
     }
 
-    /// `projects/P/secrets/S@V`.
-    public var description: String { "projects/\(project)/secrets/\(secret)@\(version)" }
+    public init?(itemName: String) {
+        var parts = itemName.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        var source: String?
+        if parts.count == 5, parts[0] == "gcpsrc", SecretSources.isValidName(parts[1]) {
+            source = parts[1]
+            parts.removeFirst(2)
+        } else if parts.count == 4, parts[0] == "gcp" {
+            parts.removeFirst()
+        } else {
+            return nil
+        }
+        guard GCPSecretRef.isValidProject(parts[0]), GCPSecretRef.isValidSecret(parts[1]),
+              parts[2] == "latest" || GCPSecretRef.isValidVersion(parts[2]) else { return nil }
+        self.init(source: source, project: parts[0], secret: parts[1], version: parts[2])
+    }
+
+    /// `projects/P/secrets/S@V`, after `<source>:` for a named source.
+    public var description: String {
+        (source.map { "\($0):" } ?? "") + "projects/\(project)/secrets/\(secret)@\(version)"
+    }
 }
 
 public enum SecretTemplateError: Error, Equatable, CustomStringConvertible {
@@ -232,7 +268,7 @@ public enum SecretTemplateError: Error, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .malformed(let text):
-            "'\(text)' isn't a valid secret reference. Use ${secret:NAME}, ${secret:shared/NAME}, ${secret:gcp:NAME[@VERSION]} or ${secret:gcp:projects/P/secrets/S[@VERSION]}."
+            "'\(text)' isn't a valid secret reference. Use ${secret:NAME}, ${secret:shared/NAME}, ${secret:gcp:NAME[@VERSION]}, ${secret:gcp:projects/P/secrets/S[@VERSION]}, or a named source in place of gcp, as in ${secret:billing:NAME}."
         case .missing(let ref) where ref.gcp != nil:
             "The secret \(ref) hasn't been fetched from GCP Secret Manager on this node. `tender secret list` says why."
         case .missing(let ref):
