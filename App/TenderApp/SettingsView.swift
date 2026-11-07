@@ -31,8 +31,14 @@ struct SettingsView: View {
                 }
             }
             Section("Add a connection") {
-                TextField("Name", text: $name, prompt: Text("Optional"))
-                TextField("Head address", text: $head, prompt: Text("mac-1:7071"))
+                // iOS forms show only the prompt, so it names the field there.
+                TextField("Name", text: $name, prompt: Text(Self.prompt("Name", "Optional")))
+                TextField("Head address", text: $head, prompt: Text(Self.prompt("Head address", "mac-1:7071")))
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    #endif
                 SecureField("API token", text: $token)
                 Text("Create one on the head: tender api-token create app --scope write")
                     .font(.caption)
@@ -46,8 +52,10 @@ struct SettingsView: View {
             if model.head != nil { historySection }
         }
         .formStyle(.grouped)
+        #if os(macOS)
         .frame(width: fixedWidth ? 480 : nil)
         .frame(maxWidth: fixedWidth ? nil : 640)
+        #endif
         .task { await model.checkConnections() }
         .task(id: model.connections.activeID) { await model.loadHistoryRetention(force: true) }
         .confirmationDialog("Delete older history?", isPresented: isLowering, presenting: lowering) { update in
@@ -64,6 +72,14 @@ struct SettingsView: View {
         } message: { _ in
             Text("The app forgets its address and token. The head and its token aren't changed.")
         }
+    }
+
+    private static func prompt(_ label: String, _ example: String) -> String {
+        #if os(macOS)
+        example
+        #else
+        "\(label) (\(example))"
+        #endif
     }
 
     private var isLowering: Binding<Bool> {
@@ -142,6 +158,10 @@ struct SettingsView: View {
             }
             Button("Remove") { removing = connection }
         }
+        #if os(iOS)
+        // A form row would otherwise fire both buttons on any tap.
+        .buttonStyle(.borderless)
+        #endif
     }
 
     @ViewBuilder

@@ -28,6 +28,7 @@ public struct ClientContextStore: Sendable {
         self.secrets = secrets
     }
 
+    #if os(macOS)
     /// `~/.config/tender` with the token in the login keychain. Setting
     /// `TENDER_CONFIG_DIR` keeps everything in that directory instead.
     public static func standard(environment: [String: String] = ProcessInfo.processInfo.environment) -> ClientContextStore {
@@ -41,6 +42,7 @@ public struct ClientContextStore: Sendable {
             secrets: KeychainSecretStore(keychainPath: home.appending(path: "Library/Keychains/login.keychain-db").path(percentEncoded: false),
                                          service: "com.olympsis.tender.cli"))
     }
+    #endif
 
     private var file: URL { directory.appending(path: "context.json") }
 

@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import SwiftUI
 import TenderClient
@@ -157,4 +158,5 @@ private struct MenuBarLabelPreviews: View {
 }
 
 #Preview("Menu bar label") { MenuBarLabelPreviews() }
+#endif
 #endif

@@ -590,7 +590,9 @@ struct ProcessWindow: View {
             ProcessInspector(model: model, ref: ref, tab: $tab)
                 .navigationTitle(ref.service)
                 .navigationSubtitle(model.name(of: NodeID(ref.node)))
+                #if os(macOS)
                 .frame(minWidth: 420, idealWidth: 520, minHeight: 480, idealHeight: 680)
+                #endif
         } else {
             ContentUnavailableView("No Process", systemImage: "gearshape.2")
         }

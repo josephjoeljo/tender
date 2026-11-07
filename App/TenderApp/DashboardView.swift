@@ -32,6 +32,7 @@ struct DashboardView: View {
         }
     }
 
+    #if os(macOS)
     @State private var selection: Section? = Section.atLaunch ?? .nodes
 
     var body: some View {
@@ -47,20 +48,53 @@ struct DashboardView: View {
             .font(.body)
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
         } detail: {
-            if selection == .settings {
-                SettingsView(model: model, fixedWidth: false)
-                    .navigationTitle("Settings")
-            } else if model.head == nil {
-                ContentUnavailableView("No head connected", systemImage: "leaf",
-                                       description: Text("Add a head and token in Settings."))
-            } else {
-                switch selection ?? .nodes {
-                case .nodes: NodesView(model: model)
-                case .processes: ProcessesView(model: model)
-                case .logs: LogsView(model: model)
-                case .releases: ReleasesView(model: model)
-                case .settings: EmptyView()
+            page(selection ?? .nodes)
+        }
+    }
+    #else
+    @State private var selection: Section = Section.atLaunch ?? .nodes
+
+    /// A tab bar on iPhone; on iPad, a sidebar that folds into tabs.
+    var body: some View {
+        TabView(selection: $selection) {
+            ForEach(Section.pages) { section in
+                Tab(section.rawValue, systemImage: section.symbol, value: section) { stacked(section) }
+            }
+            TabSection {
+                Tab(Section.settings.rawValue, systemImage: Section.settings.symbol, value: Section.settings) {
+                    stacked(.settings)
                 }
+            }
+        }
+        .tabViewStyle(.sidebarAdaptable)
+    }
+
+    /// Each tab gets its own navigation stack. Nodes brings its own, for its history pages.
+    @ViewBuilder
+    private func stacked(_ section: Section) -> some View {
+        if section == .nodes, model.head != nil {
+            page(section)
+        } else {
+            NavigationStack { page(section) }
+        }
+    }
+    #endif
+
+    @ViewBuilder
+    private func page(_ section: Section) -> some View {
+        if section == .settings {
+            SettingsView(model: model, fixedWidth: false)
+                .navigationTitle("Settings")
+        } else if model.head == nil {
+            ContentUnavailableView("No head connected", systemImage: "leaf",
+                                   description: Text("Add a head and token in Settings."))
+        } else {
+            switch section {
+            case .nodes: NodesView(model: model)
+            case .processes: ProcessesView(model: model)
+            case .logs: LogsView(model: model)
+            case .releases: ReleasesView(model: model)
+            case .settings: EmptyView()
             }
         }
     }
@@ -75,6 +109,13 @@ struct NodesView: View {
     @State private var path: [String] = []
     @State private var removing: NodeSummary?
     @AppStorage("nodesLayout") private var layout: NodesLayout = .list
+
+    /// Centred on iOS, with Add on its own at the trailing edge; beside Add on the Mac.
+    #if os(iOS)
+    private static let layoutPlacement = ToolbarItemPlacement.principal
+    #else
+    private static let layoutPlacement = ToolbarItemPlacement.automatic
+    #endif
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -96,13 +137,21 @@ struct NodesView: View {
             }
             .navigationTitle("Nodes")
             .toolbar {
-                Picker("Layout", selection: $layout) {
-                    ForEach(NodesLayout.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
+                ToolbarItem(placement: Self.layoutPlacement) {
+                    Picker("Layout", selection: $layout) {
+                        ForEach(NodesLayout.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    #if os(iOS)
+                    // Room around each icon.
+                    .frame(width: 128)
+                    #endif
+                    .help("Show nodes as a list or as cards")
                 }
-                .pickerStyle(.segmented)
-                .help("Show nodes as a list or as cards")
-                Button("Add Node", systemImage: "plus") { addingNode = true }
-                    .help("Add a Mac to this cluster")
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Add Node", systemImage: "plus") { addingNode = true }
+                        .help("Add a Mac to this cluster")
+                }
             }
             .navigationDestination(for: String.self) { NodeDetailView(model: model, nodeID: $0) }
         }
@@ -128,6 +177,10 @@ extension NodeSummary: @retroactive Identifiable {
 
 extension InstanceStatus: @retroactive Identifiable {
     public var id: String { rowID }
+}
+
+extension InstanceStatus {
+    var rowID: String { "\(node.rawValue)/\(service)/\(instance)" }
 }
 
 /// Processes grouped by node, with the selected one in the inspector beside the list.
@@ -162,50 +215,35 @@ struct ProcessesView: View {
         }
     }
 
+    @Environment(\.isCompactWidth) private var isCompactWidth
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+
+    /// The list keeps one width, wide enough that a row's name, CPU, memory and buttons sit
+    /// apart; the inspector fills the rest of the window, so resizing the window resizes only
+    /// the inspector. Laid out by hand: .inspector() won't give its column the leftover width.
+    #if os(macOS)
+    private static let listWidth: CGFloat = 580
+    #else
+    private static let listWidth: CGFloat = 420
+    #endif
+
+    private func popOut(_ ref: ProcessRef) -> (() -> Void)? {
+        supportsMultipleWindows ? { openWindow(id: "process", value: ref) } : nil
+    }
+
     var body: some View {
-        let counts = Dictionary(model.processes.map { ("\($0.node.rawValue)/\($0.service)", 1) }, uniquingKeysWith: +)
-        let compact = showsInspector
-        // The list keeps one width, wide enough that a row's name, CPU, memory and buttons sit
-        // apart; the inspector fills the rest of the window, so resizing the window resizes only
-        // the inspector. Laid out by hand: .inspector() won't give its column the leftover width.
+        // Narrow screens push the inspector instead of showing it beside the list.
+        let sideBySide = showsInspector && !isCompactWidth
         HStack(spacing: 0) {
-        List(selection: $selection) {
-            ForEach(groups, id: \.node) { group in
-                DisclosureGroup(isExpanded: Binding(get: { !collapsed.contains(group.node.rawValue) },
-                                                    set: { if $0 { collapsed.remove(group.node.rawValue) } else { collapsed.insert(group.node.rawValue) } })) {
-                    ForEach(group.processes) { process in
-                        ProcessTrackRow(process: process, model: model,
-                                        showsInstance: counts["\(process.node.rawValue)/\(process.service)", default: 0] > 1,
-                                        compact: compact)
-                            .tag(process.id)
-                    }
-                } label: {
-                    NodeGroupLabel(node: model.nodes.first { $0.info.id == group.node },
-                                   name: model.name(of: group.node), processes: group.processes)
-                }
-            }
-        }
-        .listStyle(.inset)
-        .frame(width: showsInspector ? 580 : nil)
-        .frame(maxWidth: showsInspector ? nil : .infinity)
-        .contextMenu(forSelectionType: String.self) { _ in
-        } primaryAction: { ids in
-            for id in ids {
-                if let process = model.processes.first(where: { $0.id == id }) { openWindow(id: "process", value: ProcessRef(process)) }
-            }
-        }
-        .overlay {
-            if model.processes.isEmpty {
-                ContentUnavailableView("No Processes", systemImage: "gearshape.2",
-                                       description: Text("Start one with tender start, or apply a service file."))
-            }
-        }
-            if showsInspector {
+            processList(compact: sideBySide)
+                .frame(width: sideBySide ? Self.listWidth : nil)
+                .frame(maxWidth: sideBySide ? nil : .infinity)
+            if sideBySide {
                 Divider()
                 Group {
                     if let selected {
                         let ref = ProcessRef(selected)
-                        ProcessInspector(model: model, ref: ref, tab: $tab) { openWindow(id: "process", value: ref) }
+                        ProcessInspector(model: model, ref: ref, tab: $tab, popOut: popOut(ref))
                     } else {
                         ContentUnavailableView("No Selection", systemImage: "sidebar.trailing",
                                                description: Text("Pick a process to see its details, config and logs."))
@@ -216,6 +254,10 @@ struct ProcessesView: View {
         }
         .navigationTitle("Processes")
         .navigationSubtitle("\(model.processes.filter { $0.state == .running }.count) running")
+        .navigationDestination(for: ProcessRef.self) { ref in
+            ProcessInspector(model: model, ref: ref, tab: $tab, popOut: popOut(ref))
+                .navigationTitle(ref.service)
+        }
         .toolbar {
             ToolbarItem {
                 Menu {
@@ -230,14 +272,65 @@ struct ProcessesView: View {
                 }
                 .help("Sort processes and choose which to show")
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button("Inspector", systemImage: "sidebar.trailing") { showsInspector.toggle() }
-                    .help(showsInspector ? "Hide the inspector" : "Show the inspector")
+            if !isCompactWidth {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Inspector", systemImage: "sidebar.trailing") { showsInspector.toggle() }
+                        .help(showsInspector ? "Hide the inspector" : "Show the inspector")
+                }
             }
         }
         // Data can arrive after the page appears, and a selected process can go away.
         .onChange(of: groups.flatMap { $0.processes.map(\.id) }, initial: true) { _, ids in
             if selection.map({ !ids.contains($0) }) ?? true { selection = ids.first }
+        }
+    }
+
+    /// On a narrow screen each row pushes its inspector; otherwise rows select into the one beside the list.
+    @ViewBuilder
+    private func processList(compact: Bool) -> some View {
+        Group {
+            if isCompactWidth {
+                List { rows(compact: true, links: true) }
+            } else {
+                List(selection: $selection) { rows(compact: compact, links: false) }
+            }
+        }
+        .listStyle(.inset)
+        #if os(macOS)
+        .contextMenu(forSelectionType: String.self) { _ in
+        } primaryAction: { ids in
+            for id in ids {
+                if let process = model.processes.first(where: { $0.id == id }) { openWindow(id: "process", value: ProcessRef(process)) }
+            }
+        }
+        #endif
+        .overlay {
+            if model.processes.isEmpty {
+                ContentUnavailableView("No Processes", systemImage: "gearshape.2",
+                                       description: Text("Start one with tender start, or apply a service file."))
+            }
+        }
+    }
+
+    private func rows(compact: Bool, links: Bool) -> some View {
+        let counts = Dictionary(model.processes.map { ("\($0.node.rawValue)/\($0.service)", 1) }, uniquingKeysWith: +)
+        return ForEach(groups, id: \.node) { group in
+            DisclosureGroup(isExpanded: Binding(get: { !collapsed.contains(group.node.rawValue) },
+                                                set: { if $0 { collapsed.remove(group.node.rawValue) } else { collapsed.insert(group.node.rawValue) } })) {
+                ForEach(group.processes) { process in
+                    let row = ProcessTrackRow(process: process, model: model,
+                                              showsInstance: counts["\(process.node.rawValue)/\(process.service)", default: 0] > 1,
+                                              compact: compact)
+                    if links {
+                        NavigationLink(value: ProcessRef(process)) { row }
+                    } else {
+                        row.tag(process.id)
+                    }
+                }
+            } label: {
+                NodeGroupLabel(node: model.nodes.first { $0.info.id == group.node },
+                               name: model.name(of: group.node), processes: group.processes)
+            }
         }
     }
 }
@@ -320,6 +413,7 @@ struct LogsView: View {
     @State private var started = false
     @State private var error: String?
     @State private var follow: Task<Void, Never>?
+    @Environment(\.isCompactWidth) private var isCompactWidth
 
     private var query: LogQuery {
         // The API filters on one value; several are narrowed client-side by `visible`.
@@ -362,32 +456,51 @@ struct LogsView: View {
         .frame(width: 120)
     }
 
+    /// Beside the search field, or in a menu when there's no room for them.
+    @ViewBuilder
+    private var filters: some View {
+        filterMenu("services", options: serviceOptions, selection: $services)
+        filterMenu("nodes", options: nodeOptions, selection: $nodes) { model.name(of: NodeID($0)) }
+        Picker("Stream", selection: $stream) {
+            Text("All").tag("all")
+            Text("stdout").tag("out")
+            Text("stderr").tag("err")
+        }
+        .labelsHidden()
+        .frame(width: 90)
+        Picker("Window", selection: $window) {
+            Text("15 min").tag(900.0)
+            Text("1 hour").tag(3600.0)
+            Text("1 day").tag(86400.0)
+            Text("7 days").tag(7 * 86400.0)
+        }
+        .labelsHidden()
+        .frame(width: 90)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                TextField("Search", text: $text).onSubmit(search)
-                filterMenu("services", options: serviceOptions, selection: $services)
-                filterMenu("nodes", options: nodeOptions, selection: $nodes) { model.name(of: NodeID($0)) }
-                Picker("", selection: $stream) {
-                    Text("All").tag("all")
-                    Text("stdout").tag("out")
-                    Text("stderr").tag("err")
+                TextField("Search", text: $text)
+                    .onSubmit(search)
+                    #if os(iOS)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    #endif
+                if isCompactWidth {
+                    Menu("Filters", systemImage: "line.3.horizontal.decrease.circle") { filters }
+                        .labelStyle(.iconOnly)
+                } else {
+                    filters
+                    Button("Search", action: search)
                 }
-                .frame(width: 90)
-                Picker("", selection: $window) {
-                    Text("15 min").tag(900.0)
-                    Text("1 hour").tag(3600.0)
-                    Text("1 day").tag(86400.0)
-                    Text("7 days").tag(7 * 86400.0)
-                }
-                .frame(width: 90)
-                Button("Search", action: search)
                 Toggle("Follow", isOn: $following).toggleStyle(.button)
             }
             .padding(8)
             Divider()
             if !gaps.isEmpty {
-                Text(gaps.map { "\($0.node?.rawValue ?? "?") dropped \($0.droppedLines) lines" }.joined(separator: " · "))
+                Text(gaps.map { "\($0.node.map(model.name(of:)) ?? "?") dropped \($0.droppedLines) lines" }.joined(separator: " · "))
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .padding(4)
@@ -397,7 +510,7 @@ struct LogsView: View {
             }
             ScrollViewReader { proxy in
                 List(entries, id: \.rowID) { entry in
-                    Text(entry.formatted)
+                    Text(entry.formatted(nodeName: model.name(of: entry.node)))
                         .font(.caption)
                         .foregroundStyle(entry.stream == .err ? .red : .primary)
                         .textSelection(.enabled)
@@ -453,8 +566,9 @@ struct LogsView: View {
 extension LogEntry {
     var rowID: String { "\(node.rawValue)/\(seq)" }
 
-    var formatted: String {
-        "\(nodeTime.formatted(date: .omitted, time: .standard)) \(node)/\(service)[\(instance)] \(line)"
+    /// One line as the Logs page shows it, with the node's display name rather than its ID.
+    func formatted(nodeName: String) -> String {
+        "\(nodeTime.formatted(date: .omitted, time: .standard)) \(nodeName)/\(service)[\(instance)] \(line)"
     }
 }
 
@@ -469,14 +583,10 @@ struct ReleasesView: View {
 
     var body: some View {
         VStack(alignment: .leading) {
-            HStack {
-                Picker("Service", selection: $service) {
-                    ForEach(services, id: \.self) { Text($0).tag($0) }
-                }
-                .frame(width: 240)
-                TextField("Version to deploy", text: $version).frame(width: 180)
-                Button("Deploy") { run { try await model.deploy(service: service, version: version) } }
-                    .disabled(service.isEmpty || version.isEmpty)
+            // In a row when it fits, stacked on a phone.
+            ViewThatFits(in: .horizontal) {
+                HStack { deployControls }
+                VStack(alignment: .leading) { deployControls }
             }
             if let message {
                 Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
@@ -506,6 +616,22 @@ struct ReleasesView: View {
             if service.isEmpty { service = services.first ?? "" }
             reload()
         }
+    }
+
+    @ViewBuilder
+    private var deployControls: some View {
+        Picker("Service", selection: $service) {
+            ForEach(services, id: \.self) { Text($0).tag($0) }
+        }
+        .frame(width: 240, alignment: .leading)
+        TextField("Version to deploy", text: $version)
+            .frame(width: 180)
+            #if os(iOS)
+            .textFieldStyle(.roundedBorder)
+            .textInputAutocapitalization(.never)
+            #endif
+        Button("Deploy") { run { try await model.deploy(service: service, version: version) } }
+            .disabled(service.isEmpty || version.isEmpty)
     }
 
     private func reload() {

@@ -51,7 +51,11 @@ public struct TenderEnvironment: Sendable {
     )
 
     public static var development: TenderEnvironment {
+        #if os(macOS)
         let home = FileManager.default.homeDirectoryForCurrentUser
+        #else
+        let home = URL.homeDirectory
+        #endif
         let support = home.appending(path: "Library/Application Support/Tender")
         return TenderEnvironment(
             mode: .development,

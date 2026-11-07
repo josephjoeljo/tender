@@ -33,6 +33,12 @@ enum RowLayout {
     static let textLeading = artwork + spacing
     /// Hit area of the icon buttons at the end of a row, so they space evenly.
     static let button: CGFloat = 24
+    /// A "…" button at the end of a row on the Mac; on iOS the actions are the row's long-press menu.
+    #if os(macOS)
+    static let showsMenuButton = true
+    #else
+    static let showsMenuButton = false
+    #endif
 }
 
 /// An icon button at the end of a row, the same size as its neighbours.
@@ -71,11 +77,14 @@ struct RowBadge: View {
             .padding(.horizontal, 3)
             .padding(.vertical, 1)
             .background(tint.opacity(0.18), in: RoundedRectangle(cornerRadius: 3))
+            .fixedSize()
     }
 }
 
 struct TrackRow<Artwork: View, Badges: View, Subtitle: View, Trailing: View, Actions: View>: View {
     let title: String
+    /// The "…" button at the end. Without it, the actions are the row's long-press menu.
+    var showsMenuButton = true
     @ViewBuilder let artwork: Artwork
     @ViewBuilder let badges: Badges
     @ViewBuilder let subtitle: Subtitle
@@ -83,6 +92,14 @@ struct TrackRow<Artwork: View, Badges: View, Subtitle: View, Trailing: View, Act
     @ViewBuilder let actions: Actions
 
     var body: some View {
+        if showsMenuButton {
+            row
+        } else {
+            row.contextMenu { actions }
+        }
+    }
+
+    private var row: some View {
         HStack(spacing: RowLayout.spacing) {
             artwork
             VStack(alignment: .leading, spacing: 2) {
@@ -100,20 +117,24 @@ struct TrackRow<Artwork: View, Badges: View, Subtitle: View, Trailing: View, Act
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            // Flush with the icon buttons before it, so the three sit evenly spaced.
-            Menu {
-                actions
-            } label: {
-                Image(systemName: "ellipsis")
-                    .foregroundStyle(.secondary)
-                    .frame(width: RowLayout.button, height: RowLayout.button)
-                    .contentShape(Rectangle())
+            if showsMenuButton {
+                // Flush with the icon buttons before it, so the three sit evenly spaced.
+                Menu {
+                    actions
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .foregroundStyle(.secondary)
+                        .frame(width: RowLayout.button, height: RowLayout.button)
+                        .contentShape(Rectangle())
+                }
+                #if os(macOS)
+                .menuStyle(.button)
+                #endif
+                .buttonStyle(.borderless)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .padding(.leading, -RowLayout.spacing)
             }
-            .menuStyle(.button)
-            .buttonStyle(.borderless)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .padding(.leading, -RowLayout.spacing)
         }
         .padding(.vertical, 4)
     }
@@ -131,9 +152,10 @@ struct NodeTrackRow: View {
     let node: NodeSummary
     let open: () -> Void
     var remove: (() -> Void)?
+    @Environment(\.isCompactWidth) private var isCompactWidth
 
     var body: some View {
-        TrackRow(title: node.info.displayName) {
+        TrackRow(title: node.info.displayName, showsMenuButton: RowLayout.showsMenuButton) {
             RowArtwork(symbol: node.info.isHead ? "crown.fill" : "desktopcomputer",
                        tint: node.info.isHead ? .orange : .blue, active: node.up)
                 .help(node.info.isHead ? "Head" : "Worker")
@@ -145,9 +167,11 @@ struct NodeTrackRow: View {
             Text("\(node.info.id.rawValue) · \(node.info.address ?? "No address") – \(node.instanceCount) \(node.instanceCount == 1 ? "process" : "processes")")
         } trailing: {
             Text(StatFormat.percent(node.stats?.cpuPercent)).frame(width: 52, alignment: .trailing).help("CPU")
-            Text(node.stats.map { "\(StatFormat.bytes($0.memoryUsed)) / \(StatFormat.bytes($0.memoryTotal))" } ?? StatFormat.dash)
-                .frame(width: 130, alignment: .trailing).help("Memory")
-            Text(StatFormat.duration(node.uptime)).frame(width: 64, alignment: .trailing).help("Uptime")
+            if !isCompactWidth {
+                Text(node.stats.map { "\(StatFormat.bytes($0.memoryUsed)) / \(StatFormat.bytes($0.memoryTotal))" } ?? StatFormat.dash)
+                    .frame(width: 130, alignment: .trailing).help("Memory")
+                Text(StatFormat.duration(node.uptime)).frame(width: 64, alignment: .trailing).help("Uptime")
+            }
             Button(action: open) {
                 Image(systemName: "chevron.right").foregroundStyle(.secondary)
             }
@@ -156,10 +180,10 @@ struct NodeTrackRow: View {
         } actions: {
             Button("Show History", systemImage: "chart.xyaxis.line", action: open)
             Divider()
-            Button("Copy Name") { copy(node.info.displayName) }
-            Button("Copy ID") { copy(node.info.id.rawValue) }
+            Button("Copy Name") { Clipboard.copy(node.info.displayName) }
+            Button("Copy ID") { Clipboard.copy(node.info.id.rawValue) }
             if let address = node.info.address {
-                Button("Copy Address") { copy(address) }
+                Button("Copy Address") { Clipboard.copy(address) }
             }
             if let remove, !node.info.isHead {
                 Divider()
@@ -227,14 +251,26 @@ struct ProcessTrackRow: View {
     let process: InstanceStatus
     let model: ClusterModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+    @Environment(\.isCompactWidth) private var isCompactWidth
     /// Show the instance number, for services that run more than one.
     var showsInstance = false
     /// Fewer trailing columns, for when the inspector takes up room beside the list.
     var compact = false
 
+    /// On iOS a narrow row leaves its actions to the "…" menu and the inspector's header.
+    private var showsButtons: Bool {
+        #if os(macOS)
+        true
+        #else
+        !compact && !isCompactWidth
+        #endif
+    }
+
     var body: some View {
         let kind = process.resolvedKind
-        TrackRow(title: showsInstance ? "\(process.service) #\(process.instance)" : process.service) {
+        TrackRow(title: showsInstance ? "\(process.service) #\(process.instance)" : process.service,
+                 showsMenuButton: RowLayout.showsMenuButton) {
             RowArtwork(symbol: kind.symbol, tint: kind.tint, active: process.state == .running)
                 .help(kind.title)
         } badges: {
@@ -250,25 +286,31 @@ struct ProcessTrackRow: View {
             }
         } trailing: {
             Text(StatFormat.percent(process.cpu)).frame(width: 52, alignment: .trailing).help("CPU")
-            Text(StatFormat.bytes(process.stats?.footprint ?? process.rss)).frame(width: 70, alignment: .trailing).help("Memory")
+            if !isCompactWidth {
+                Text(StatFormat.bytes(process.stats?.footprint ?? process.rss)).frame(width: 70, alignment: .trailing).help("Memory")
+            }
             if !compact {
                 Text(StatFormat.duration(process.uptime)).frame(width: 64, alignment: .trailing).help("Uptime")
             }
-            HStack(spacing: 0) {
-                if process.state == .running {
-                    RowIconButton(title: "Stop", symbol: "stop.fill") { perform(.stop) }
-                } else {
-                    RowIconButton(title: "Start", symbol: "play.fill") { perform(.start) }
+            if showsButtons {
+                HStack(spacing: 0) {
+                    if process.state == .running {
+                        RowIconButton(title: "Stop", symbol: "stop.fill") { perform(.stop) }
+                    } else {
+                        RowIconButton(title: "Start", symbol: "play.fill") { perform(.start) }
+                    }
+                    RowIconButton(title: "Restart", symbol: "arrow.clockwise") { perform(.restart) }
                 }
-                RowIconButton(title: "Restart", symbol: "arrow.clockwise") { perform(.restart) }
             }
         } actions: {
             Button("Start", systemImage: "play.fill") { perform(.start) }.disabled(process.state == .running)
             Button("Stop", systemImage: "stop.fill") { perform(.stop) }.disabled(process.state == .stopped)
             Button("Restart", systemImage: "arrow.clockwise") { perform(.restart) }
             Divider()
-            Button("Open in New Window", systemImage: "arrow.up.forward.app") { openWindow(id: "process", value: ProcessRef(process)) }
-            Button("Copy Name") { copy(process.service) }
+            if supportsMultipleWindows {
+                Button("Open in New Window", systemImage: "arrow.up.forward.app") { openWindow(id: "process", value: ProcessRef(process)) }
+            }
+            Button("Copy Name") { Clipboard.copy(process.service) }
         }
     }
 
@@ -277,7 +319,3 @@ struct ProcessTrackRow: View {
     }
 }
 
-private func copy(_ text: String) {
-    NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(text, forType: .string)
-}

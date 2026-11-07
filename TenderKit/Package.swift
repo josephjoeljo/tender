@@ -16,7 +16,8 @@ import PackageDescription
 
 let package = Package(
     name: "TenderKit",
-    platforms: [.macOS(.v15)],
+    // iOS is for TenderApp, which only builds TenderClient and TenderCore (and what they use).
+    platforms: [.macOS(.v15), .iOS(.v18)],
     products: [
         .executable(name: "tenderd", targets: ["tenderd"]),
         .executable(name: "tender", targets: ["tender"]),

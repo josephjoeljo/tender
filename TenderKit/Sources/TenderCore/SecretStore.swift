@@ -56,6 +56,53 @@ public struct FileSecretStore: SecretStore {
     }
 }
 
+/// Generic passwords in the app's own data protection keychain, the one iOS has. Used by the
+/// iOS and iPadOS app; the Mac keeps its file-based keychains below.
+public struct KeychainItemStore: SecretStore {
+    public let service: String
+
+    public init(service: String) { self.service = service }
+
+    private func query(_ name: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: name,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+    }
+
+    public func read(_ name: String) throws -> Data? {
+        var query = query(name)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw SecretStoreError.keychain(operation: "read", status: status) }
+        return result as? Data
+    }
+
+    public func write(_ name: String, _ value: Data) throws {
+        let updated = SecItemUpdate(query(name) as CFDictionary, [kSecValueData as String: value] as CFDictionary)
+        if updated == errSecSuccess { return }
+        guard updated == errSecItemNotFound else { throw SecretStoreError.keychain(operation: "write", status: updated) }
+        var attributes = query(name)
+        attributes[kSecValueData as String] = value
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let status = SecItemAdd(attributes as CFDictionary, nil)
+        guard status == errSecSuccess else { throw SecretStoreError.keychain(operation: "write", status: status) }
+    }
+
+    public func delete(_ name: String) throws {
+        let status = SecItemDelete(query(name) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw SecretStoreError.keychain(operation: "delete", status: status)
+        }
+    }
+}
+
+#if os(macOS)
 /// Generic passwords in a file-based keychain.
 ///
 /// An item's access list trusts the binary that created it, so a replaced `tenderd`
@@ -130,10 +177,16 @@ public struct KeychainSecretStore: SecretStore {
     }
 }
 
+#endif
+
 extension TenderEnvironment {
     public var secretsDirectory: URL { configDirectory.appending(path: "secrets") }
 
     public func makeSecretStore() -> any SecretStore {
+        #if os(macOS)
         mode == .production ? KeychainSecretStore() : FileSecretStore(directory: secretsDirectory)
+        #else
+        FileSecretStore(directory: secretsDirectory)
+        #endif
     }
 }

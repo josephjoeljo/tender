@@ -36,12 +36,17 @@ final class ClusterModel {
 
     /// Where the app keeps its heads and tokens. The intents read the same place.
     nonisolated static func makeStore() -> ConnectionStore {
+        #if os(iOS)
+        return ConnectionStore(directory: .applicationSupportDirectory.appending(path: "TenderApp"),
+                               secrets: KeychainItemStore(service: "com.olympsis.tender.app"))
+        #else
         let home = FileManager.default.homeDirectoryForCurrentUser
         return ConnectionStore(
             directory: home.appending(path: "Library/Application Support/TenderApp"),
             secrets: KeychainSecretStore(
                 keychainPath: home.appending(path: "Library/Keychains/login.keychain-db").path(percentEncoded: false),
                 service: "com.olympsis.tender.app"))
+        #endif
     }
 
     init() {
