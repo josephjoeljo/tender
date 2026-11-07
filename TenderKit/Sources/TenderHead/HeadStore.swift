@@ -33,6 +33,22 @@ public struct HeadStore: Sendable {
                 ) WITHOUT ROWID;
                 """)
         }
+        migrator.registerMigration("v3") { db in
+            // Each instance's stats history, like `node_stats`. Keyed by service and instance,
+            // never PID, so a restarted process continues its series.
+            try db.execute(sql: """
+                CREATE TABLE process_stats (
+                    node TEXT NOT NULL, service TEXT NOT NULL, instance INTEGER NOT NULL,
+                    tier INTEGER NOT NULL, ts REAL NOT NULL, point TEXT NOT NULL,
+                    PRIMARY KEY (node, service, instance, tier, ts)
+                ) WITHOUT ROWID;
+                CREATE INDEX process_stats_by_age ON process_stats (node, tier, ts);
+                """)
+        }
+        migrator.registerMigration("v4") { db in
+            // Head-wide settings changed through the API, as JSON per key.
+            try db.execute(sql: "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+        }
         try migrator.migrate(pool)
     }
 
@@ -151,11 +167,11 @@ public struct HeadStore: Sendable {
     }
 
     /// Drops each tier's points older than its retention.
-    public func pruneStats(node: NodeID, now: Date = Date()) throws {
+    public func pruneStats(node: NodeID, keepingDays days: Int = HistoryRetention.defaultDays, now: Date = Date()) throws {
         try pool.write { db in
             for tier in StatsTier.allCases {
                 try db.execute(sql: "DELETE FROM node_stats WHERE node = ? AND tier = ? AND ts < ?",
-                               arguments: [node.rawValue, tier.rawValue, now.timeIntervalSince1970 - tier.retention])
+                               arguments: [node.rawValue, tier.rawValue, now.timeIntervalSince1970 - tier.retention(keepingDays: days)])
             }
         }
     }
@@ -163,6 +179,79 @@ public struct HeadStore: Sendable {
     public func deleteStats(node: NodeID) throws {
         try pool.write { db in
             try db.execute(sql: "DELETE FROM node_stats WHERE node = ?", arguments: [node.rawValue])
+            try db.execute(sql: "DELETE FROM process_stats WHERE node = ?", arguments: [node.rawValue])
+        }
+    }
+
+    // MARK: Settings
+
+    /// The saved retention, else the default.
+    public func historyRetention() throws -> HistoryRetention {
+        try pool.read { db in
+            try String.fetchOne(db, sql: "SELECT value FROM settings WHERE key = 'history_retention'")
+                .flatMap { try? JSONDecoder().decode(HistoryRetention.self, from: Data($0.utf8)) }
+        } ?? HistoryRetention()
+    }
+
+    public func saveHistoryRetention(_ retention: HistoryRetention) throws {
+        let json = String(decoding: try JSONEncoder().encode(retention), as: UTF8.self)
+        try pool.write { db in
+            try db.execute(sql: "INSERT OR REPLACE INTO settings (key, value) VALUES ('history_retention', ?)", arguments: [json])
+        }
+    }
+
+    // MARK: Process stats history
+
+    public struct ClosedProcessPoint: Sendable {
+        public var service: String
+        public var instance: Int
+        public var tier: StatsTier
+        public var point: ProcessStatsPoint
+
+        public init(service: String, instance: Int, tier: StatsTier, point: ProcessStatsPoint) {
+            self.service = service
+            self.instance = instance
+            self.tier = tier
+            self.point = point
+        }
+    }
+
+    /// One transaction for a heartbeat's worth of closed buckets.
+    public func saveProcessStats(node: NodeID, _ points: [ClosedProcessPoint]) throws {
+        guard !points.isEmpty else { return }
+        let encoder = JSONEncoder()
+        let rows = try points.map { ($0, String(decoding: try encoder.encode($0.point), as: UTF8.self)) }
+        try pool.write { db in
+            for (closed, json) in rows {
+                try db.execute(sql: """
+                    INSERT OR REPLACE INTO process_stats (node, service, instance, tier, ts, point) VALUES (?, ?, ?, ?, ?, ?)
+                    """, arguments: [node.rawValue, closed.service, closed.instance, closed.tier.rawValue,
+                                     closed.point.date.timeIntervalSince1970, json])
+            }
+        }
+    }
+
+    /// Oldest first, from `since` on.
+    public func processStats(node: NodeID, service: String, instance: Int, tier: StatsTier,
+                             since: Date?) throws -> [ProcessStatsPoint] {
+        try pool.read { db in
+            try String.fetchAll(db, sql: """
+                SELECT point FROM process_stats
+                WHERE node = ? AND service = ? AND instance = ? AND tier = ? AND ts >= ? ORDER BY ts
+                """, arguments: [node.rawValue, service, instance, tier.rawValue, since?.timeIntervalSince1970 ?? 0])
+                .compactMap { try? JSONDecoder().decode(ProcessStatsPoint.self, from: Data($0.utf8)) }
+        }
+    }
+
+    /// Drops each tier's points older than its retention, for every instance on the node,
+    /// deleted services included.
+    public func pruneProcessStats(node: NodeID, keepingDays days: Int = HistoryRetention.defaultDays,
+                                  now: Date = Date()) throws {
+        try pool.write { db in
+            for tier in StatsTier.allCases {
+                try db.execute(sql: "DELETE FROM process_stats WHERE node = ? AND tier = ? AND ts < ?",
+                               arguments: [node.rawValue, tier.rawValue, now.timeIntervalSince1970 - tier.retention(keepingDays: days)])
+            }
         }
     }
 

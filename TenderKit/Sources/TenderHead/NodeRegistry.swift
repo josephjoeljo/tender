@@ -18,6 +18,9 @@ public actor RegistryState {
         var secretFetchErrors = 0
         var stats: NodeStats?
         var history = NodeStatsRecorder()
+        /// Instances in the latest heartbeat; one that stops being reported is dropped, and
+        /// only what's on disk is left of it.
+        var processHistory: [ProcessKey: ProcessStatsRecorder] = [:]
     }
 
     public static func skew(now: Date, nodeClock: Date, roundTrip: TimeInterval?) -> TimeInterval {
@@ -28,6 +31,7 @@ public actor RegistryState {
 
     private var entries: [NodeID: Entry] = [:]
     private let store: HeadStore?
+    public private(set) var retention: HistoryRetention
     private let downAfter: TimeInterval
 
     /// Last-known nodes are loaded as down, until they report in.
@@ -37,6 +41,26 @@ public actor RegistryState {
         var loaded: [NodeID: Entry] = [:]
         for info in (try? store?.nodes()) ?? [] { loaded[info.id] = Entry(info: info) }
         entries = loaded
+        retention = (try? store?.historyRetention()) ?? HistoryRetention()
+    }
+
+    /// Saves the change and prunes right away, so a shorter retention frees space now.
+    public func setRetention(_ update: HistoryRetentionUpdate, now: Date = Date()) throws -> HistoryRetention {
+        var changed = retention
+        if let days = update.nodeDays { changed.nodeDays = days }
+        if let days = update.processDays { changed.processDays = days }
+        guard changed.isValid else {
+            throw NodeCallError(code: "invalid_retention",
+                                message: "Retention must be \(HistoryRetention.allowedDays.lowerBound) to \(HistoryRetention.allowedDays.upperBound) days.",
+                                httpStatus: 400)
+        }
+        try store?.saveHistoryRetention(changed)
+        retention = changed
+        for node in entries.keys {
+            try? store?.pruneStats(node: node, keepingDays: changed.nodeDays, now: now)
+            try? store?.pruneProcessStats(node: node, keepingDays: changed.processDays, now: now)
+        }
+        return changed
     }
 
     /// The node with this ID, else the only one with this hostname.
@@ -64,6 +88,18 @@ public actor RegistryState {
         entry.skew = Self.skew(now: now, nodeClock: heartbeat.nodeClock, roundTrip: heartbeat.previousRoundTrip)
         let closed = entry.history.record(NodeStatsPoint(heartbeat, skew: entry.skew, gap: gap, at: now))
         save(closed, node: heartbeat.node, now: now)
+        var processHistory: [ProcessKey: ProcessStatsRecorder] = [:]
+        var processClosed: [HeadStore.ClosedProcessPoint] = []
+        for status in heartbeat.processes {
+            let key = ProcessKey(service: status.service, instance: status.instance)
+            var recorder = entry.processHistory[key] ?? ProcessStatsRecorder()
+            for (tier, point) in recorder.record(ProcessStatsPoint(status, at: now)) {
+                processClosed.append(.init(service: key.service, instance: key.instance, tier: tier, point: point))
+            }
+            processHistory[key] = recorder
+        }
+        entry.processHistory = processHistory
+        save(processClosed, prune: closed.contains { $0.tier == .hour }, node: heartbeat.node, now: now)
         entry.spoolBacklog = heartbeat.spoolBacklog
         entry.spoolDropped = heartbeat.spoolDropped
         entry.secretFetchErrors = heartbeat.secretFetchErrors
@@ -81,33 +117,77 @@ public actor RegistryState {
     private func save(_ closed: [(tier: StatsTier, point: NodeStatsPoint)], node: NodeID, now: Date) {
         guard let store, !closed.isEmpty else { return }
         for (tier, point) in closed { try? store.saveStats(node: node, tier: tier, point: point) }
-        if closed.contains(where: { $0.tier == .hour }) { try? store.pruneStats(node: node, now: now) }
+        if closed.contains(where: { $0.tier == .hour }) {
+            try? store.pruneStats(node: node, keepingDays: retention.nodeDays, now: now)
+        }
+    }
+
+    private func save(_ closed: [HeadStore.ClosedProcessPoint], prune: Bool, node: NodeID, now: Date) {
+        guard let store else { return }
+        try? store.saveProcessStats(node: node, closed)
+        if prune { try? store.pruneProcessStats(node: node, keepingDays: retention.processDays, now: now) }
     }
 
     public func knows(_ node: NodeID) -> Bool { entries[node] != nil }
 
     /// Nil for a node the head doesn't know.
-    public func history(of node: NodeID, since: Date?, limit: Int) -> NodeStatsHistory? {
+    public func history(of node: NodeID, since: Date?, limit: Int, now: Date = Date()) -> NodeStatsHistory? {
         guard let entry = entries[node] else { return nil }
-        let points = stitched(entry.history.points(since: since), node: node, since: since)
-        guard let first = points.first, let last = points.last else {
-            return NodeStatsHistory(node: node, points: [])
+        let since = Self.clamp(since, keepingDays: retention.nodeDays, now: now)
+        let fetch = since.fetch
+        let points = stitched(entry.history.points(since: fetch), since: fetch) { tier in
+            try store?.stats(node: node, tier: tier, since: fetch)
         }
+        let (sampled, downsampled) = Self.limited(points, to: limit, since: since.requested)
+        return NodeStatsHistory(node: node, points: sampled, downsampled: downsampled)
+    }
+
+    /// Nil for a node the head doesn't know. An instance it has never seen has no points.
+    public func history(of node: NodeID, service: String, instance: Int, since: Date?,
+                        limit: Int, now: Date = Date()) -> ProcessStatsHistory? {
+        guard let entry = entries[node] else { return nil }
+        let since = Self.clamp(since, keepingDays: retention.processDays, now: now)
+        let fetch = since.fetch
+        let memory = entry.processHistory[ProcessKey(service: service, instance: instance)]?.points(since: fetch) ?? []
+        let points = stitched(memory, since: fetch) { tier in
+            try store?.processStats(node: node, service: service, instance: instance, tier: tier, since: fetch)
+        }
+        let (sampled, downsampled) = Self.limited(points, to: limit, since: since.requested)
+        return ProcessStatsHistory(node: node, service: service, instance: instance, points: sampled,
+                                   downsampled: downsampled)
+    }
+
+    /// Instances of a service the node reported in its latest heartbeat.
+    public func instances(of service: String, on node: NodeID) -> [Int] {
+        (entries[node]?.processes ?? []).filter { $0.service == service }.map(\.instance).sorted()
+    }
+
+    /// Nothing from before the retention is fetched, even if it hasn't been pruned yet. The
+    /// requested start (clamped too) sets the downsampling span; none means from the first point.
+    private static func clamp(_ since: Date?, keepingDays days: Int,
+                              now: Date) -> (fetch: Date, requested: Date?) {
+        let cutoff = now.addingTimeInterval(-TimeInterval(days) * 86400)
+        return (max(since ?? cutoff, cutoff), since.map { max($0, cutoff) })
+    }
+
+    private static func limited<Point: StatsSample>(_ points: [Point], to limit: Int,
+                                                    since: Date?) -> (points: [Point], downsampled: Bool) {
+        guard let first = points.first, let last = points.last else { return ([], false) }
         let span = min(since ?? first.date, first.date)...max(last.date, first.date)
-        return NodeStatsHistory(node: node, points: NodeStatsPoint.downsampled(points, to: limit, over: span),
-                                downsampled: points.count > limit)
+        return (Point.downsampled(points, to: limit, over: span), points.count > limit)
     }
 
     /// The finest points that cover each stretch: stored hours, then quarter hours, then
     /// minutes, each up to where the next finer one starts, then what's in memory.
-    private func stitched(_ memory: [NodeStatsPoint], node: NodeID, since: Date?) -> [NodeStatsPoint] {
-        guard let store else { return memory }
+    private func stitched<Point: StatsSample>(_ memory: [Point], since: Date?,
+                                              stored: (StatsTier) throws -> [Point]?) -> [Point] {
+        guard store != nil else { return memory }
         var points = memory
         var start = memory.first?.date ?? .distantFuture
         for tier in [StatsTier.minute, .quarterHour, .hour] {
-            let stored = ((try? store.stats(node: node, tier: tier, since: since)) ?? []).filter { $0.date < start }
-            guard let first = stored.first else { continue }
-            points = stored + points
+            let older = ((try? stored(tier)) ?? []).filter { $0.date < start }
+            guard let first = older.first else { continue }
+            points = older + points
             start = first.date
         }
         return points

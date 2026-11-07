@@ -45,40 +45,47 @@ public enum StatsTier: Int, CaseIterable, Sendable {
         }
     }
 
-    /// A little past the longest window the app offers for each resolution: 24 hours,
-    /// 7 and 30 days, 6 months.
-    public var retention: TimeInterval {
+    /// How long this tier's points are kept when the whole history is kept for `days`:
+    /// minutes for 2 days and quarter hours for 35, or `days` if that's shorter; hours for `days`.
+    public func retention(keepingDays days: Int) -> TimeInterval {
+        let keep = TimeInterval(days) * 86400
         switch self {
-        case .minute: 2 * 86400
-        case .quarterHour: 35 * 86400
-        case .hour: 190 * 86400
+        case .minute: return min(2 * 86400, keep)
+        case .quarterHour: return min(35 * 86400, keep)
+        case .hour: return keep
         }
     }
 }
 
-/// One node's stats history: every heartbeat for the last hour or so and one merged point
-/// per minute for a day, in memory. `record` also hands back each bucket that closes, by
-/// tier, for the head to keep on disk for longer.
-struct NodeStatsRecorder {
+/// One node's or instance's stats history: every heartbeat for the last hour or so and one
+/// merged point per minute for a day, in memory. `record` also hands back each bucket that
+/// closes, by tier, for the head to keep on disk for longer.
+enum StatsRecorderDefaults {
     /// An hour of heartbeats at the default 5-second interval.
     static let recentCapacity = 720
     /// A day of minutes.
     static let minuteCapacity = 1440
+}
 
-    private var recent: RingBuffer<NodeStatsPoint>
-    private var minutes: RingBuffer<NodeStatsPoint>
-    private var pending: [StatsTier: (bucket: Double, points: [NodeStatsPoint])] = [:]
+typealias NodeStatsRecorder = StatsRecorder<NodeStatsPoint>
+typealias ProcessStatsRecorder = StatsRecorder<ProcessStatsPoint>
 
-    init(recentCapacity: Int = Self.recentCapacity, minuteCapacity: Int = Self.minuteCapacity) {
+struct StatsRecorder<Point: StatsSample> {
+    private var recent: RingBuffer<Point>
+    private var minutes: RingBuffer<Point>
+    private var pending: [StatsTier: (bucket: Double, points: [Point])] = [:]
+
+    init(recentCapacity: Int = StatsRecorderDefaults.recentCapacity,
+         minuteCapacity: Int = StatsRecorderDefaults.minuteCapacity) {
         recent = RingBuffer(capacity: recentCapacity)
         minutes = RingBuffer(capacity: minuteCapacity)
     }
 
     /// The buckets this point closed, finest first.
     @discardableResult
-    mutating func record(_ point: NodeStatsPoint) -> [(tier: StatsTier, point: NodeStatsPoint)] {
+    mutating func record(_ point: Point) -> [(tier: StatsTier, point: Point)] {
         recent.append(point)
-        var closed: [(tier: StatsTier, point: NodeStatsPoint)] = []
+        var closed: [(tier: StatsTier, point: Point)] = []
         guard let minute = add(point, to: .minute) else { return closed }
         minutes.append(minute)
         closed.append((.minute, minute))
@@ -90,11 +97,11 @@ struct NodeStatsRecorder {
     }
 
     /// Adds a point to the tier's open bucket; the merged bucket it closed, if any.
-    private mutating func add(_ point: NodeStatsPoint, to tier: StatsTier) -> NodeStatsPoint? {
+    private mutating func add(_ point: Point, to tier: StatsTier) -> Point? {
         let bucket = (point.date.timeIntervalSince1970 / tier.bucket).rounded(.down)
-        var closed: NodeStatsPoint?
+        var closed: Point?
         if let open = pending[tier], open.bucket != bucket {
-            closed = NodeStatsPoint.merged(open.points)
+            closed = Point.merged(open.points)
             pending[tier] = nil
         }
         pending[tier, default: (bucket, [])].points.append(point)
@@ -102,7 +109,7 @@ struct NodeStatsRecorder {
     }
 
     /// Minute points from before the raw ones start, then the raw ones, from `since` on.
-    func points(since: Date?) -> [NodeStatsPoint] {
+    func points(since: Date?) -> [Point] {
         let raw = recent.elements
         let rawStart = raw.first?.date ?? .distantFuture
         let all = minutes.elements.filter { $0.date < rawStart } + raw
@@ -130,4 +137,10 @@ extension NodeStatsPoint {
                   instanceCount: heartbeat.processes.count,
                   crashedCount: heartbeat.processes.filter { $0.state == .crashed }.count)
     }
+}
+
+/// An instance on a node, the key of its stats history.
+struct ProcessKey: Hashable, Sendable {
+    var service: String
+    var instance: Int
 }

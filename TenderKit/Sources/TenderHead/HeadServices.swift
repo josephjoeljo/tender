@@ -679,6 +679,41 @@ public final class HeadServices: Sendable {
                 return history
             }
         }
+        router.get("/v1/settings/history") { [self] _, _ in
+            await respond { await state.retention }
+        }
+        // A PUT, so a remote token needs write scope.
+        router.put("/v1/settings/history") { [self] request, _ in
+            await respond {
+                let update = try await decode(HistoryRetentionUpdate.self, from: request)
+                return try await state.setRetention(update)
+            }
+        }
+        router.get("/v1/processes/:name/history") { [self] request, context in
+            await respond {
+                let service = try context.parameters.requireDecoded("name")
+                let parameters = request.uri.queryParameters
+                let (since, limit) = try historyQuery(from: request)
+                let nodes = await targets(service: service, node: parameters.get("node"))
+                guard nodes.count == 1, let node = nodes.first else {
+                    throw NodeCallError(code: "ambiguous_node",
+                                        message: "'\(service)' runs on \(nodes.map(\.rawValue).joined(separator: ", ")); pass node.",
+                                        httpStatus: 400)
+                }
+                var instance = await state.instances(of: service, on: node).first ?? 0
+                if let raw = parameters.get("instance") {
+                    guard let parsed = Int(raw), parsed >= 0 else {
+                        throw NodeCallError(code: "invalid_query", message: "instance must be a non-negative integer.", httpStatus: 400)
+                    }
+                    instance = parsed
+                }
+                guard let history = await state.history(of: node, service: service, instance: instance,
+                                                        since: since, limit: limit) else {
+                    throw NodeCallError(code: "node_not_found", message: "No node with ID or hostname '\(node)'.", httpStatus: 404)
+                }
+                return history
+            }
+        }
         router.get("/v1/processes") { [self] _, _ in
             await respond { await clusterStatus() }
         }

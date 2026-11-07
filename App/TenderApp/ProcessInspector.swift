@@ -64,6 +64,7 @@ struct ProcessInspector: View {
                         case .stats:
                             ProcessStatsPanel(process: process, node: model.nodes.first { $0.info.id == process.node },
                                               compact: true, showsFacts: false)
+                            ProcessHistorySection(model: model, process: process)
                         case .logs: ProcessLogsTab(model: model, ref: ref)
                         }
                     }

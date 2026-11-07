@@ -1,5 +1,6 @@
 import SwiftUI
 import TenderClient
+import TenderCore
 
 /// The heads the app can talk to, one of them active. A token also carries the CA
 /// fingerprint, which pins the connection, and it's kept in the Keychain.
@@ -13,6 +14,8 @@ struct SettingsView: View {
     @State private var error: String?
     @State private var busy = false
     @State private var removing: SavedConnection?
+    /// A shorter retention waiting for confirmation, since it deletes history right away.
+    @State private var lowering: HistoryRetentionUpdate?
 
     var body: some View {
         Form {
@@ -40,17 +43,71 @@ struct SettingsView: View {
                     Text(error).foregroundStyle(.red).font(.caption)
                 }
             }
+            if model.head != nil { historySection }
         }
         .formStyle(.grouped)
         .frame(width: fixedWidth ? 480 : nil)
         .frame(maxWidth: fixedWidth ? nil : 640)
         .task { await model.checkConnections() }
+        .task(id: model.connections.activeID) { await model.loadHistoryRetention(force: true) }
+        .confirmationDialog("Delete older history?", isPresented: isLowering, presenting: lowering) { update in
+            Button("Keep Less History", role: .destructive) {
+                Task { await model.setHistoryRetention(update) }
+            }
+        } message: { update in
+            Text("The head deletes \(update.nodeDays != nil ? "node" : "process") history older than \(keptFor(update.nodeDays ?? update.processDays)) now. It can't be brought back.")
+        }
         .confirmationDialog("Remove \(removing?.name ?? "this connection")?", isPresented: isRemoving, presenting: removing) { connection in
             Button("Remove", role: .destructive) {
                 Task { await model.removeConnection(connection.id) }
             }
         } message: { _ in
             Text("The app forgets its address and token. The head and its token aren't changed.")
+        }
+    }
+
+    private var isLowering: Binding<Bool> {
+        Binding(get: { lowering != nil }, set: { if !$0 { lowering = nil } })
+    }
+
+    /// Choices for how long to keep history, plus the head's current value if it's another.
+    private static let retentionChoices: [(label: String, days: Int)] = [
+        ("1 day", 1), ("7 days", 7), ("30 days", 30), ("90 days", 90), ("6 months", HistoryRetention.defaultDays),
+        ("1 year", 365), ("2 years", 730),
+    ]
+
+    @ViewBuilder
+    private var historySection: some View {
+        Section {
+            if let retention = model.historyRetention {
+                retentionPicker("Node history", days: retention.nodeDays) { HistoryRetentionUpdate(nodeDays: $0) }
+                retentionPicker("Process history", days: retention.processDays) { HistoryRetentionUpdate(processDays: $0) }
+            }
+            if let error = model.historyRetentionError {
+                Text(error).foregroundStyle(.red).font(.caption)
+            }
+        } header: {
+            Text("History")
+        } footer: {
+            Text("How long the head keeps stats charts. Minutes are kept for 2 days and 15-minute points for 35, then hourly points for the rest. Windows longer than this are hidden. Needs a write token; also `tender retention`.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func retentionPicker(_ title: String, days: Int,
+                                 update: @escaping (Int) -> HistoryRetentionUpdate) -> some View {
+        var choices = Self.retentionChoices
+        if !choices.contains(where: { $0.days == days }) {
+            choices.append((keptFor(days), days))
+            choices.sort { $0.days < $1.days }
+        }
+        let selection = Binding(get: { days }, set: { newDays in
+            guard newDays != days else { return }
+            if newDays < days { lowering = update(newDays) } else { Task { await model.setHistoryRetention(update(newDays)) } }
+        })
+        return Picker(title, selection: selection) {
+            ForEach(choices, id: \.days) { Text($0.label).tag($0.days) }
         }
     }
 

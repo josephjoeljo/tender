@@ -171,3 +171,158 @@ private func point(_ second: Double, cpu: Double = 10, crashed: Int = 0, gap: Ti
     #expect(try store.stats(node: node, tier: .minute, since: nil).isEmpty)
     #expect(try store.stats(node: node, tier: .quarterHour, since: nil).isEmpty)
 }
+
+// MARK: Process history
+
+private func instance(_ service: String, _ number: Int = 0, cpu: Double? = 10, pid: Int32? = 42,
+                      restarts: Int = 0, files: Int = 8) -> InstanceStatus {
+    InstanceStatus(service: service, instance: number, node: NodeID("n"), state: pid == nil ? .crashed : .running,
+                   pid: pid, restarts: restarts, cpu: cpu, rss: 500,
+                   stats: ProcessStats(footprint: 300, threads: 4, openFiles: files, diskReadRate: 7, power: 0.5))
+}
+
+@Test func processPointsMergeAndPreferTheFootprint() throws {
+    let at = start
+    let running = ProcessStatsPoint(instance("api", cpu: 10, restarts: 1), at: at)
+    #expect(running.memory == 300, "footprint over RSS")
+    #expect(running.openFiles == 8)
+    #expect(running.diskReadRate == 7)
+    #expect(!running.down)
+    var old = instance("api")
+    old.stats = nil
+    #expect(ProcessStatsPoint(old, at: at).memory == 500, "RSS from an older tenderd")
+    let crashed = ProcessStatsPoint(instance("api", cpu: nil, pid: nil, restarts: 2), at: at.addingTimeInterval(5))
+    #expect(crashed.down)
+
+    let merged = try #require(ProcessStatsPoint.merged([running, crashed,
+                                                        ProcessStatsPoint(instance("api", cpu: 30, restarts: 2, files: 12),
+                                                                          at: at.addingTimeInterval(10))]))
+    #expect(merged.cpuPercent == 20, "a down point has no CPU to average in")
+    #expect(merged.openFiles.map { ($0 * 100).rounded() / 100 } == 9.33)
+    #expect(merged.restarts == 2)
+    #expect(merged.down)
+    #expect(merged.date == at.addingTimeInterval(10))
+}
+
+@Test func registryRecordsHistoryPerInstance() async throws {
+    let state = RegistryState(store: nil)
+    let node = NodeID("n")
+    try await state.register(NodeInfo(id: node, version: "1", macOS: "x", hardware: "y"))
+    for (index, second) in [0.0, 5, 10].enumerated() {
+        let now = start.addingTimeInterval(second)
+        let processes = [instance("api", 0, cpu: Double(index)), instance("api", 1, cpu: 50), instance("db", cpu: 1)]
+        _ = await state.heartbeat(Heartbeat(node: node, nodeClock: now, processes: processes, spoolBacklog: 0),
+                                  registeredThisRun: true, now: now)
+    }
+    let api = try #require(await state.history(of: node, service: "api", instance: 0, since: nil, limit: 10))
+    #expect(api.points.map(\.cpuPercent) == [0, 1, 2])
+    #expect(api.service == "api" && api.instance == 0 && api.node == node)
+    #expect(await state.history(of: node, service: "api", instance: 1, since: nil, limit: 10)?.points.map(\.cpuPercent) == [50, 50, 50])
+    #expect(await state.instances(of: "api", on: node) == [0, 1])
+    let capped = try #require(await state.history(of: node, service: "api", instance: 0, since: nil, limit: 2))
+    #expect(capped.points.count == 2 && capped.downsampled)
+    #expect(await state.history(of: node, service: "nope", instance: 0, since: nil, limit: 10)?.points == [])
+    #expect(await state.history(of: NodeID("unknown"), service: "api", instance: 0, since: nil, limit: 10) == nil)
+
+    // An instance that stops being reported is forgotten from memory.
+    let now = start.addingTimeInterval(15)
+    _ = await state.heartbeat(Heartbeat(node: node, nodeClock: now, processes: [instance("api")], spoolBacklog: 0),
+                              registeredThisRun: true, now: now)
+    #expect(await state.history(of: node, service: "db", instance: 0, since: nil, limit: 10)?.points == [])
+    #expect(await state.history(of: node, service: "api", instance: 0, since: nil, limit: 10)?.points.count == 4)
+}
+
+@Test func processHistoryIsStoredStitchedPrunedAndForgottenWithTheNode() async throws {
+    let env = try makeEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let node = NodeID("n")
+    let store = try HeadStore(environment: env)
+    func old(_ daysAgo: Double, tier: StatsTier, cpu: Double, service: String = "api") -> HeadStore.ClosedProcessPoint {
+        .init(service: service, instance: 0, tier: tier,
+              point: ProcessStatsPoint(date: start.addingTimeInterval(-daysAgo * 86400), cpuPercent: cpu))
+    }
+    try store.saveProcessStats(node: node, [
+        old(100, tier: .hour, cpu: 1),
+        old(200, tier: .hour, cpu: 99),           // past the hour tier's retention
+        old(30, tier: .quarterHour, cpu: 2),
+        old(3, tier: .minute, cpu: 99),           // past the minute tier's retention
+        old(30, tier: .quarterHour, cpu: 5, service: "gone"), // a deleted service, still kept for its retention
+    ])
+    let state = RegistryState(store: store)
+    try await state.register(NodeInfo(id: node, version: "1", macOS: "x", hardware: "y"))
+    // An hour and two minutes of heartbeats: the first hour closing prunes.
+    for second in stride(from: 0.0, through: 3720, by: 30) {
+        let now = start.addingTimeInterval(second)
+        _ = await state.heartbeat(Heartbeat(node: node, nodeClock: now, processes: [instance("api", cpu: 7)], spoolBacklog: 0),
+                                  registeredThisRun: true, now: now)
+    }
+    let minutes = try store.processStats(node: node, service: "api", instance: 0, tier: .minute, since: nil)
+    #expect(minutes.count == 62, "minutes 0...61 closed; the 3-day-old one was pruned")
+    #expect(try store.processStats(node: node, service: "api", instance: 0, tier: .hour, since: nil).map(\.cpuPercent) == [1, 7])
+    #expect(try store.processStats(node: node, service: "gone", instance: 0, tier: .quarterHour, since: nil).count == 1)
+
+    // A restarted head: stored tiers first, then memory.
+    let restarted = RegistryState(store: try HeadStore(environment: env))
+    let all = try #require(await restarted.history(of: node, service: "api", instance: 0,
+                                                   since: start.addingTimeInterval(-182 * 86400), limit: 2000))
+    #expect(all.points.prefix(2).map(\.cpuPercent) == [1, 2])
+    #expect(all.points.dropFirst(2).allSatisfy { $0.cpuPercent == 7 })
+    #expect(all.points.map(\.date) == all.points.map(\.date).sorted())
+
+    await state.remove(node)
+    #expect(try store.processStats(node: node, service: "api", instance: 0, tier: .minute, since: nil).isEmpty)
+    #expect(try store.processStats(node: node, service: "gone", instance: 0, tier: .quarterHour, since: nil).isEmpty)
+}
+
+// MARK: Retention
+
+@Test func tierRetentionFollowsTheSetting() {
+    #expect(StatsTier.hour.retention(keepingDays: 190) == 190 * 86400)
+    #expect(StatsTier.quarterHour.retention(keepingDays: 190) == 35 * 86400)
+    #expect(StatsTier.minute.retention(keepingDays: 190) == 2 * 86400)
+    #expect(StatsTier.quarterHour.retention(keepingDays: 7) == 7 * 86400)
+    #expect(StatsTier.minute.retention(keepingDays: 1) == 86400)
+    #expect(HistoryRetention().isValid)
+    #expect(!HistoryRetention(nodeDays: 0).isValid)
+    #expect(!HistoryRetention(processDays: 731).isValid)
+}
+
+@Test func loweringRetentionSavesPrunesAndHidesOlderPoints() async throws {
+    let env = try makeEnvironment()
+    defer { try? FileManager.default.removeItem(at: env.root) }
+    let node = NodeID("n")
+    let now = start
+    let store = try HeadStore(environment: env)
+    try store.saveNode(NodeInfo(id: node, version: "1", macOS: "x", hardware: "y"))
+    func daysAgo(_ days: Double, cpu: Double) -> NodeStatsPoint {
+        NodeStatsPoint(date: now.addingTimeInterval(-days * 86400), cpuPercent: cpu)
+    }
+    try store.saveStats(node: node, tier: .hour, point: daysAgo(100, cpu: 1))
+    try store.saveStats(node: node, tier: .hour, point: daysAgo(20, cpu: 2))
+    try store.saveStats(node: node, tier: .quarterHour, point: daysAgo(5, cpu: 3))
+    try store.saveProcessStats(node: node, [
+        .init(service: "api", instance: 0, tier: .hour, point: ProcessStatsPoint(date: now.addingTimeInterval(-60 * 86400), cpuPercent: 1)),
+        .init(service: "api", instance: 0, tier: .quarterHour, point: ProcessStatsPoint(date: now.addingTimeInterval(-3 * 86400), cpuPercent: 2)),
+    ])
+
+    let state = RegistryState(store: store)
+    #expect(await state.retention == HistoryRetention())
+    let all = try #require(await state.history(of: node, since: nil, limit: 100, now: now))
+    #expect(all.points.map(\.cpuPercent) == [1, 2, 3])
+
+    let changed = try await state.setRetention(HistoryRetentionUpdate(nodeDays: 30, processDays: 7), now: now)
+    #expect(changed == HistoryRetention(nodeDays: 30, processDays: 7))
+    #expect(try store.stats(node: node, tier: .hour, since: nil).map(\.cpuPercent) == [2], "100 days old is pruned")
+    #expect(try store.processStats(node: node, service: "api", instance: 0, tier: .hour, since: nil).isEmpty)
+    #expect(await state.history(of: node, service: "api", instance: 0, since: nil, limit: 100, now: now)?
+        .points.map(\.cpuPercent) == [2])
+    // A later query hides what has aged past the retention before the next prune.
+    #expect(await state.history(of: node, since: nil, limit: 100, now: now.addingTimeInterval(20 * 86400))?
+        .points.map(\.cpuPercent) == [3])
+
+    // Kept across a restart; a bad value changes nothing.
+    let restarted = RegistryState(store: try HeadStore(environment: env))
+    #expect(await restarted.retention == changed)
+    await #expect(throws: NodeCallError.self) { try await restarted.setRetention(HistoryRetentionUpdate(processDays: 0)) }
+    #expect(await restarted.retention == changed)
+}

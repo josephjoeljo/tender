@@ -11,6 +11,10 @@ final class ClusterModel {
     private(set) var nodes: [NodeSummary] = []
     private(set) var processes: [InstanceStatus] = []
     private(set) var history = NodeHistory()
+    /// How long the head keeps stats history. Nil until loaded, and on heads from before the setting.
+    private(set) var historyRetention: HistoryRetention?
+    /// Why it couldn't be read or changed, such as a read-only token.
+    private(set) var historyRetentionError: String?
     /// Every node's service specs, for the process inspector's config. Nil until loaded.
     private(set) var specs: SpecList?
     /// Why the specs couldn't be read, such as a read-only token.
@@ -60,6 +64,7 @@ final class ClusterModel {
         history = .preview(nodes)
         head = nodes.isEmpty ? nil : "mac-1:7071"
         specs = .preview(processes)
+        historyRetention = HistoryRetention()
         isPreview = true
     }
     #endif
@@ -118,6 +123,8 @@ final class ClusterModel {
         history = NodeHistory()
         specs = nil
         specsError = nil
+        historyRetention = nil
+        historyRetentionError = nil
         health = .notConfigured
         savedConnectionError = nil
         do {
@@ -196,6 +203,62 @@ final class ClusterModel {
         guard let fetched = try? await client.nodeHistory(node: nodeID, since: Date().addingTimeInterval(-window)),
               requested == connections.activeID else { return }
         history.seed(nodeID, with: fetched.points)
+    }
+
+    /// Reads the head's history retention, once per connection unless `force`. A head
+    /// from before the setting leaves it nil, so every window stays on offer.
+    func loadHistoryRetention(force: Bool = false) async {
+        guard let client, force || historyRetention == nil else { return }
+        let requested = connections.activeID
+        do {
+            let retention = try await client.historyRetention()
+            guard requested == connections.activeID else { return }
+            historyRetention = retention
+            historyRetentionError = nil
+        } catch let error as TenderClientError where error.code == "http_404" {
+            historyRetentionError = "This head's tenderd keeps history for a fixed 6 months. Update it to change that."
+        } catch {
+            historyRetentionError = "\(error)"
+        }
+    }
+
+    /// Changes the head's retention. Needs a write token; the reason it failed is left in
+    /// `historyRetentionError`.
+    func setHistoryRetention(_ update: HistoryRetentionUpdate) async {
+        #if DEBUG
+        if isPreview {
+            historyRetention?.nodeDays = update.nodeDays ?? historyRetention?.nodeDays ?? HistoryRetention.defaultDays
+            historyRetention?.processDays = update.processDays ?? historyRetention?.processDays ?? HistoryRetention.defaultDays
+            return
+        }
+        #endif
+        guard let client else { return }
+        do {
+            historyRetention = try await client.setHistoryRetention(update)
+            historyRetentionError = nil
+        } catch let error as TenderClientError where error.code == "forbidden" {
+            historyRetentionError = "This connection's token is read-only. Changing retention needs a write token."
+        } catch {
+            historyRetentionError = "\(error)"
+        }
+    }
+
+    /// One instance's history from the head, for the window about to be shown.
+    func processHistory(of process: InstanceStatus, window: TimeInterval) async -> ProcessHistoryLoad {
+        #if DEBUG
+        if isPreview { return .points(ProcessStatsPoint.preview(process, window: window)) }
+        #endif
+        guard let client else { return .failed("Not connected to a head.") }
+        do {
+            let history = try await client.processHistory(service: process.service, node: process.node.rawValue,
+                                                          instance: process.instance,
+                                                          since: Date().addingTimeInterval(-window), limit: 400)
+            return .points(history.points)
+        } catch let error as TenderClientError where error.code == "http_404" {
+            return .unsupported
+        } catch {
+            return .failed("\(error)")
+        }
     }
 
     /// Reads every node's specs. Needs a write token, since specs can hold literal values

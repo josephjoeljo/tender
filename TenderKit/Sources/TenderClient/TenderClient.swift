@@ -112,6 +112,30 @@ public struct TenderClient: Sendable {
         return try await send(.GET, "/v1/nodes/\(try escaped(node))/history\(query)")
     }
 
+    /// The head's stats for one instance of a service, oldest first, at most `limit` points
+    /// (the head caps it). Without `node`, the one node running the service; without
+    /// `instance`, its lowest. Heads from before process history answer `http_404`.
+    public func processHistory(service: String, node: String? = nil, instance: Int? = nil,
+                               since: Date? = nil, limit: Int? = nil) async throws -> ProcessStatsHistory {
+        var items: [String] = []
+        if let node { items.append("node=\(try escaped(node))") }
+        if let instance { items.append("instance=\(instance)") }
+        if let since { items.append("since=\(since.timeIntervalSince1970)") }
+        if let limit { items.append("limit=\(limit)") }
+        let query = items.isEmpty ? "" : "?" + items.joined(separator: "&")
+        return try await send(.GET, "/v1/processes/\(try escaped(service))/history\(query)")
+    }
+
+    /// How long the head keeps node and process stats history. Older heads answer `http_404`.
+    public func historyRetention() async throws -> HistoryRetention {
+        try await send(.GET, "/v1/settings/history")
+    }
+
+    /// Changes the fields given and prunes what's now too old. Needs a write token.
+    public func setHistoryRetention(_ update: HistoryRetentionUpdate) async throws -> HistoryRetention {
+        try await send(.PUT, "/v1/settings/history", body: try JSONEncoder().encode(update))
+    }
+
     public func createJoinToken(ttlSeconds: Int? = nil) async throws -> JoinTokenResponse {
         try await send(.POST, "/v1/tokens", body: try JSONEncoder().encode(JoinTokenRequest(ttlSeconds: ttlSeconds)))
     }
