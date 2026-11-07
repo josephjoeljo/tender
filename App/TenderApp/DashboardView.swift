@@ -142,6 +142,10 @@ struct NodesView: View {
                         ForEach(NodesLayout.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
                     }
                     .pickerStyle(.segmented)
+                    #if os(iOS)
+                    // Room around each icon.
+                    .frame(width: 128)
+                    #endif
                     .help("Show nodes as a list or as cards")
                 }
                 ToolbarItem(placement: .primaryAction) {
