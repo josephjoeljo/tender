@@ -690,6 +690,59 @@ func withCluster(_ body: (Daemon, Daemon) async throws -> Void) async throws {
     }
 }
 
+@Test func processHistoryIsServedPerInstance() async throws {
+    try await withCluster { head, _ async throws in
+        var spec = sleeper
+        spec.node = NodeID("worker")
+        _ = try await head.client.start(spec)
+        let history = try #require(try await eventually { () -> ProcessStatsHistory? in
+            let history = try await head.client.processHistory(service: "api")
+            return history.points.count >= 2 ? history : nil
+        })
+        #expect(history.node == NodeID("worker"), "found on the one node running it")
+        #expect(history.instance == 0)
+        #expect(try await head.client.processHistory(service: "api", node: "worker", instance: 0, limit: 1).points.count == 1)
+        #expect(try await head.client.processHistory(service: "api", node: "worker", instance: 7).points.isEmpty)
+        for (node, limit, code) in [("nope", nil, "node_not_found"), ("worker", 0, "invalid_query")] as [(String, Int?, String)] {
+            do {
+                _ = try await head.client.processHistory(service: "api", node: node, limit: limit)
+                Issue.record("expected \(code)")
+            } catch let error as TenderClientError {
+                #expect(error.code == code)
+            }
+        }
+        _ = try await head.client.delete(service: "api", node: "worker")
+    }
+}
+
+@Test func historyRetentionIsReadByAnyTokenAndChangedOnlyWithWrite() async throws {
+    try await withCluster { head, _ async throws in
+        #expect(try await head.client.historyRetention() == HistoryRetention())
+        let reader = try await head.client.createAPIToken(name: "reader", scope: .read)
+        let writer = try await head.client.createAPIToken(name: "writer", scope: .write)
+        let address = "127.0.0.1:\(head.apiPort)"
+        let caPEM = try await ClientPinning.fetchCA(head: address, credential: reader.token)
+        let readClient = TenderClient(head: address, caPEM: caPEM, token: reader.token)
+        #expect(try await readClient.historyRetention().processDays == HistoryRetention.defaultDays)
+        do {
+            _ = try await readClient.setHistoryRetention(HistoryRetentionUpdate(processDays: 7))
+            Issue.record("read tokens can't change retention")
+        } catch let error as TenderClientError {
+            #expect(error.code == "forbidden")
+        }
+        let writeClient = TenderClient(head: address, caPEM: caPEM, token: writer.token)
+        let changed = try await writeClient.setHistoryRetention(HistoryRetentionUpdate(processDays: 7))
+        #expect(changed == HistoryRetention(nodeDays: HistoryRetention.defaultDays, processDays: 7))
+        #expect(try await readClient.historyRetention() == changed)
+        do {
+            _ = try await writeClient.setHistoryRetention(HistoryRetentionUpdate(nodeDays: 0))
+            Issue.record("expected invalid_retention")
+        } catch let error as TenderClientError {
+            #expect(error.code == "invalid_retention")
+        }
+    }
+}
+
 // MARK: Security
 
 @Test func aWorkerCantCommandAnotherNode() async throws {

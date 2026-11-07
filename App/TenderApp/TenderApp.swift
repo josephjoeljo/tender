@@ -35,6 +35,7 @@ struct TenderApp: App {
             DashboardView(model: model)
                 .font(.body)
                 .frame(minWidth: 900, minHeight: 560)
+                .allowsFullScreen()
         }
 
         // A process broken out of the dashboard. Opening the same one again brings its window forward.
