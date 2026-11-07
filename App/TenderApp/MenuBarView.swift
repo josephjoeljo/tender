@@ -110,8 +110,10 @@ extension ClusterModel {
     private static func process(_ service: String, _ instance: Int, _ node: String, _ state: InstanceState,
                                 adopted: Bool = false) -> InstanceStatus {
         InstanceStatus(service: service, instance: instance, node: NodeID(node), state: state,
-                       pid: state == .running ? 4242 : nil, uptime: state == .running ? 7200 : nil,
-                       cpu: state == .running ? 3.2 : nil, rss: state == .running ? 150 << 20 : nil,
+                       // Varied by name, so sorting the sample list visibly changes its order.
+                       pid: state == .running ? 4242 : nil, uptime: state == .running ? Double(service.count * 1800) : nil,
+                       cpu: state == .running ? Double(20 - service.count) / 2 : nil,
+                       rss: state == .running ? UInt64(service.count * 40) << 20 : nil,
                        cpuSeconds: state == .running ? 410 : nil, adopted: adopted, stats: state == .running ? .preview : nil)
     }
 

@@ -142,16 +142,23 @@ struct ProcessesView: View {
 
     private var selected: InstanceStatus? { model.processes.first { $0.id == selection } }
 
-    /// Nodes in the order the Nodes page shows them, each with its processes.
+    @AppStorage("processSort") private var sort: ProcessSort = .oldest
+    @AppStorage("showsStoppedProcesses") private var showsStopped = true
+
+    /// Nodes in the order the Nodes page shows them, each with its processes in the chosen
+    /// order, Tender's own services before the launchd jobs it adopted.
     private var groups: [(node: NodeID, processes: [InstanceStatus])] {
-        let byNode = Dictionary(grouping: model.processes, by: \.node)
+        let shown = showsStopped ? model.processes : model.processes.filter { $0.state != .stopped }
+        let byNode = Dictionary(grouping: shown, by: \.node)
         let order = model.nodes.map(\.info.id) + byNode.keys.filter { id in !model.nodes.contains { $0.info.id == id } }
             .sorted { $0.rawValue < $1.rawValue }
         return order.compactMap { node in
-            // Tender's own services first, then the launchd jobs it adopted.
-            byNode[node].map { (node, $0.sorted {
-                ($0.adopted ? 1 : 0, $0.service, $0.instance) < ($1.adopted ? 1 : 0, $1.service, $1.instance)
-            }) }
+            byNode[node].map { processes in
+                (node, processes.sorted { a, b in
+                    if a.adopted != b.adopted { return !a.adopted }
+                    return sort.orders(a, before: b)
+                })
+            }
         }
     }
 
@@ -202,14 +209,64 @@ struct ProcessesView: View {
             .inspectorColumnWidth(min: 320, ideal: 380, max: 560)
         }
         .toolbar {
+            ToolbarItem {
+                Menu {
+                    Picker("Sort By", selection: $sort) {
+                        ForEach(ProcessSort.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.inline)
+                    Divider()
+                    Toggle("Show Stopped Processes", isOn: $showsStopped)
+                } label: {
+                    Label("Sort and Filter", systemImage: "line.3.horizontal.circle")
+                }
+                .help("Sort processes and choose which to show")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button("Inspector", systemImage: "sidebar.trailing") { showsInspector.toggle() }
                     .help(showsInspector ? "Hide the inspector" : "Show the inspector")
             }
         }
         // Data can arrive after the page appears, and a selected process can go away.
-        .onChange(of: model.processes.map(\.id), initial: true) { _, ids in
-            if selection.map({ !ids.contains($0) }) ?? true { selection = groups.first?.processes.first?.id }
+        .onChange(of: groups.flatMap { $0.processes.map(\.id) }, initial: true) { _, ids in
+            if selection.map({ !ids.contains($0) }) ?? true { selection = ids.first }
+        }
+    }
+}
+
+/// How processes are ordered within a node. Oldest first is the default: what has been up
+/// longest stays put at the top while restarted processes sink.
+enum ProcessSort: String, CaseIterable, Identifiable {
+    case name, cpu, memory, oldest, newest
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .name: "Name"
+        case .cpu: "CPU"
+        case .memory: "Memory"
+        case .oldest: "Oldest"
+        case .newest: "Newest"
+        }
+    }
+
+    /// Processes without the value (stopped, or an older tenderd) go last, then by name.
+    func orders(_ a: InstanceStatus, before b: InstanceStatus) -> Bool {
+        func byName() -> Bool { (a.service, a.instance) < (b.service, b.instance) }
+        func descending(_ x: Double?, _ y: Double?) -> Bool {
+            switch (x, y) {
+            case let (x?, y?) where x != y: x > y
+            case (_?, nil): true
+            case (nil, _?): false
+            default: byName()
+            }
+        }
+        switch self {
+        case .name: return byName()
+        case .cpu: return descending(a.cpu, b.cpu)
+        case .memory: return descending((a.stats?.footprint ?? a.rss).map(Double.init), (b.stats?.footprint ?? b.rss).map(Double.init))
+        case .oldest: return descending(a.uptime, b.uptime)
+        case .newest: return descending(a.uptime.map { -$0 }, b.uptime.map { -$0 })
         }
     }
 }
