@@ -88,8 +88,48 @@ private struct StatGrid<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: minimum), spacing: 10, alignment: .top)], spacing: 10) {
-            content
+        AdaptiveGrid(minimum: minimum, spacing: 10) { content }
+    }
+}
+
+/// As many equal columns as fit at `minimum` wide, rows as tall as their tallest cell. Not
+/// lazy, unlike LazyVGrid, so it can sit inside a self-sizing list row: on iOS a lazy grid
+/// there keeps re-measuring the cell until UIKit gives up.
+struct AdaptiveGrid: Layout {
+    var minimum: CGFloat
+    var spacing: CGFloat
+
+    private func columns(_ width: CGFloat, count: Int) -> Int {
+        max(1, min(count, Int((width + spacing) / (minimum + spacing))))
+    }
+
+    private func rows(_ subviews: Subviews, width: CGFloat) -> (columnWidth: CGFloat, heights: [CGFloat], columns: Int) {
+        let columns = columns(width, count: subviews.count)
+        let columnWidth = (width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+        let heights = stride(from: 0, to: subviews.count, by: columns).map { start in
+            subviews[start..<min(start + columns, subviews.count)]
+                .map { $0.sizeThatFits(ProposedViewSize(width: columnWidth, height: nil)).height }
+                .max() ?? 0
+        }
+        return (columnWidth, heights, columns)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? minimum
+        let heights = rows(subviews, width: width).heights
+        return CGSize(width: width, height: heights.reduce(0, +) + spacing * CGFloat(max(heights.count - 1, 0)))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let (columnWidth, heights, columns) = rows(subviews, width: bounds.width)
+        var y = bounds.minY
+        for (row, height) in heights.enumerated() {
+            for column in 0..<columns where row * columns + column < subviews.count {
+                subviews[row * columns + column].place(
+                    at: CGPoint(x: bounds.minX + CGFloat(column) * (columnWidth + spacing), y: y),
+                    proposal: ProposedViewSize(width: columnWidth, height: height))
+            }
+            y += height + spacing
         }
     }
 }
@@ -99,16 +139,25 @@ private struct FactRow: View {
     let facts: [(String, String)]
 
     var body: some View {
-        HStack(spacing: 18) {
-            ForEach(Array(facts.enumerated()), id: \.offset) { _, fact in
-                HStack(spacing: 4) {
-                    Text(fact.0).foregroundStyle(.secondary)
-                    Text(fact.1).textSelection(.enabled)
-                }
+        // On one line when it fits, as on the Mac; in columns on a phone.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 18) {
+                items
+                Spacer(minLength: 0)
             }
-            Spacer()
+            AdaptiveGrid(minimum: 150, spacing: 6) { items }
         }
         .font(.caption)
+    }
+
+    private var items: some View {
+        ForEach(Array(facts.enumerated()), id: \.offset) { _, fact in
+            HStack(spacing: 4) {
+                Text(fact.0).foregroundStyle(.secondary)
+                Text(fact.1).textSelection(.enabled).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -284,7 +333,10 @@ struct ExpandableRow<Header: View, Detail: View>: View {
             .onTapGesture { withAnimation(.snappy(duration: 0.2)) { toggle() } }
             if isExpanded {
                 detail
+                    #if os(macOS)
+                    // Under the title, like a track list. iOS gives the panel the row's full width.
                     .padding(.leading, RowLayout.textLeading)
+                    #endif
                     .padding(.bottom, 6)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }

@@ -110,6 +110,13 @@ struct NodesView: View {
     @State private var removing: NodeSummary?
     @AppStorage("nodesLayout") private var layout: NodesLayout = .list
 
+    /// Centred on iOS, with Add on its own at the trailing edge; beside Add on the Mac.
+    #if os(iOS)
+    private static let layoutPlacement = ToolbarItemPlacement.principal
+    #else
+    private static let layoutPlacement = ToolbarItemPlacement.automatic
+    #endif
+
     var body: some View {
         NavigationStack(path: $path) {
             Group {
@@ -130,13 +137,17 @@ struct NodesView: View {
             }
             .navigationTitle("Nodes")
             .toolbar {
-                Picker("Layout", selection: $layout) {
-                    ForEach(NodesLayout.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
+                ToolbarItem(placement: Self.layoutPlacement) {
+                    Picker("Layout", selection: $layout) {
+                        ForEach(NodesLayout.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .help("Show nodes as a list or as cards")
                 }
-                .pickerStyle(.segmented)
-                .help("Show nodes as a list or as cards")
-                Button("Add Node", systemImage: "plus") { addingNode = true }
-                    .help("Add a Mac to this cluster")
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Add Node", systemImage: "plus") { addingNode = true }
+                        .help("Add a Mac to this cluster")
+                }
             }
             .navigationDestination(for: String.self) { NodeDetailView(model: model, nodeID: $0) }
         }

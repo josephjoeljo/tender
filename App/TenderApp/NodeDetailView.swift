@@ -15,10 +15,17 @@ struct NodeDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     NodeBentoCard(node: node)
-                    HStack {
-                        Text("History").font(.title3)
-                        Spacer()
-                        HistoryWindowPicker(window: $window, keepingDays: model.historyRetention?.nodeDays)
+                    // Beside the title when the picker fits, under it on a phone.
+                    ViewThatFits(in: .horizontal) {
+                        HStack {
+                            historyTitle
+                            Spacer()
+                            HistoryWindowPicker(window: $window, keepingDays: model.historyRetention?.nodeDays)
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            historyTitle
+                            HistoryWindowPicker(window: $window, keepingDays: model.historyRetention?.nodeDays, fillsWidth: true)
+                        }
                     }
                     if samples.count < 2 {
                         Label("No history yet. The head records a node from its first heartbeat and keeps \(keptFor(model.historyRetention?.nodeDays)).", systemImage: "clock")
@@ -44,6 +51,8 @@ struct NodeDetailView: View {
                                    description: Text("\(nodeID) is no longer part of this cluster."))
         }
     }
+
+    private var historyTitle: some View { Text("History").font(.title3) }
 
     @ViewBuilder
     private func charts(_ samples: [NodeSample], node: NodeSummary, span: ClosedRange<Date>) -> some View {
