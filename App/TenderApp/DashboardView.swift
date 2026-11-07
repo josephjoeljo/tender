@@ -165,6 +165,10 @@ struct ProcessesView: View {
     var body: some View {
         let counts = Dictionary(model.processes.map { ("\($0.node.rawValue)/\($0.service)", 1) }, uniquingKeysWith: +)
         let compact = showsInspector
+        // The list keeps one width, wide enough that a row's name, CPU, memory and buttons sit
+        // apart; the inspector fills the rest of the window, so resizing the window resizes only
+        // the inspector. Laid out by hand: .inspector() won't give its column the leftover width.
+        HStack(spacing: 0) {
         List(selection: $selection) {
             ForEach(groups, id: \.node) { group in
                 DisclosureGroup(isExpanded: Binding(get: { !collapsed.contains(group.node.rawValue) },
@@ -182,8 +186,8 @@ struct ProcessesView: View {
             }
         }
         .listStyle(.inset)
-        // As narrow as the inspector's own minimum, so the inspector can take the rest.
-        .frame(minWidth: 320)
+        .frame(width: showsInspector ? 580 : nil)
+        .frame(maxWidth: showsInspector ? nil : .infinity)
         .contextMenu(forSelectionType: String.self) { _ in
         } primaryAction: { ids in
             for id in ids {
@@ -196,22 +200,22 @@ struct ProcessesView: View {
                                        description: Text("Start one with tender start, or apply a service file."))
             }
         }
+            if showsInspector {
+                Divider()
+                Group {
+                    if let selected {
+                        let ref = ProcessRef(selected)
+                        ProcessInspector(model: model, ref: ref, tab: $tab) { openWindow(id: "process", value: ref) }
+                    } else {
+                        ContentUnavailableView("No Selection", systemImage: "sidebar.trailing",
+                                               description: Text("Pick a process to see its details, config and logs."))
+                    }
+                }
+                .frame(minWidth: 320, maxWidth: .infinity)
+            }
+        }
         .navigationTitle("Processes")
         .navigationSubtitle("\(model.processes.filter { $0.state == .running }.count) running")
-        .inspector(isPresented: $showsInspector) {
-            Group {
-                if let selected {
-                    let ref = ProcessRef(selected)
-                    ProcessInspector(model: model, ref: ref, tab: $tab) { openWindow(id: "process", value: ref) }
-                } else {
-                    ContentUnavailableView("No Selection", systemImage: "sidebar.trailing",
-                                           description: Text("Pick a process to see its details, config and logs."))
-                }
-            }
-            // Wider than any screen, so in practice no max. Not .infinity: AppKit's split view
-            // turns it into a layout constraint, and an infinite one throws during layout.
-            .inspectorColumnWidth(min: 320, ideal: 380, max: 4000)
-        }
         .toolbar {
             ToolbarItem {
                 Menu {
