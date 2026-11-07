@@ -35,7 +35,7 @@ extension Tender {
                                            dryRun: true, sha256: loaded.sha256)
                 let preview = try await client.apply(request)
                 if dryRun || !preview.diff.hasChanges {
-                    try report(preview, diff: true)
+                    try await report(preview, diff: true, client: client, items: loaded.manifest.items)
                     return
                 }
                 if !options.json {
@@ -49,13 +49,13 @@ extension Tender {
                     }
                 }
                 request.dryRun = false
-                try report(try await client.apply(request), diff: false)
+                try await report(try await client.apply(request), diff: false, client: client, items: loaded.manifest.items)
             } catch let error as TenderClientError {
                 try options.fail(error)
             }
         }
 
-        private func report(_ response: ApplyResponse, diff: Bool) throws {
+        private func report(_ response: ApplyResponse, diff: Bool, client: TenderClient, items: [ManifestItem]) async throws {
             if options.json {
                 print(try options.encode(response))
             } else {
@@ -64,7 +64,19 @@ extension Tender {
                     print("failed: node \(failure.node): \(terminalSafe(failure.error))")
                 }
             }
+            await warnUnresolvedSecrets(client: client, items: items)
             if !response.succeeded { throw ExitCode.failure }
+        }
+
+        /// On stderr, so `--json` output stays one document. Best effort: a token that can't
+        /// list secrets, or an old daemon, just means no check.
+        private func warnUnresolvedSecrets(client: TenderClient, items: [ManifestItem]) async {
+            guard items.contains(where: { if case .service(let spec) = $0 { spec.usesSecretTemplates } else { false } }),
+                  let list = try? await client.secrets() else { return }
+            for warning in SecretCheck.warnings(for: items, in: list) {
+                let prefix = warning.isNote ? "note" : "warning"
+                FileHandle.standardError.write(Data("\(prefix): \(terminalSafe(warning.description))\n".utf8))
+            }
         }
     }
 
