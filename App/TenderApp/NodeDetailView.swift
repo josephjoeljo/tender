@@ -15,6 +15,7 @@ struct NodeDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     NodeBentoCard(node: node)
+                    NodeSecretsCard(secrets: node.secrets)
                     // Beside the title when the picker fits, under it on a phone.
                     ViewThatFits(in: .horizontal) {
                         HStack {

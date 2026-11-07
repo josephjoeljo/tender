@@ -479,3 +479,94 @@ private let gcpSpec = ServiceSpec(
     #expect(cloud.defaultSecretsProject() == "olympsis-prod")
     #expect(CloudConfig.load(environment: env).releases == nil)
 }
+
+// MARK: Named secrets sources
+
+private let billingCloudJSON = #"{"secrets":{"project":"olympsis-prod","sources":{"billing":{"project":"billing-123","services":["billing-api"]}}}}"#
+
+private struct SourcesFixture {
+    let env: TenderEnvironment
+    let store: StateStore
+    let secrets: any SecretStore
+    let cloud: CloudServices
+    let vault: SecretVault
+    let sync: GCPSecretSync
+    let fetcher = FakeFetcher()
+
+    init() throws {
+        env = try makeTestEnvironment()
+        store = try StateStore(environment: env)
+        try FileManager.default.createDirectory(at: env.configDirectory, withIntermediateDirectories: true)
+        try Data(billingCloudJSON.utf8).write(to: env.configDirectory.appending(path: "cloud.json"))
+        secrets = env.makeSecretStore()
+        try secrets.write(SecretSources.credentialsItem(nil), keyJSON(try _RSA.Signing.PrivateKey(keySize: .bits2048)))
+        let cloud = CloudServices(environment: env, secrets: secrets, fetcher: fetcher)
+        self.cloud = cloud
+        vault = SecretVault(secrets: secrets, store: store, sources: { cloud.secretSources() })
+        sync = GCPSecretSync(vault: vault, sources: { try cloud.secretSource($0) })
+    }
+}
+
+private let billingSpec = ServiceSpec(name: "billing-api", program: .executable("/bin/sleep"),
+                                      environment: ["STRIPE": "${secret:billing:STRIPE_KEY}", "MONGO": "${secret:gcp:MONGO_PASSWORD}"])
+private let billingRoute = secretRoute("sk_live", version: 2, path: "projects/billing-123/secrets/STRIPE_KEY/versions/latest:access")
+
+@Test func aNamedSourceUsesItsOwnCredentialsAndOnlyForItsServices() async throws {
+    let fixture = try SourcesFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.env.root) }
+    fixture.fetcher.responses = [tokenResponse, billingRoute, secretRoute("mongo", version: 1)]
+    let billing = GCPSecretVersion(source: "billing", project: "billing-123", secret: "STRIPE_KEY", version: "latest")
+
+    // No key for billing yet: only its reference fails, with the step that fixes it.
+    let failures = await fixture.sync.refresh([billingSpec])
+    #expect(Array(failures.keys) == [billing])
+    #expect(failures[billing]?.description.contains("tender credentials set --source billing") == true)
+    #expect(try fixture.vault.missing(for: billingSpec).map(\.description) == ["billing:STRIPE_KEY"])
+
+    try fixture.secrets.write(SecretSources.credentialsItem("billing"), keyJSON(try _RSA.Signing.PrivateKey(keySize: .bits2048)))
+    #expect(await fixture.sync.refresh([billingSpec], force: true).isEmpty)
+    #expect(try fixture.vault.missing(for: billingSpec).isEmpty)
+    #expect(try fixture.vault.cachedGCPItems().sorted() == ["gcp.olympsis-prod.MONGO_PASSWORD.latest", "gcpsrc.billing.billing-123.STRIPE_KEY.latest"])
+
+    // Another service naming the same source gets nothing: not fetched, not materialized.
+    let other = ServiceSpec(name: "api", program: .executable("/bin/sleep"), environment: ["S": "${secret:billing:STRIPE_KEY}"])
+    let before = fixture.fetcher.requests.count
+    #expect(await fixture.sync.refresh([other], force: true).isEmpty)
+    #expect(fixture.fetcher.requests.count == before)
+    #expect(try fixture.vault.missing(for: other).map(\.description) == ["billing:STRIPE_KEY"])
+    try SecretMaterializer(environment: fixture.env, vault: fixture.vault).materialize(other)
+    #expect(try SecretExec.loadSecrets(file: fixture.env.serviceSecretsFile(service: "api")).isEmpty)
+    try SecretMaterializer(environment: fixture.env, vault: fixture.vault).materialize(billingSpec)
+    #expect(try SecretExec.loadSecrets(file: fixture.env.serviceSecretsFile(service: "billing-api"))["billing:STRIPE_KEY"] == "sk_live")
+
+    let infos = await fixture.sync.infos(for: [billingSpec], node: NodeID("n"))
+    #expect(infos.map(\.name).contains("billing:projects/billing-123/secrets/STRIPE_KEY@latest"))
+}
+
+@Test func secretsStatusNamesAccountsAndProblemsButNoKeys() async throws {
+    let fixture = try SourcesFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.env.root) }
+    let launchd = MemoryLaunchd()
+    let reconciler = Reconciler(environment: fixture.env, store: fixture.store, launchd: launchd,
+                                vault: fixture.vault, gcp: fixture.sync, execPath: "/opt/tender/libexec/tenderd")
+    let controller = ProcessController(
+        environment: fixture.env, store: fixture.store, reconciler: reconciler,
+        releases: ReleaseManager(environment: fixture.env, store: fixture.store, reconciler: reconciler),
+        adoption: Adoption(environment: fixture.env, store: fixture.store, launchd: launchd),
+        cloud: fixture.cloud, vault: fixture.vault, gcp: fixture.sync)
+    try fixture.store.upsert(billingSpec)
+    fixture.fetcher.responses = [tokenResponse, secretRoute("mongo", version: 1)]
+    await fixture.sync.refresh([billingSpec])
+
+    let status = await controller.secretsStatus()
+    #expect(status.sources.map(\.name) == ["gcp", "billing"])
+    let gcp = status.sources[0]
+    #expect(gcp.account == "ci@p.iam.gserviceaccount.com" && gcp.problem == nil && gcp.isHealthy)
+    #expect(gcp.project == "olympsis-prod" && gcp.services == nil && gcp.usedBy == ["billing-api"] && gcp.references == 1)
+    let billing = status.sources[1]
+    #expect(billing.account == nil && billing.services == ["billing-api"] && billing.project == "billing-123")
+    #expect(billing.problem?.contains("--source billing") == true)
+    #expect(status.hasSource, "the default source is usable")
+    let encoded = String(decoding: try JSONEncoder().encode(status), as: UTF8.self)
+    #expect(!encoded.contains("PRIVATE KEY") && !encoded.contains("mongo\""))
+}

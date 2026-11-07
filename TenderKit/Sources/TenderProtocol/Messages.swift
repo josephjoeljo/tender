@@ -36,11 +36,14 @@ public struct Heartbeat: Codable, Sendable, Equatable {
     public var secretFetchErrors: Int
     /// Whole-machine resource use. Optional, so older peers still decode.
     public var stats: NodeStats?
+    /// The node's secrets sources and local secrets. Optional, so older peers still decode.
+    public var secrets: NodeSecretsStatus?
 
     public init(node: NodeID, nodeClock: Date, processes: [InstanceStatus], orphans: [String] = [],
                 previousRoundTrip: TimeInterval? = nil, spoolBacklog: Int = 0, spoolDropped: Int = 0,
-                secretFetchErrors: Int = 0, stats: NodeStats? = nil) {
+                secretFetchErrors: Int = 0, stats: NodeStats? = nil, secrets: NodeSecretsStatus? = nil) {
         self.stats = stats
+        self.secrets = secrets
         self.secretFetchErrors = secretFetchErrors
         self.previousRoundTrip = previousRoundTrip
         self.spoolBacklog = spoolBacklog

@@ -34,6 +34,7 @@ public struct URLSessionFetcher: HTTPFetching {
 
 public enum CloudError: Error, Equatable, CustomStringConvertible {
     case noCredentials
+    case noSourceCredentials(String)
     case invalidCredentials(String)
     case notConfigured(String)
     case http(status: Int, detail: String)
@@ -44,6 +45,8 @@ public enum CloudError: Error, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .noCredentials: "No GCP credentials on this node. Run `tender credentials set --file <key.json>`."
+        case .noSourceCredentials(let source):
+            "No credentials for the secrets source '\(source)' on this node. Run `tender credentials set --source \(source) --file <key.json>`."
         case .invalidCredentials(let detail): "Those GCP credentials aren't usable: \(detail)"
         case .notConfigured(let what): "\(what) isn't configured in cloud.json on this node."
         case .http(let status, let detail): "Google Cloud returned HTTP \(status): \(detail)"
@@ -161,11 +164,17 @@ public struct CloudConfig: Codable, Sendable, Equatable {
         }
     }
 
-    /// GCP Secret Manager, for `${secret:gcp:…}` references.
+    /// GCP Secret Manager, for `${secret:gcp:…}` references, and named sources for
+    /// `${secret:<source>:…}`.
     public struct Secrets: Codable, Sendable, Equatable {
         /// The project of references that name none, as in `${secret:gcp:NAME}`.
         public var project: String?
-        public init(project: String? = nil) { self.project = project }
+        /// Sources with their own credentials, by name.
+        public var sources: [String: SecretSourceConfig]?
+        public init(project: String? = nil, sources: [String: SecretSourceConfig]? = nil) {
+            self.project = project
+            self.sources = sources
+        }
     }
 
     public var offload: Offload?
@@ -454,9 +463,16 @@ public struct CloudServices: Sendable {
         self.fetcher = fetcher
     }
 
-    private func tokens() throws -> GoogleTokenProvider {
-        guard let json = try secrets.read(GoogleCredentials.secretName) else { throw CloudError.noCredentials }
-        return GoogleTokenProvider(credentials: try GoogleCredentials(json: json), fetcher: fetcher)
+    private func tokens(source: String? = nil) throws -> GoogleTokenProvider {
+        GoogleTokenProvider(credentials: try credentials(source: source), fetcher: fetcher)
+    }
+
+    /// The service account key of a source, nil for the default one.
+    public func credentials(source: String?) throws -> GoogleCredentials {
+        guard let json = try secrets.read(SecretSources.credentialsItem(source)) else {
+            throw source.map { CloudError.noSourceCredentials($0) } ?? CloudError.noCredentials
+        }
+        return try GoogleCredentials(json: json)
     }
 
     public func releaseSource() throws -> any ReleaseSource {
@@ -476,9 +492,10 @@ public struct CloudServices: Sendable {
         }
     }
 
-    public func secretSource() throws -> GCPSecretSource {
+    /// The client for a source, nil for the default one.
+    public func secretSource(_ source: String? = nil) throws -> GCPSecretSource {
         do {
-            return GCPSecretSource(tokens: try tokens(), fetcher: fetcher)
+            return GCPSecretSource(tokens: try tokens(source: source), fetcher: fetcher)
         } catch let error as CloudError {
             throw SecretFetchError.notConfigured(error.description)
         }
@@ -487,6 +504,12 @@ public struct CloudServices: Sendable {
     /// The project of `gcp:` references that name none.
     public func defaultSecretsProject() -> String? {
         CloudConfig.load(environment: environment).secrets?.project
+    }
+
+    /// The default source and the named ones, as `cloud.json` has them now.
+    public func secretSources() -> SecretSources {
+        let config = CloudConfig.load(environment: environment).secrets
+        return SecretSources(defaultProject: config?.project, named: config?.sources ?? [:])
     }
 
     /// Nil when offload isn't configured, which is a normal way to run.

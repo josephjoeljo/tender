@@ -68,3 +68,16 @@ private func local(_ name: String, on node: NodeID) -> SecretInfo {
         #expect(SecretCheck.warnings(for: items, in: SecretList(secrets: [])).isEmpty)
     }
 }
+
+@Test func namedSourceStatusesMatchOnlyTheirOwnSource() {
+    let items = [api(env: ["A": "${secret:billing:STRIPE_KEY}"])]
+    let list = SecretList(secrets: [], gcp: [
+        GCPSecretInfo(name: "projects/billing-123/secrets/STRIPE_KEY@latest", node: mini, cached: true, usedBy: ["api"]),
+    ])
+    #expect(SecretCheck.warnings(for: items, in: list).map(\.problem) == [.gcpUnchecked],
+            "the default source's copy isn't the named source's")
+    let named = SecretList(secrets: [], gcp: [
+        GCPSecretInfo(name: "billing:projects/billing-123/secrets/STRIPE_KEY@latest", node: mini, cached: true, usedBy: ["api"]),
+    ])
+    #expect(SecretCheck.warnings(for: items, in: named).isEmpty)
+}
