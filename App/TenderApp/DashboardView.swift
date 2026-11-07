@@ -500,7 +500,7 @@ struct LogsView: View {
             .padding(8)
             Divider()
             if !gaps.isEmpty {
-                Text(gaps.map { "\($0.node?.rawValue ?? "?") dropped \($0.droppedLines) lines" }.joined(separator: " · "))
+                Text(gaps.map { "\($0.node.map(model.name(of:)) ?? "?") dropped \($0.droppedLines) lines" }.joined(separator: " · "))
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .padding(4)
@@ -510,7 +510,7 @@ struct LogsView: View {
             }
             ScrollViewReader { proxy in
                 List(entries, id: \.rowID) { entry in
-                    Text(entry.formatted)
+                    Text(entry.formatted(nodeName: model.name(of: entry.node)))
                         .font(.caption)
                         .foregroundStyle(entry.stream == .err ? .red : .primary)
                         .textSelection(.enabled)
@@ -566,8 +566,9 @@ struct LogsView: View {
 extension LogEntry {
     var rowID: String { "\(node.rawValue)/\(seq)" }
 
-    var formatted: String {
-        "\(nodeTime.formatted(date: .omitted, time: .standard)) \(node)/\(service)[\(instance)] \(line)"
+    /// One line as the Logs page shows it, with the node's display name rather than its ID.
+    func formatted(nodeName: String) -> String {
+        "\(nodeTime.formatted(date: .omitted, time: .standard)) \(nodeName)/\(service)[\(instance)] \(line)"
     }
 }
 
