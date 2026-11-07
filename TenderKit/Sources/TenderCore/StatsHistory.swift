@@ -26,7 +26,11 @@ extension StatsSample {
     public static func downsampled(_ points: [Self], to limit: Int, over span: ClosedRange<Date>) -> [Self] {
         guard limit > 0 else { return [] }
         guard points.count > limit else { return points }
-        let slice = max(span.upperBound.timeIntervalSince(span.lowerBound) / Double(limit), 1)
+        // Heartbeats can be well under a second apart, so slices can be too: a floor here
+        // would merge such points into fewer than `limit`. All at one instant, by count.
+        let width = span.upperBound.timeIntervalSince(span.lowerBound)
+        guard width > 0 else { return downsampled(points, to: limit) }
+        let slice = width / Double(limit)
         var result: [Self] = []
         var run: [Self] = []
         var runSlice: Double?
