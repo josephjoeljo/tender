@@ -33,6 +33,12 @@ enum RowLayout {
     static let textLeading = artwork + spacing
     /// Hit area of the icon buttons at the end of a row, so they space evenly.
     static let button: CGFloat = 24
+    /// A "…" button at the end of a row on the Mac; on iOS the actions are the row's long-press menu.
+    #if os(macOS)
+    static let showsMenuButton = true
+    #else
+    static let showsMenuButton = false
+    #endif
 }
 
 /// An icon button at the end of a row, the same size as its neighbours.
@@ -148,15 +154,8 @@ struct NodeTrackRow: View {
     var remove: (() -> Void)?
     @Environment(\.isCompactWidth) private var isCompactWidth
 
-    /// On iOS a node's actions are its long-press menu, which leaves the row to its stats and chevron.
-    #if os(macOS)
-    private static let showsMenuButton = true
-    #else
-    private static let showsMenuButton = false
-    #endif
-
     var body: some View {
-        TrackRow(title: node.info.displayName, showsMenuButton: Self.showsMenuButton) {
+        TrackRow(title: node.info.displayName, showsMenuButton: RowLayout.showsMenuButton) {
             RowArtwork(symbol: node.info.isHead ? "crown.fill" : "desktopcomputer",
                        tint: node.info.isHead ? .orange : .blue, active: node.up)
                 .help(node.info.isHead ? "Head" : "Worker")
@@ -270,7 +269,8 @@ struct ProcessTrackRow: View {
 
     var body: some View {
         let kind = process.resolvedKind
-        TrackRow(title: showsInstance ? "\(process.service) #\(process.instance)" : process.service) {
+        TrackRow(title: showsInstance ? "\(process.service) #\(process.instance)" : process.service,
+                 showsMenuButton: RowLayout.showsMenuButton) {
             RowArtwork(symbol: kind.symbol, tint: kind.tint, active: process.state == .running)
                 .help(kind.title)
         } badges: {
