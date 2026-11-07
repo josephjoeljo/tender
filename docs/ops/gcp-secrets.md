@@ -38,6 +38,29 @@ while GCP or the head is unreachable.
    {"secrets": {"project": "olympsis-prod"}}
    ```
 
+## Check that it's hooked up
+
+`tender credentials set` checks only that the file is a service account key (and prints its
+`client_email`). It doesn't contact Google, so a revoked key, a disabled API or a missing IAM
+binding shows up the first time a secret is fetched. To check:
+
+1. Reference the secret from a service and apply (or `tender start`). If the first fetch
+   fails, the start fails and the error names the secret and the missing role. `tender apply`
+   also prints a `warning:` for every reference that doesn't resolve.
+2. `tender secret list` (add `--node <n>` through a head) shows a `GCP SECRET` table. `STATUS`
+   is `ok` when the node holds the value, `stale: <error>` when a refresh failed and instances
+   are using the cache, and `not fetched: <error>` when instances can't start. `CHECKED` is
+   the last successful fetch since the daemon started.
+3. `tender secret list --json | jq '.gcp[] | select(.fetchError != null)'` gives the same
+   for scripts, and the head's `/metrics` counts failures in
+   `tender_secret_fetch_errors_total{node}`.
+
+Common errors: HTTP 403 means the node's service account lacks
+`roles/secretmanager.secretAccessor` on that secret, or the API isn't enabled. HTTP 404 means
+a wrong secret, version or project. "No GCP credentials on this node" means
+`tender credentials set` hasn't been run on that node: credentials are per node, set
+through its local socket, so run it on the node itself (over SSH).
+
 ## Reference syntax
 
 | Reference | Means |

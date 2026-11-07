@@ -171,6 +171,8 @@ tender export > services.yaml             # what runs now, as a file that applie
 
 Applying the same file twice changes nothing and restarts nothing. Without `--prune`, services the file doesn't list are left alone; with it, only on the nodes the file names (an item's `node:`, or the head for items without one), so a file for one node can't empty another. `--prune-all` prunes every node, and the diff starts with the nodes it prunes. Unknown keys are errors, inline `env` wins over `env_file`, and `--yes` (or a stdin that isn't a terminal) skips the question. Through a head, each node applies its part; a node that fails is reported and the others go ahead. Use one file per environment (`services.prod.yaml`, `services.staging.yaml`).
 
+After the diff (and on `--dry-run`), `apply` checks the file's `${secret:…}` and `secret_files` references against what each node holds, and prints a `warning:` on stderr for each one that won't resolve. That covers a local secret that isn't set on the node, a GCP secret that couldn't be fetched (instances exit 78), and one that couldn't be refreshed (instances start from the cached value). A GCP reference the node hasn't fetched yet, such as a new service's on a dry run, gets a `note:` instead, because only a start fetches it. `tender secret list` shows the same state.
+
 ### Ship a new binary
 
 Tender watches a folder for each service: `/opt/tender/bin/<service>/` in production and `~/Library/Application Support/Tender/bin/<service>/` in dev mode. Drop a new binary there, and Tender copies it to a new release. It uses `<service>/<service>` if that file exists, and otherwise the newest file in the folder.
