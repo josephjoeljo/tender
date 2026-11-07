@@ -51,7 +51,9 @@ struct AddNodeSheet: View {
             }
         }
         .padding(20)
+        #if os(macOS)
         .frame(width: 520)
+        #endif
         .onAppear { known = Set(model.nodes.map(\.id)) }
     }
 
@@ -75,8 +77,7 @@ private struct CommandBox: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(command, forType: .string)
+                Clipboard.copy(command)
                 copied = true
             } label: {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")

@@ -154,6 +154,9 @@ App/
   TenderApp.xcodeproj     Xcode project (objectVersion 77: TenderApp/ is a synchronized folder,
                           so new files are picked up automatically; Info.plist is generated)
   TenderApp/              SwiftUI app: MenuBarExtra (glance) + Window "dashboard"
+                          One multiplatform target (macOS, iOS, iPadOS) sharing every view. The Mac
+                          adds the menu bar; iPhone/iPad get the dashboard as an adaptive tab
+                          bar/sidebar. Platform differences live in Platform.swift or `#if os(macOS)`.
 ```
 
 Layering rule: a target only imports targets in its own layer or below. The app

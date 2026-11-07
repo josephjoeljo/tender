@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 @main
@@ -20,6 +19,7 @@ struct TenderApp: App {
     }
 
     var body: some Scene {
+        #if os(macOS)
         MenuBarExtra {
             MenuBarView(model: model)
                 .font(.body)
@@ -49,10 +49,36 @@ struct TenderApp: App {
             SettingsView(model: model)
                 .font(.body)
         }
+        #else
+        WindowGroup {
+            DashboardView(model: model)
+                #if DEBUG
+                .preferredColorScheme(DebugLaunch.colorScheme)
+                #endif
+        }
+
+        // iPad: a process dragged or opened into a window of its own.
+        WindowGroup("Process", id: "process", for: ProcessRef.self) { $ref in
+            NavigationStack { ProcessWindow(model: model, ref: ref) }
+        }
+        #endif
     }
 }
 
 #if DEBUG
+enum DebugLaunch {
+    /// TENDER_APP_APPEARANCE=dark|light overrides the system appearance.
+    static var colorScheme: ColorScheme? {
+        switch ProcessInfo.processInfo.environment["TENDER_APP_APPEARANCE"] {
+        case "dark": .dark
+        case "light": .light
+        default: nil
+        }
+    }
+}
+#endif
+
+#if DEBUG && os(macOS)
 /// TENDER_APP_OPEN=nodes|processes|logs|releases|settings opens the dashboard on that page at
 /// launch, so a build can be looked at without clicking through the menu bar; `process` pops
 /// out the first process instead.

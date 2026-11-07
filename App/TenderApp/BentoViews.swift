@@ -109,10 +109,10 @@ struct NodeBentoCard: View {
         }
         .saturation(node.up ? 1 : 0.4)
         .contextMenu {
-            Button("Copy Name") { copyToPasteboard(node.info.displayName) }
-            Button("Copy ID") { copyToPasteboard(node.info.id.rawValue) }
+            Button("Copy Name") { Clipboard.copy(node.info.displayName) }
+            Button("Copy ID") { Clipboard.copy(node.info.id.rawValue) }
             if let address = node.info.address {
-                Button("Copy Address") { copyToPasteboard(address) }
+                Button("Copy Address") { Clipboard.copy(address) }
             }
             if let remove, !node.info.isHead {
                 Divider()
@@ -284,11 +284,6 @@ private struct BentoMiniTile: View {
     }
 }
 
-private func copyToPasteboard(_ text: String) {
-    NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(text, forType: .string)
-}
-
 /// A small icon that copies a node's ID, and turns into a checkmark for a moment once it has.
 private struct CopyIDButton: View {
     let id: String
@@ -296,7 +291,7 @@ private struct CopyIDButton: View {
 
     var body: some View {
         Button {
-            copyToPasteboard(id)
+            Clipboard.copy(id)
             copied = true
             Task {
                 try? await Task.sleep(for: .seconds(1.5))
