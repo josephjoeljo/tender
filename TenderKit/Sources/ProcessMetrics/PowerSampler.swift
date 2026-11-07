@@ -100,13 +100,17 @@ final class PowerSampler {
         return Self.reading(channels)
     }
 
-    /// The reading for one interval's channels. Nil when no channel used any energy: a
-    /// running Mac always does, so that means the counters aren't moving (macOS 27 hands
-    /// some callers a frozen snapshot), and "0 W" would be a false reading.
+    /// The reading for one interval's channels. A running Mac's CPU always uses energy, so
+    /// a CPU at exactly 0 means its counters aren't moving: macOS 27 hands some callers a
+    /// frozen snapshot of them while the GPU's keep counting. Every view shows the total,
+    /// which means nothing without the CPU, so that's no reading rather than a false one.
+    /// DRAM at 0 is frozen the same way and left out. The GPU and Neural Engine can idle at 0.
     static func reading(_ channels: [(name: String, watts: Double)]) -> NodePower? {
-        guard channels.contains(where: { $0.watts > 0 }) else { return nil }
         var power = NodePower()
         for channel in channels { add(channel.watts, channel: channel.name, to: &power) }
+        if power.cpu == 0 { power.cpu = nil }
+        if power.dram == 0 { power.dram = nil }
+        guard power.stats.cpu != nil else { return nil }
         return power
     }
 
