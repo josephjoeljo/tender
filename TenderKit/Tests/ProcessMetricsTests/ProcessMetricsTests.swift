@@ -128,9 +128,11 @@ import TenderCore
     guard let sampler = PowerSampler() else { return }
     #expect(sampler.sample() == nil) // the first reading is only a baseline
     try await Task.sleep(for: .milliseconds(300))
-    // Nil when the counters don't move for this process, as on macOS 27: no reading, not 0 W.
+    // On macOS 27 the CPU's counters can be frozen for this process: then there's no
+    // reading, never 0 W.
     guard let power = sampler.sample() else { return }
     #expect((power.stats.cpu ?? 0) > 0)
+    #expect(power.stats.dram.map { $0 > 0 } ?? true)
 }
 
 @Test func frozenCountersAreNoReading() {
@@ -138,6 +140,11 @@ import TenderCore
     #expect(PowerSampler.reading([]) == nil)
     let power = PowerSampler.reading([("CPU Energy", 2.5), ("GPU Energy", 0), ("DRAM0", 0.5)])
     #expect(power?.stats.cpu == 2.5 && power?.stats.total == 3.0)
+    // What macOS 27.2 gives an unprivileged caller: only the GPU's counter moves.
+    #expect(PowerSampler.reading([("CPU Energy", 0), ("EACC_CPU", 0), ("PACC0_CPU", 0), ("GPU Energy", 0.18), ("DRAM0", 0)]) == nil)
+    // Per-cluster CPU channels count when there's no total; frozen DRAM is left out.
+    let clusters = PowerSampler.reading([("EACC_CPU", 0.5), ("PACC0_CPU", 2.0), ("GPU0", 0), ("DRAM0", 0)])
+    #expect(clusters?.stats.cpu == 2.5 && clusters?.stats.dram == nil && clusters?.stats.gpu == 0)
 }
 
 @Test func treeUsageAddsUp() {

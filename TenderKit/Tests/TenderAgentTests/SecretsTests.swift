@@ -465,7 +465,20 @@ private let builtTenderd: String? = {
         .compactMap { image in image.range(of: ".xctest/").map { String(image[..<$0.lowerBound]) + ".xctest" } }
         .map { URL(filePath: $0).deletingLastPathComponent().appending(path: "tenderd").path(percentEncoded: false) }
     let candidates = besideTests + [package.appending(path: ".build/debug/tenderd").path(percentEncoded: false)]
-    return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    guard let built = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return nil }
+    // A job launchd starts on its own has no app to inherit privacy permissions from, so
+    // if the build lives in a protected folder (~/Documents, ~/Desktop), dyld's open of
+    // the binary waits on a TCC check that never comes and the job hangs before main.
+    // Run a copy from /private/tmp instead, as production runs it from /opt/tender.
+    let directory = URL(filePath: "/private/tmp/tender-test-bin-\(UUID().uuidString.prefix(8))")
+    let copy = directory.appending(path: "tenderd")
+    do {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(filePath: built), to: copy)
+    } catch {
+        return nil
+    }
+    return copy.path(percentEncoded: false)
 }()
 
 @Test(.enabled(if: builtTenderd != nil, "needs a built tenderd"))
@@ -484,6 +497,7 @@ func aRealJobSeesItsSecretThroughTenderdExec() async throws {
         try? cleanup.run()
         cleanup.waitUntilExit()
         try? FileManager.default.removeItem(at: env.root)
+        if let builtTenderd { try? FileManager.default.removeItem(at: URL(filePath: builtTenderd).deletingLastPathComponent()) }
     }
     let output = env.root.appending(path: "seen.txt")
     let files = try makeFilesDirectory()
@@ -499,8 +513,8 @@ func aRealJobSeesItsSecretThroughTenderdExec() async throws {
     try vault.set(SecretName(service: "echo", name: "KEY"), value: Data("file-first".utf8))
     #expect(try await reconciler.reconcile().failures.isEmpty)
 
-    // A job's first launch of a freshly built tenderd can take seconds while the system
-    // checks the new binary, and more on a loaded machine, so each step gets 30.
+    // Each step gets 30 s: a job's restart goes through launchd's throttle, and a loaded
+    // machine is slow to spawn.
     func seen(_ expected: String) async throws -> Bool {
         for _ in 0..<300 {
             if (try? String(contentsOf: output, encoding: .utf8)) == expected { return true }
@@ -511,7 +525,18 @@ func aRealJobSeesItsSecretThroughTenderdExec() async throws {
     /// What the job said, for a failure message.
     func jobStderr() -> String {
         let log = env.stderrLog(service: "echo", instance: 0)
-        return (try? String(contentsOf: log, encoding: .utf8)).map { "stderr: \($0.suffix(500))" } ?? "no stderr at \(log.path)"
+        let stderr = (try? String(contentsOf: log, encoding: .utf8)).map { "stderr: \($0.suffix(500))" } ?? "no stderr at \(log.path)"
+        let print = Process()
+        print.executableURL = URL(filePath: "/bin/launchctl")
+        print.arguments = ["print", "\(launchctl.domain.target)/\(label)"]
+        let pipe = Pipe()
+        print.standardOutput = pipe
+        print.standardError = pipe
+        try? print.run()
+        print.waitUntilExit()
+        let state = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let plist = (try? String(contentsOf: env.plistPath(label: label), encoding: .utf8)) ?? "no plist"
+        return "\(stderr)\nlaunchctl print:\n\(state.prefix(3000))\nplist:\n\(plist.prefix(2000))"
     }
     let first = try await seen("t=first|file-first")
     #expect(first, "\(jobStderr())")
